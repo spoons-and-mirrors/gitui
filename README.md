@@ -5,7 +5,7 @@ A focused Rust/Ratatui interface for the two Git views that matter most during e
 - A collapsible worktree tree with per-file added/deleted line counts for inspecting, staging, unstaging, and committing changes.
 - A switchable repository file tree, including Git-ignored files, with read-only, syntax-colored previews.
 - A resizable current-branch history shelf with HEAD, branch, remote, and tag decorations; selecting a commit shows its patch.
-- A repository Actions menu for pushing, fetching, pulling with rebase, and running non-interactive Git commands with captured output.
+- A repository Actions menu for committing, pushing, fetching, pulling with rebase, and running non-interactive Git commands with captured output.
 - An all-refs commit graph showing branches, remotes, tags, authors, dates, and hashes.
 - Source-aware diffs with line numbers, syntax color, and tinted additions, deletions, and hunk headers.
 - Nonblocking worktree refresh when files, the index, branches, or HEAD change outside GitUI.

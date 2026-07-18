@@ -1074,6 +1074,12 @@ impl App {
 
     fn activate_action(&mut self) {
         let action = self.actions.selected();
+        if action == ActionId::Commit {
+            self.view = View::Changes;
+            self.set_left_pane(LeftPane::Worktree);
+            self.mode = Mode::Commit;
+            return;
+        }
         if action == ActionId::Custom {
             self.open_git_command();
             return;
@@ -1582,6 +1588,13 @@ mod tests {
         let root = directory.path();
         initialize_repository(root);
         let mut app = App::new(root.to_path_buf());
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Commit);
+        assert_eq!(app.view, View::Changes);
+        assert_eq!(app.changes.pane, LeftPane::Worktree);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
         app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
         assert_eq!(app.mode, Mode::Command);

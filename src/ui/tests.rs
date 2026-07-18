@@ -38,6 +38,7 @@ fn renders_every_primary_surface() {
     let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(app.regions.worktree.unwrap().x, 0);
+    assert_eq!(app.regions.worktree.unwrap().y, 1);
     assert_eq!(app.regions.diff.unwrap().right(), 120);
     assert_eq!(app.regions.changes.unwrap().y, 35);
     assert_eq!(app.regions.help.unwrap().y, 35);
@@ -395,14 +396,15 @@ fn renders_every_primary_surface() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(action_screen.contains("Pull --rebase"));
+    assert!(action_screen.contains("Commit..."));
     assert!(action_screen.contains("Run Git command"));
     let action_list = app.regions.action_list.unwrap();
     app.handle_mouse(mouse(
         MouseEventKind::Moved,
         action_list.x + 2,
-        action_list.y + 3,
+        action_list.y + 4,
     ));
-    assert_eq!(app.actions.selection, 3);
+    assert_eq!(app.actions.selection, 4);
     let background_before_command = terminal.backend().buffer().content[0].clone();
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(app.mode, Mode::Command);

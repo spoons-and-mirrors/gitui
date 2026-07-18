@@ -2,6 +2,7 @@ use crate::git::CommandOutput;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ActionId {
+    Commit,
     Push,
     Fetch,
     PullRebase,
@@ -15,7 +16,12 @@ pub(crate) struct ActionItem {
     pub(crate) detail: &'static str,
 }
 
-pub(crate) const ACTION_ITEMS: [ActionItem; 4] = [
+pub(crate) const ACTION_ITEMS: [ActionItem; 5] = [
+    ActionItem {
+        id: ActionId::Commit,
+        label: "Commit...",
+        detail: "open editor",
+    },
     ActionItem {
         id: ActionId::Push,
         label: "Push",
@@ -163,6 +169,7 @@ impl ActionsState {
 
 pub(crate) fn action_command(action: ActionId) -> Option<(&'static str, Vec<String>)> {
     match action {
+        ActionId::Commit => None,
         ActionId::Push => Some(("Push", vec!["push".to_owned()])),
         ActionId::Fetch => Some((
             "Fetch",
