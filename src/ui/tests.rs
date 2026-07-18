@@ -1,7 +1,7 @@
 use std::{fs, process::Command};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::{Terminal, backend::TestBackend};
+use ratatui::{Terminal, backend::TestBackend, style::Modifier};
 
 use crate::app::{App, LeftPane, Mode, Settings, View};
 
@@ -39,6 +39,13 @@ fn renders_every_primary_surface() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(app.regions.worktree.unwrap().x, 0);
     assert_eq!(app.regions.diff.unwrap().right(), 120);
+    assert_eq!(app.regions.changes.unwrap().y, 35);
+    assert_eq!(app.regions.help.unwrap().y, 35);
+    let header: String = terminal.backend().buffer().content[..120]
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(header.trim_end().ends_with("main"));
 
     let files_tab = app.regions.files_tab.unwrap();
     app.handle_mouse(mouse(
@@ -50,7 +57,24 @@ fn renders_every_primary_surface() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.regions.commit.is_none());
     assert!(app.regions.history_list.is_none());
-    let explorer = app.regions.explorer_list.unwrap();
+    let mut explorer = app.regions.explorer_list.unwrap();
+    let directory_row = app
+        .changes
+        .explorer_rows()
+        .iter()
+        .position(|row| row.directory_path.as_deref() == Some("fixtures"))
+        .unwrap();
+    assert_eq!(
+        app.changes.explorer_rows()[directory_row].directory_expanded,
+        Some(false)
+    );
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        explorer.x + 2,
+        explorer.y + directory_row as u16,
+    ));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    explorer = app.regions.explorer_list.unwrap();
     let explorer_rows = app.changes.explorer_rows();
     let repo = app.repository().unwrap();
     let selected_file_row = explorer_rows
@@ -245,24 +269,27 @@ fn renders_every_primary_surface() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let history_splitter = app.regions.history_splitter.unwrap();
     let commit = app.regions.commit.unwrap();
+    let actions = app.regions.actions.unwrap();
     let worktree = app.regions.worktree_list.unwrap();
-    assert!(commit.bottom() <= worktree.y);
+    assert_eq!(actions.y, commit.bottom());
+    assert_eq!(actions.right(), commit.right());
+    assert_eq!(actions.bottom(), worktree.y);
     assert!(commit.bottom() <= history_splitter.y);
     let history_bounds = app.regions.history_bounds.unwrap();
     let history_target = history_bounds.bottom().saturating_sub(9);
     app.handle_mouse(mouse(
         MouseEventKind::Down(MouseButton::Left),
-        history_splitter.x + 2,
+        history_splitter.right().saturating_sub(2),
         history_splitter.y,
     ));
     app.handle_mouse(mouse(
         MouseEventKind::Drag(MouseButton::Left),
-        history_splitter.x + 2,
+        history_splitter.right().saturating_sub(2),
         history_target,
     ));
     app.handle_mouse(mouse(
         MouseEventKind::Up(MouseButton::Left),
-        history_splitter.x + 2,
+        history_splitter.right().saturating_sub(2),
         history_target,
     ));
     assert_eq!(app.settings.history_height, 9);
@@ -335,6 +362,9 @@ fn renders_every_primary_surface() {
         .collect();
     assert!(changes_screen.contains("Write a commit message"));
     assert!(changes_screen.contains("HISTORY"));
+    assert!(changes_screen.contains("ACTIONS"));
+    assert!(app.regions.actions.is_some());
+    assert!(app.regions.actions.unwrap().bottom() <= app.regions.worktree_list.unwrap().y);
     assert!(changes_screen.contains("HEAD"));
     let history_oid: String = app.repository().unwrap().history[0]
         .oid
@@ -349,6 +379,62 @@ fn renders_every_primary_surface() {
     assert!(!changes_screen.contains("[Commit]"));
     assert!(!changes_screen.contains("COMMIT"));
     assert!(!changes_screen.contains('┌'));
+    let actions = app.regions.actions.unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        actions.x + 2,
+        actions.y,
+    ));
+    assert_eq!(app.mode, Mode::ActionMenu);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let action_screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(action_screen.contains("Pull --rebase"));
+    assert!(action_screen.contains("Run Git command"));
+    let action_list = app.regions.action_list.unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Moved,
+        action_list.x + 2,
+        action_list.y + 3,
+    ));
+    assert_eq!(app.actions.selection, 3);
+    let background_before_command = terminal.backend().buffer().content[0].clone();
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::Command);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let command_screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(command_screen.contains("GIT COMMAND"));
+    assert!(command_screen.contains("Shell pipes"));
+    assert!(app.regions.command_output.is_some());
+    let command_overlay = app.regions.command_overlay.unwrap();
+    let command_output = app.regions.command_output.unwrap();
+    assert_eq!(
+        command_output.bottom().saturating_add(1),
+        command_overlay.bottom().saturating_sub(5)
+    );
+    let buffer = terminal.backend().buffer();
+    let width = usize::from(buffer.area.width);
+    let background = &buffer.content[0];
+    let modal =
+        &buffer.content[usize::from(command_overlay.y) * width + usize::from(command_overlay.x)];
+    assert!(background.modifier.contains(Modifier::DIM));
+    assert_eq!(background.fg, background_before_command.fg);
+    assert_eq!(background.bg, background_before_command.bg);
+    assert!(!modal.modifier.contains(Modifier::DIM));
+    assert_eq!(modal.bg, super::palette().surface_alt);
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::Normal);
     let commit = app.regions.commit.unwrap();
     app.handle_mouse(mouse(
         MouseEventKind::Down(MouseButton::Left),

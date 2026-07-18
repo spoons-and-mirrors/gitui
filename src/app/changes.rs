@@ -39,6 +39,7 @@ pub(super) struct ChangesSelection {
 
 impl ChangesState {
     pub(super) fn new(repo: Option<&RepositoryData>) -> Self {
+        let collapsed_explorer_directories = default_explorer_collapsed_directories(repo);
         let mut state = Self {
             pane: LeftPane::Worktree,
             worktree_state: ListState::default(),
@@ -51,7 +52,7 @@ impl ChangesState {
             diff_wrap: false,
             history_focused: false,
             collapsed_directories: HashSet::new(),
-            collapsed_explorer_directories: HashSet::new(),
+            collapsed_explorer_directories,
             explorer_rows_cache: Vec::new(),
         };
         state.rebuild_explorer_rows(repo);
@@ -70,7 +71,7 @@ impl ChangesState {
         self.diff_scroll = 0;
         self.history_focused = false;
         self.collapsed_directories.clear();
-        self.collapsed_explorer_directories.clear();
+        self.collapsed_explorer_directories = default_explorer_collapsed_directories(repo);
         self.rebuild_explorer_rows(repo);
         self.select_initial_rows(repo);
         self.refresh_diff(repo);
@@ -130,7 +131,7 @@ impl ChangesState {
                     .iter()
                     .position(|row| row.directory_path.as_ref() == Some(directory))
             })
-            .or_else(|| self.first_explorer_file_row());
+            .or_else(|| self.initial_explorer_row());
         self.explorer_state.select(explorer_row);
         self.refresh_diff(Some(repo));
     }
@@ -177,7 +178,7 @@ impl ChangesState {
         self.pane = pane;
         self.clear_history_selection();
         if pane == LeftPane::Files && self.explorer_state.selected().is_none() {
-            self.explorer_state.select(self.first_explorer_file_row());
+            self.explorer_state.select(self.initial_explorer_row());
         }
         self.refresh_diff(repo);
         true
@@ -380,7 +381,6 @@ impl ChangesState {
 
     pub(super) fn toggle_wrap(&mut self) -> bool {
         self.diff_wrap = !self.diff_wrap;
-        self.diff_scroll = 0;
         self.diff_wrap
     }
 
@@ -588,7 +588,7 @@ impl ChangesState {
         self.worktree_state
             .select(repo.and_then(|repo| self.first_change_row(repo)));
         self.history_state.select(None);
-        self.explorer_state.select(self.first_explorer_file_row());
+        self.explorer_state.select(self.initial_explorer_row());
     }
 
     fn select_explorer_directory(&mut self, path: &str) {
@@ -609,6 +609,11 @@ impl ChangesState {
         self.explorer_rows()
             .iter()
             .position(|row| row.file_index.is_some())
+    }
+
+    fn initial_explorer_row(&self) -> Option<usize> {
+        self.first_explorer_file_row()
+            .or_else(|| (!self.explorer_rows().is_empty()).then_some(0))
     }
 
     fn select_directory(&mut self, repo: &RepositoryData, path: &str) {
@@ -636,6 +641,15 @@ impl ChangesState {
             .iter()
             .rposition(|row| row.change_index.is_some())
     }
+}
+
+fn default_explorer_collapsed_directories(repo: Option<&RepositoryData>) -> HashSet<String> {
+    repo.map_or_else(HashSet::new, |repo| {
+        build_file_tree(&repo.files, &HashSet::new())
+            .into_iter()
+            .filter_map(|row| row.directory_path)
+            .collect()
+    })
 }
 
 fn move_list(state: &mut ListState, len: usize, delta: isize) {
@@ -666,5 +680,65 @@ fn ensure_selection_visible(scroll: &mut usize, selected: Option<usize>, viewpor
         *scroll = selected;
     } else if selected >= scroll.saturating_add(viewport) {
         *scroll = selected.saturating_add(1).saturating_sub(viewport);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::git::Change;
+
+    use super::*;
+
+    #[test]
+    fn starts_files_collapsed_but_keeps_worktree_expanded() {
+        let repo = RepositoryData {
+            root: PathBuf::new(),
+            branch: "main".to_owned(),
+            changes: vec![Change {
+                path: "src/main.rs".to_owned(),
+                original_path: None,
+                code: 'M',
+                staged: false,
+                additions: 0,
+                deletions: 0,
+            }],
+            files: vec![
+                "src/app/mod.rs".to_owned(),
+                "src/main.rs".to_owned(),
+                "README.md".to_owned(),
+            ],
+            history: Vec::new(),
+            commits: Vec::new(),
+        };
+
+        let mut state = ChangesState::new(Some(&repo));
+        assert!(state.collapsed_directories.is_empty());
+        assert_eq!(
+            state.collapsed_explorer_directories,
+            HashSet::from(["src".to_owned(), "src/app".to_owned()])
+        );
+        assert_eq!(
+            state
+                .explorer_rows()
+                .iter()
+                .map(|row| row.label.as_str())
+                .collect::<Vec<_>>(),
+            ["src", "README.md"]
+        );
+        assert_eq!(state.explorer_state.selected(), Some(1));
+
+        state.explorer_state.select(Some(0));
+        state.expand_or_descend_explorer(Some(&repo));
+        assert_eq!(
+            state
+                .explorer_rows()
+                .iter()
+                .map(|row| row.label.as_str())
+                .collect::<Vec<_>>(),
+            ["src", "app", "main.rs", "README.md"]
+        );
+        assert_eq!(state.explorer_rows()[1].directory_expanded, Some(false));
     }
 }

@@ -4,7 +4,7 @@ use std::{
     hash::{Hash, Hasher},
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
     time::UNIX_EPOCH,
 };
 
@@ -49,8 +49,10 @@ pub struct GraphCell {
 
 #[derive(Debug)]
 pub struct CommandOutput {
+    pub stdout: String,
     pub stderr: String,
     pub success: bool,
+    pub exit_code: Option<i32>,
 }
 
 pub fn discover(path: &Path) -> Result<PathBuf> {
@@ -196,6 +198,14 @@ pub fn commit(root: &Path, message: &str) -> Result<CommandOutput> {
 
 pub fn fetch(root: &Path) -> Result<CommandOutput> {
     let output = run(root, &["fetch", "--all", "--prune"])?;
+    Ok(command_output(output))
+}
+
+pub fn run_command(root: &Path, args: &[String]) -> Result<CommandOutput> {
+    let output = base_command(root)
+        .args(args)
+        .output()
+        .with_context(|| format!("could not run git {}", args.join(" ")))?;
     Ok(command_output(output))
 }
 
@@ -676,17 +686,26 @@ fn glyph(mask: u8) -> char {
 }
 
 fn run(root: &Path, args: &[&str]) -> Result<Output> {
-    Command::new("git")
+    base_command(root)
+        .args(args)
+        .output()
+        .with_context(|| format!("could not run git {}", args.join(" ")))
+}
+
+fn base_command(root: &Path) -> Command {
+    let mut command = Command::new("git");
+    command
         .arg("-C")
         .arg(root)
         .args(["--no-pager", "--no-optional-locks"])
-        .args(args)
         .env("GIT_PAGER", "cat")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_ASKPASS", "false")
         .env("SSH_ASKPASS", "false")
-        .output()
-        .with_context(|| format!("could not run git {}", args.join(" ")))
+        .env("GIT_EDITOR", "false")
+        .env("GIT_SEQUENCE_EDITOR", "false")
+        .stdin(Stdio::null());
+    command
 }
 
 fn run_ok(root: &Path, args: &[&str]) -> Result<()> {
@@ -708,8 +727,10 @@ fn clean_stderr(output: &Output) -> String {
 
 fn command_output(output: Output) -> CommandOutput {
     CommandOutput {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         success: output.status.success(),
+        exit_code: output.status.code(),
     }
 }
 

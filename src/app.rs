@@ -1,6 +1,8 @@
+mod actions;
 mod changes;
 mod repository_picker;
 
+pub(crate) use actions::{ACTION_ITEMS, ActionsState, CommandStatus};
 pub use changes::{ChangesState, LeftPane};
 pub use repository_picker::{PickerAction, PickerEntry, RepositoryPicker};
 
@@ -21,6 +23,7 @@ use crate::{
     repository_session::{RepositorySession, WorkerCompletion},
 };
 
+use actions::{ActionId, action_command, display_git_command, parse_git_args};
 use repository_picker::PickerCommand;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +39,8 @@ pub enum Mode {
     Picker,
     Settings,
     Help,
+    ActionMenu,
+    Command,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +70,7 @@ pub struct Regions {
     pub repository: Option<Rect>,
     pub settings: Option<Rect>,
     pub help: Option<Rect>,
+    pub actions: Option<Rect>,
     pub worktree: Option<Rect>,
     pub worktree_tab: Option<Rect>,
     pub files_tab: Option<Rect>,
@@ -86,6 +92,10 @@ pub struct Regions {
     pub picker_list: Option<Rect>,
     pub picker_overlay: Option<Rect>,
     pub settings_overlay: Option<Rect>,
+    pub action_menu: Option<Rect>,
+    pub action_list: Option<Rect>,
+    pub command_overlay: Option<Rect>,
+    pub command_output: Option<Rect>,
     pub auto_fetch: Option<Rect>,
     pub fetch_interval: Option<Rect>,
     pub fetch_interval_down: Option<Rect>,
@@ -106,6 +116,7 @@ pub struct App {
     pub dragging_diff_scrollbar: bool,
     diff_scroll_drag_offset: u16,
     pub picker: RepositoryPicker,
+    pub(crate) actions: ActionsState,
     pub settings: Settings,
     pub settings_selection: usize,
     pub notice: Option<String>,
@@ -152,6 +163,7 @@ impl App {
             dragging_diff_scrollbar: false,
             diff_scroll_drag_offset: 0,
             picker: RepositoryPicker::new(start),
+            actions: ActionsState::default(),
             settings,
             settings_selection: 0,
             notice: None,
@@ -183,6 +195,8 @@ impl App {
             Mode::Commit => self.handle_commit_input(key),
             Mode::Picker => self.handle_picker(key),
             Mode::Settings => self.handle_settings(key),
+            Mode::ActionMenu => self.handle_action_menu(key),
+            Mode::Command => self.handle_command(key),
             Mode::Help => {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
                     self.mode = Mode::Normal;
@@ -195,11 +209,25 @@ impl App {
         match self.mode {
             Mode::Commit => self.commit_message.push_str(text),
             Mode::Picker => self.picker.paste(text),
+            Mode::Command if self.actions.status != CommandStatus::Running => {
+                self.actions.input.push_str(text);
+                if self.actions.status == CommandStatus::Input {
+                    self.actions.stderr.clear();
+                }
+            }
             _ => {}
         }
     }
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if self.mode == Mode::ActionMenu {
+            self.handle_action_mouse(mouse);
+            return;
+        }
+        if self.mode == Mode::Command {
+            self.handle_command_mouse(mouse);
+            return;
+        }
         if self.mode == Mode::Picker {
             self.handle_picker_mouse(mouse);
             return;
@@ -280,6 +308,14 @@ impl App {
             _ => return,
         }
 
+        if self
+            .regions
+            .actions
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.open_actions();
+            return;
+        }
         if self
             .regions
             .splitter
@@ -414,6 +450,53 @@ impl App {
             self.view = View::Graph;
         } else if self.regions.commit.is_some_and(|rect| rect.contains(point)) {
             self.mode = Mode::Commit;
+        }
+    }
+
+    fn handle_action_mouse(&mut self, mouse: MouseEvent) {
+        let point = Position::new(mouse.column, mouse.row);
+        match mouse.kind {
+            MouseEventKind::ScrollDown => self.actions.move_selection(1),
+            MouseEventKind::ScrollUp => self.actions.move_selection(-1),
+            MouseEventKind::Moved => {
+                if let Some(index) = self.action_at(point) {
+                    self.actions.selection = index;
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if self
+                    .regions
+                    .actions
+                    .is_some_and(|rect| rect.contains(point))
+                {
+                    self.mode = Mode::Normal;
+                    return;
+                }
+                let Some(index) = self.action_at(point) else {
+                    self.mode = Mode::Normal;
+                    return;
+                };
+                self.actions.selection = index;
+                self.activate_action();
+            }
+            _ => {}
+        }
+    }
+
+    fn action_at(&self, point: Position) -> Option<usize> {
+        let list = self
+            .regions
+            .action_list
+            .filter(|rect| rect.contains(point))?;
+        let index = usize::from(point.y.saturating_sub(list.y));
+        (index < ACTION_ITEMS.len()).then_some(index)
+    }
+
+    fn handle_command_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::ScrollDown => self.actions.scroll_by(3),
+            MouseEventKind::ScrollUp => self.actions.scroll_by(-3),
+            _ => {}
         }
     }
 
@@ -694,6 +777,25 @@ impl App {
                     }
                     Err(error) => self.notice = Some(error),
                 },
+                WorkerCompletion::Command(done) => match done.result {
+                    Ok(output) => {
+                        let success = output.success;
+                        let error = first_error(&output.stderr, "Git command failed");
+                        if success {
+                            self.reload();
+                        }
+                        self.actions.complete(output);
+                        self.notice = Some(if success {
+                            format!("{} complete", done.label)
+                        } else {
+                            error
+                        });
+                    }
+                    Err(error) => {
+                        self.actions.fail(error.clone());
+                        self.notice = Some(error);
+                    }
+                },
             }
         }
         while self.session.next_worktree_change() {
@@ -715,8 +817,8 @@ impl App {
 
     fn handle_normal(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('q') if self.commit_running() => {
-                self.notice = Some("A commit is still running".to_owned())
+            KeyCode::Char('q') if self.commit_running() || self.session.command_running() => {
+                self.notice = Some("A Git operation is still running".to_owned())
             }
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('1') => self.view = View::Changes,
@@ -730,6 +832,8 @@ impl App {
             KeyCode::Char('r') => self.reload(),
             KeyCode::Char('o') => self.open_picker(),
             KeyCode::Char('s') => self.mode = Mode::Settings,
+            KeyCode::Char('x') => self.open_actions(),
+            KeyCode::Char('g') => self.open_git_command(),
             KeyCode::Char('?') => self.mode = Mode::Help,
             KeyCode::Char('w') if self.view == View::Changes => {
                 let wrapped = self.changes.toggle_wrap();
@@ -810,7 +914,7 @@ impl App {
             KeyCode::PageUp if self.view == View::Changes => self.scroll_diff_by(-10),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
-            KeyCode::Home | KeyCode::Char('g') => self.select_first(),
+            KeyCode::Home => self.select_first(),
             KeyCode::End | KeyCode::Char('G') => self.select_last(),
             _ => {}
         }
@@ -865,6 +969,132 @@ impl App {
         }
     }
 
+    fn handle_action_menu(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('x') => self.mode = Mode::Normal,
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+                self.actions.move_selection(1);
+            }
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
+                self.actions.move_selection(-1);
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => self.activate_action(),
+            _ => {}
+        }
+    }
+
+    fn handle_command(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Esc {
+            self.mode = Mode::Normal;
+            return;
+        }
+        if self.actions.status != CommandStatus::Running {
+            match key.code {
+                KeyCode::Enter => {
+                    let input = if self.actions.input.trim().is_empty()
+                        && matches!(self.actions.status, CommandStatus::Complete { .. })
+                    {
+                        self.actions.command.clone()
+                    } else {
+                        self.actions.input.clone()
+                    };
+                    match parse_git_args(&input) {
+                        Ok(args) => self.start_git_command("Git command".to_owned(), args),
+                        Err(error) => {
+                            self.actions.status = CommandStatus::Input;
+                            self.actions.stderr = error;
+                        }
+                    }
+                }
+                KeyCode::Down if matches!(self.actions.status, CommandStatus::Complete { .. }) => {
+                    self.actions.scroll_by(1);
+                }
+                KeyCode::Up if matches!(self.actions.status, CommandStatus::Complete { .. }) => {
+                    self.actions.scroll_by(-1);
+                }
+                KeyCode::PageDown
+                    if matches!(self.actions.status, CommandStatus::Complete { .. }) =>
+                {
+                    self.actions.scroll_by(10);
+                }
+                KeyCode::PageUp
+                    if matches!(self.actions.status, CommandStatus::Complete { .. }) =>
+                {
+                    self.actions.scroll_by(-10);
+                }
+                KeyCode::Backspace => {
+                    self.actions.input.pop();
+                    if self.actions.status == CommandStatus::Input {
+                        self.actions.stderr.clear();
+                    }
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.actions.input.clear();
+                    if self.actions.status == CommandStatus::Input {
+                        self.actions.stderr.clear();
+                    }
+                }
+                KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.actions.input.push(character);
+                    if self.actions.status == CommandStatus::Input {
+                        self.actions.stderr.clear();
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => self.actions.scroll_by(1),
+            KeyCode::Up | KeyCode::Char('k') => self.actions.scroll_by(-1),
+            KeyCode::PageDown => self.actions.scroll_by(10),
+            KeyCode::PageUp => self.actions.scroll_by(-10),
+            KeyCode::Home | KeyCode::Char('g') => self.actions.scroll = 0,
+            KeyCode::End | KeyCode::Char('G') => self.actions.scroll = self.actions.scroll_max,
+            _ => {}
+        }
+    }
+
+    fn open_actions(&mut self) {
+        if self.repository().is_none() {
+            self.notice = Some("Open a repository first".to_owned());
+            return;
+        }
+        self.mode = Mode::ActionMenu;
+    }
+
+    fn open_git_command(&mut self) {
+        if self.repository().is_none() {
+            self.notice = Some("Open a repository first".to_owned());
+            return;
+        }
+        self.actions.begin_input();
+        self.mode = Mode::Command;
+    }
+
+    fn activate_action(&mut self) {
+        let action = self.actions.selected();
+        if action == ActionId::Custom {
+            self.open_git_command();
+            return;
+        }
+        if let Some((label, args)) = action_command(action) {
+            self.start_git_command(label.to_owned(), args);
+        }
+    }
+
+    fn start_git_command(&mut self, label: String, args: Vec<String>) {
+        let display = display_git_command(&args);
+        if self.session.start_command(label, args) {
+            self.actions.begin_command(display);
+            self.mode = Mode::Command;
+            self.notice = None;
+        } else {
+            self.mode = Mode::Normal;
+            self.notice = Some("Another Git operation is already running".to_owned());
+        }
+    }
+
     fn apply_picker_command(&mut self, command: PickerCommand) {
         match command {
             PickerCommand::None => {}
@@ -878,6 +1108,7 @@ impl App {
         match self.session.open(&path, fetch_interval(&self.settings)) {
             Ok(()) => {
                 self.mode = Mode::Normal;
+                self.actions = ActionsState::default();
                 self.notice = Some("Repository opened".to_owned());
                 self.graph_state = TableState::default();
                 self.changes.reset_repository(self.session.data());
@@ -1101,6 +1332,10 @@ impl App {
             self.notice = Some("A commit is already running".to_owned());
             return;
         }
+        if self.session.command_running() {
+            self.notice = Some("Another Git operation is already running".to_owned());
+            return;
+        }
         let message = self.commit_message.trim().to_owned();
         if message.is_empty() {
             self.notice = Some("Commit message cannot be empty".to_owned());
@@ -1260,10 +1495,13 @@ mod tests {
         assert_eq!(load_settings(&path), app.settings);
 
         app.mode = Mode::Normal;
+        app.changes.diff_scroll = 37;
         app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
         assert!(app.changes.diff_wrap);
+        assert_eq!(app.changes.diff_scroll, 37);
         app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
         assert!(!app.changes.diff_wrap);
+        assert_eq!(app.changes.diff_scroll, 37);
     }
 
     #[test]
@@ -1336,6 +1574,75 @@ mod tests {
         assert!(!app.commit_running());
         assert!(app.commit_message.is_empty());
         assert_eq!(app.repository().unwrap().commits.len(), 2);
+    }
+
+    #[test]
+    fn runs_a_custom_git_command_and_keeps_its_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        initialize_repository(root);
+        let mut app = App::new(root.to_path_buf());
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Command);
+        assert_eq!(app.actions.status, CommandStatus::Input);
+
+        app.handle_paste("rev-parse --abbrev-ref HEAD");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.actions.status, CommandStatus::Running);
+        for _ in 0..100 {
+            thread::sleep(Duration::from_millis(10));
+            app.poll_worker();
+            if !app.session.command_running() {
+                break;
+            }
+        }
+
+        assert_eq!(
+            app.actions.status,
+            CommandStatus::Complete {
+                success: true,
+                exit_code: Some(0),
+            }
+        );
+        assert_eq!(app.actions.stdout.trim(), "main");
+        assert_eq!(app.actions.command, "git rev-parse --abbrev-ref HEAD");
+        assert!(app.actions.input.is_empty());
+        assert_eq!(app.actions.transcript.len(), 1);
+        assert_eq!(app.actions.transcript[0].stdout.trim(), "main");
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        app.handle_paste("tatus --short");
+        assert_eq!(app.actions.input, "status --short");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.actions.status, CommandStatus::Running);
+        assert_eq!(app.actions.transcript.len(), 1);
+        assert_eq!(app.actions.transcript[0].stdout.trim(), "main");
+        for _ in 0..100 {
+            thread::sleep(Duration::from_millis(10));
+            app.poll_worker();
+            if !app.session.command_running() {
+                break;
+            }
+        }
+        assert_eq!(
+            app.actions.status,
+            CommandStatus::Complete {
+                success: true,
+                exit_code: Some(0),
+            }
+        );
+        assert_eq!(app.actions.command, "git status --short");
+        assert!(app.actions.input.is_empty());
+        assert_eq!(app.actions.transcript.len(), 2);
+        assert_eq!(
+            app.actions.transcript[0].command,
+            "git rev-parse --abbrev-ref HEAD"
+        );
+        assert_eq!(app.actions.transcript[0].stdout.trim(), "main");
+        assert_eq!(app.actions.transcript[1].command, "git status --short");
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Normal);
     }
 
     #[test]

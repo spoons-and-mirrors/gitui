@@ -14,6 +14,12 @@ const STATUS_INTERVAL: Duration = Duration::from_millis(800);
 pub(crate) enum WorkerCompletion {
     Commit(Result<CommandOutput, String>),
     Fetch(Result<CommandOutput, String>),
+    Command(CommandCompletion),
+}
+
+pub(crate) struct CommandCompletion {
+    pub(crate) label: String,
+    pub(crate) result: Result<CommandOutput, String>,
 }
 
 #[derive(Debug)]
@@ -30,16 +36,18 @@ struct StatusResult {
     result: Result<u64, String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 enum WorkerKind {
     Commit,
     Fetch,
+    Command { label: String },
 }
 
 pub(crate) struct RepositorySession {
     data: Option<RepositoryData>,
     commit_running: bool,
     fetch_running: bool,
+    command_running: bool,
     worker_tx: Sender<WorkerResult>,
     worker_rx: Receiver<WorkerResult>,
     status_tx: Sender<StatusResult>,
@@ -63,6 +71,7 @@ impl RepositorySession {
             data,
             commit_running: false,
             fetch_running: false,
+            command_running: false,
             worker_tx,
             worker_rx,
             status_tx,
@@ -84,6 +93,10 @@ impl RepositorySession {
 
     pub(crate) fn fetch_running(&self) -> bool {
         self.fetch_running
+    }
+
+    pub(crate) fn command_running(&self) -> bool {
+        self.command_running
     }
 
     pub(crate) fn open(&mut self, path: &Path, fetch_interval: Duration) -> Result<()> {
@@ -110,7 +123,7 @@ impl RepositorySession {
     }
 
     pub(crate) fn start_commit(&mut self, message: String) -> bool {
-        if self.commit_running {
+        if self.commit_running || self.command_running {
             return false;
         }
         let Some(root) = self.data.as_ref().map(|repository| repository.root.clone()) else {
@@ -130,8 +143,33 @@ impl RepositorySession {
         true
     }
 
+    pub(crate) fn start_command(&mut self, label: String, args: Vec<String>) -> bool {
+        if self.command_running || self.commit_running || self.fetch_running {
+            return false;
+        }
+        let Some(root) = self.data.as_ref().map(|repository| repository.root.clone()) else {
+            return false;
+        };
+
+        self.command_running = true;
+        let sender = self.worker_tx.clone();
+        thread::spawn(move || {
+            let result = git::run_command(&root, &args).map_err(|error| error.to_string());
+            let _ = sender.send(WorkerResult {
+                kind: WorkerKind::Command { label },
+                root,
+                result,
+            });
+        });
+        true
+    }
+
     pub(crate) fn maybe_start_fetch(&mut self, enabled: bool, fetch_interval: Duration) {
-        if !enabled || self.fetch_running || Instant::now() < self.next_fetch_at {
+        if !enabled
+            || self.fetch_running
+            || self.command_running
+            || Instant::now() < self.next_fetch_at
+        {
             return;
         }
         let Some(root) = self.data.as_ref().map(|repository| repository.root.clone()) else {
@@ -155,6 +193,7 @@ impl RepositorySession {
         if self.status_check_running
             || self.commit_running
             || self.fetch_running
+            || self.command_running
             || Instant::now() < self.next_status_check
         {
             return;
@@ -198,6 +237,15 @@ impl RepositorySession {
                     self.next_fetch_at = Instant::now() + fetch_interval;
                     if active {
                         return Some(WorkerCompletion::Fetch(done.result));
+                    }
+                }
+                WorkerKind::Command { label } => {
+                    self.command_running = false;
+                    if active {
+                        return Some(WorkerCompletion::Command(CommandCompletion {
+                            label,
+                            result: done.result,
+                        }));
                     }
                 }
             }
@@ -265,6 +313,29 @@ mod tests {
     }
 
     #[test]
+    fn ignores_command_completion_from_a_previous_repository() {
+        let mut session = session("/active", Some(10));
+        session.command_running = true;
+        session
+            .worker_tx
+            .send(WorkerResult {
+                kind: WorkerKind::Command {
+                    label: "Push".to_owned(),
+                },
+                root: PathBuf::from("/previous"),
+                result: Err("old result".to_owned()),
+            })
+            .unwrap();
+
+        assert!(
+            session
+                .next_worker_completion(Duration::from_secs(60))
+                .is_none()
+        );
+        assert!(!session.command_running());
+    }
+
+    #[test]
     fn ignores_status_result_from_a_previous_repository() {
         let mut session = session("/active", Some(10));
         session.status_check_running = true;
@@ -314,6 +385,7 @@ mod tests {
             }),
             commit_running: false,
             fetch_running: false,
+            command_running: false,
             worker_tx,
             worker_rx,
             status_tx,

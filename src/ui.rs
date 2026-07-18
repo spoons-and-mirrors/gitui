@@ -10,7 +10,7 @@ use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
+    text::{Line, Span},
     widgets::{Block, Paragraph},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -41,8 +41,14 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         return;
     }
 
-    let layout = Layout::vertical([Constraint::Length(3), Constraint::Min(6)]).split(frame.area());
+    let layout = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(6),
+        Constraint::Length(1),
+    ])
+    .split(frame.area());
 
+    app.regions = Regions::default();
     draw_header(frame, app, layout[0]);
     let content = layout[1];
     match app.view {
@@ -52,6 +58,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 history::draw_graph(frame, app.session.data(), &mut app.graph_state, content);
         }
     }
+    draw_navigation(frame, app, layout[2]);
     match app.mode {
         Mode::Picker => {
             let regions = overlays::draw_picker(frame, &mut app.picker);
@@ -72,9 +79,33 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             app.regions.fetch_interval_down = Some(regions.fetch_interval_down);
             app.regions.fetch_interval_up = Some(regions.fetch_interval_up);
         }
+        Mode::ActionMenu => {
+            let anchor = app.regions.actions.unwrap_or(Rect::new(
+                content.x.saturating_add(1),
+                content.y,
+                1,
+                1,
+            ));
+            let regions = overlays::draw_action_menu(frame, anchor, app.actions.selection);
+            app.regions.action_menu = Some(regions.overlay);
+            app.regions.action_list = Some(regions.list);
+        }
+        Mode::Command => {
+            dim(frame);
+            let regions = overlays::draw_command(frame, &mut app.actions);
+            app.regions.command_overlay = Some(regions.overlay);
+            app.regions.command_output = Some(regions.output);
+        }
         Mode::Help => overlays::draw_help(frame),
         _ => {}
     }
+}
+
+fn dim(frame: &mut Frame<'_>) {
+    let area = frame.area();
+    frame
+        .buffer_mut()
+        .set_style(area, Style::default().add_modifier(Modifier::DIM));
 }
 
 fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -82,22 +113,26 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         || ("No repository selected".to_owned(), "offline".to_owned()),
         |repo| (repo.root.display().to_string(), repo.branch.clone()),
     );
-    let (staged, unstaged) = app.change_counts();
-    let commits = app.repository().map_or(0, |repo| repo.commits.len());
-
     frame.render_widget(
         Block::default().style(Style::default().bg(palette().panel)),
-        Rect::new(area.x, area.y, area.width, 2),
+        Rect::new(area.x, area.y, area.width, 1),
     );
     let repository = std::path::Path::new(&path)
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("gitui");
-    let branch_label = format!("  {branch} ");
+    let branch_label = format!(" {branch} ");
+    let branch_width = UnicodeWidthStr::width(branch_label.as_str())
+        .min(usize::from(area.width.saturating_sub(12)));
+    let notice_label = app
+        .notice
+        .as_ref()
+        .map_or_else(String::new, |notice| format!("  {notice}"));
     let fixed_width = UnicodeWidthStr::width(repository)
-        .saturating_add(UnicodeWidthStr::width(branch_label.as_str()))
-        .saturating_add(6);
-    let display_path = truncate_width(&path, usize::from(area.width).saturating_sub(fixed_width));
+        .saturating_add(UnicodeWidthStr::width(notice_label.as_str()))
+        .saturating_add(4);
+    let left_width = usize::from(area.width).saturating_sub(branch_width);
+    let display_path = truncate_width(&path, left_width.saturating_sub(fixed_width));
     let mut title = vec![
         Span::styled(
             format!("  {repository}"),
@@ -109,20 +144,44 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             format!("  {display_path}"),
             Style::default().fg(palette().faint),
         ),
-        Span::styled(
-            branch_label,
+    ];
+    if !notice_label.is_empty() {
+        title.push(Span::styled(
+            notice_label,
+            Style::default().fg(palette().yellow),
+        ));
+    }
+
+    frame.render_widget(
+        Paragraph::new(Line::from(title)),
+        Rect::new(area.x, area.y, left_width as u16, 1),
+    );
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            truncate_width(&branch_label, branch_width),
             Style::default()
                 .fg(palette().accent)
                 .bg(palette().surface_alt)
                 .add_modifier(Modifier::BOLD),
+        ))
+        .alignment(Alignment::Right),
+        Rect::new(
+            area.right().saturating_sub(branch_width as u16),
+            area.y,
+            branch_width as u16,
+            1,
         ),
-    ];
-    if let Some(notice) = &app.notice {
-        title.push(Span::styled(
-            format!("  {notice}"),
-            Style::default().fg(palette().yellow),
-        ));
-    }
+    );
+}
+
+fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let (staged, unstaged) = app.change_counts();
+    let commits = app.repository().map_or(0, |repo| repo.commits.len());
+
+    frame.render_widget(
+        Block::default().style(Style::default().bg(palette().panel)),
+        area,
+    );
 
     let changes_label = format!(" 1 Changes {}/{} ", staged, unstaged);
     let graph_label = format!(" 2 Graph {commits} ");
@@ -158,24 +217,18 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             },
         ));
         let width = UnicodeWidthStr::width(*label) as u16;
-        rects.push(Rect::new(x, area.y + 1, width, 1));
+        rects.push(Rect::new(x, area.y, width, 1));
         x = x.saturating_add(width);
     }
 
-    app.regions = Regions {
-        changes: rects.first().copied(),
-        graph: rects.get(1).copied(),
-        refresh: rects.get(2).copied(),
-        repository: rects.get(3).copied(),
-        settings: rects.get(4).copied(),
-        help: rects.get(5).copied(),
-        ..Regions::default()
-    };
+    app.regions.changes = rects.first().copied();
+    app.regions.graph = rects.get(1).copied();
+    app.regions.refresh = rects.get(2).copied();
+    app.regions.repository = rects.get(3).copied();
+    app.regions.settings = rects.get(4).copied();
+    app.regions.help = rects.get(5).copied();
 
-    frame.render_widget(
-        Paragraph::new(Text::from(vec![Line::from(title), Line::from(spans)])),
-        Rect::new(area.x, area.y, area.width, 2),
-    );
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn truncate_width(value: &str, width: usize) -> String {

@@ -5,6 +5,7 @@ A focused Rust/Ratatui interface for the two Git views that matter most during e
 - A collapsible worktree tree with per-file added/deleted line counts for inspecting, staging, unstaging, and committing changes.
 - A switchable repository file tree, including Git-ignored files, with read-only, syntax-colored previews.
 - A resizable current-branch history shelf with HEAD, branch, remote, and tag decorations; selecting a commit shows its patch.
+- A repository Actions menu for pushing, fetching, pulling with rebase, and running non-interactive Git commands with captured output.
 - An all-refs commit graph showing branches, remotes, tags, authors, dates, and hashes.
 - Source-aware diffs with line numbers, syntax color, and tinted additions, deletions, and hunk headers.
 - Nonblocking worktree refresh when files, the index, branches, or HEAD change outside GitUI.
@@ -27,7 +28,7 @@ Starting outside a repository opens the directory navigator automatically.
 |---|---|
 | `1`, `2`, `Tab` | Changes, Graph, or switch view |
 | `j`, `k` | Move selection |
-| `g`, `G` | First or last row |
+| `Home`, `G` | First or last row |
 | `PageUp`, `PageDown` | Scroll the selected file's diff |
 | `w` | Toggle line wrapping in the Diff panel |
 | `e` | Switch the left pane between Worktree and Files |
@@ -40,6 +41,8 @@ Starting outside a repository opens the directory navigator automatically.
 | `r` | Refresh |
 | `o` | Choose another repository |
 | `s` | Open settings |
+| `x` | Open repository Actions |
+| `g` | Open Git command |
 | `?` | Help |
 | `q` | Quit |
 
@@ -50,6 +53,7 @@ In the repository explorer, start typing a folder name, press `p` to search from
 - Click header controls to switch views, refresh, choose a repository, or open help.
 - Drag the divider between Worktree and Diff to resize either panel.
 - Drag the History section header vertically to resize the current-branch commit shelf.
+- Click `x ACTIONS` above History to push, fetch, pull with rebase, or run a custom Git command.
 - Click or scroll History to inspect a commit's patch; click a Worktree file to return to its current diff.
 - Click a directory to expand or collapse it. Click a file's right-aligned checkbox or right-click its row to stage or unstage it.
 - Click `WORKTREE` or `FILES` in the left header to switch modes; clicking a repository file previews its contents.
@@ -76,6 +80,7 @@ The binary stays deliberately direct, with modules split by the behavior they ow
 |---|---|
 | `main` | Terminal setup, cleanup, and event loop |
 | `app` | Global input routing, Git mutations, settings, and notices |
+| `app::actions` | Repository Actions, command input, and captured results |
 | `app::changes` | Changes-screen selection, navigation, and displayed content |
 | `app::repository_picker` | Repository discovery, navigation, and fuzzy search |
 | `repository_session` | Active repository lifecycle and background operations |
@@ -89,6 +94,8 @@ The binary stays deliberately direct, with modules split by the behavior they ow
 | `theme` | Theme discovery, resolution, and palette data |
 
 Keep Git command details in `git`, operation scheduling in `repository_session`, interaction decisions in `app`, and visual formatting in `ui`. Add another module only when it can own a cohesive behavior behind a smaller interface than the implementation it hides.
+
+Custom commands run as Git arguments from the active repository with prompts and editors disabled. They do not invoke a shell, so pipes, redirects, and other shell syntax are never interpreted.
 
 ## Scope
 

@@ -3,11 +3,14 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Clear, List, ListItem, Paragraph},
+    widgets::{Clear, List, ListItem, Paragraph, Wrap},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{PickerAction, PickerEntry, RepositoryPicker, Settings};
+use crate::app::{
+    ACTION_ITEMS, ActionsState, CommandStatus, PickerAction, PickerEntry, RepositoryPicker,
+    Settings,
+};
 
 use super::{fill, palette, truncate_width};
 
@@ -23,6 +26,352 @@ pub(super) struct SettingsRegions {
     pub(super) fetch_interval: Rect,
     pub(super) fetch_interval_down: Rect,
     pub(super) fetch_interval_up: Rect,
+}
+
+pub(super) struct ActionMenuRegions {
+    pub(super) overlay: Rect,
+    pub(super) list: Rect,
+}
+
+pub(super) struct CommandRegions {
+    pub(super) overlay: Rect,
+    pub(super) output: Rect,
+}
+
+pub(super) fn draw_action_menu(
+    frame: &mut Frame<'_>,
+    anchor: Rect,
+    selection: usize,
+) -> ActionMenuRegions {
+    let width = 38.min(frame.area().width.saturating_sub(2));
+    let height = ACTION_ITEMS.len() as u16 + 1;
+    let minimum_x = frame.area().x.saturating_add(1);
+    let maximum_x = frame
+        .area()
+        .right()
+        .saturating_sub(width.saturating_add(1))
+        .max(minimum_x);
+    let x = anchor
+        .right()
+        .saturating_sub(width)
+        .clamp(minimum_x, maximum_x);
+    let below = anchor.y.saturating_add(1);
+    let y = if below.saturating_add(height) <= frame.area().bottom() {
+        below
+    } else {
+        anchor.y.saturating_sub(height)
+    };
+    let area = Rect::new(x, y, width, height);
+    let list = Rect::new(area.x, area.y, area.width, ACTION_ITEMS.len() as u16);
+    frame.render_widget(Clear, area);
+    fill(frame, area, palette().raised);
+
+    let items = ACTION_ITEMS.iter().enumerate().map(|(index, action)| {
+        let detail_width = UnicodeWidthStr::width(action.detail);
+        let label = truncate_width(
+            action.label,
+            usize::from(list.width).saturating_sub(detail_width + 4),
+        );
+        let padding = usize::from(list.width)
+            .saturating_sub(UnicodeWidthStr::width(label.as_str()) + detail_width + 3);
+        let item = ListItem::new(Line::from(vec![
+            Span::styled(
+                if index == selection { " › " } else { "   " },
+                Style::default().fg(palette().accent),
+            ),
+            Span::styled(
+                label,
+                Style::default()
+                    .fg(palette().ink)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" ".repeat(padding)),
+            Span::styled(action.detail, Style::default().fg(palette().faint)),
+        ]));
+        if index == selection {
+            item.style(Style::default().bg(palette().selected))
+        } else {
+            item
+        }
+    });
+    frame.render_widget(List::new(items), list);
+    frame.render_widget(
+        Paragraph::new("Enter run   Esc close")
+            .alignment(Alignment::Right)
+            .style(Style::default().fg(palette().muted)),
+        Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
+    );
+
+    ActionMenuRegions {
+        overlay: area,
+        list,
+    }
+}
+
+pub(super) fn draw_command(frame: &mut Frame<'_>, actions: &mut ActionsState) -> CommandRegions {
+    let area = centered_min(frame.area(), 82, 68, 64, 18);
+    frame.render_widget(Clear, area);
+    fill(frame, area, palette().panel);
+    fill(
+        frame,
+        Rect::new(area.x, area.y, area.width, 3),
+        palette().surface_alt,
+    );
+    fill(
+        frame,
+        Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
+        palette().surface_alt,
+    );
+
+    let inner_x = area.x.saturating_add(2);
+    let inner_width = area.width.saturating_sub(4);
+    let (title, status, status_color) = match actions.status {
+        CommandStatus::Input => ("GIT COMMAND", "NON-INTERACTIVE".to_owned(), palette().muted),
+        CommandStatus::Running => ("COMMAND OUTPUT", "RUNNING".to_owned(), palette().yellow),
+        CommandStatus::Complete {
+            success: true,
+            exit_code,
+        } => (
+            "COMMAND OUTPUT",
+            format!("SUCCESS · exit {}", exit_code.unwrap_or(0)),
+            palette().green,
+        ),
+        CommandStatus::Complete {
+            success: false,
+            exit_code,
+        } => (
+            "COMMAND OUTPUT",
+            exit_code.map_or_else(
+                || "FAILED".to_owned(),
+                |code| format!("FAILED · exit {code}"),
+            ),
+            palette().red,
+        ),
+    };
+    let title_padding = usize::from(inner_width)
+        .saturating_sub(UnicodeWidthStr::width(title) + UnicodeWidthStr::width(status.as_str()));
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                title,
+                Style::default()
+                    .fg(palette().ink)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" ".repeat(title_padding)),
+            Span::styled(
+                status,
+                Style::default()
+                    .fg(status_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        Rect::new(inner_x, area.y.saturating_add(1), inner_width, 1),
+    );
+
+    let command_area = Rect::new(inner_x, area.bottom().saturating_sub(5), inner_width, 3);
+    let command_editable = actions.status != CommandStatus::Running;
+    fill(
+        frame,
+        command_area,
+        if command_editable {
+            palette().selected
+        } else {
+            palette().raised
+        },
+    );
+    if command_editable {
+        fill(
+            frame,
+            Rect::new(command_area.x, command_area.y, 1, command_area.height),
+            palette().accent,
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            "COMMAND",
+            Style::default()
+                .fg(palette().muted)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Rect::new(
+            command_area.x.saturating_add(2),
+            command_area.y,
+            command_area.width.saturating_sub(4),
+            1,
+        ),
+    );
+    let command = if command_editable {
+        format!("git {}▌", actions.input)
+    } else {
+        actions.command.clone()
+    };
+    frame.render_widget(
+        Paragraph::new(truncate_start_width(
+            &command,
+            usize::from(command_area.width.saturating_sub(4)),
+        ))
+        .style(Style::default().fg(palette().ink)),
+        Rect::new(
+            command_area.x.saturating_add(2),
+            command_area.y.saturating_add(1),
+            command_area.width.saturating_sub(4),
+            1,
+        ),
+    );
+
+    let output = Rect::new(
+        inner_x,
+        area.y.saturating_add(4),
+        inner_width,
+        command_area
+            .y
+            .saturating_sub(area.y.saturating_add(4))
+            .saturating_sub(1),
+    );
+    let lines = command_lines(actions);
+    let rendered_height = rendered_height(&lines, usize::from(output.width));
+    actions.scroll_max = rendered_height
+        .saturating_sub(usize::from(output.height))
+        .min(usize::from(u16::MAX)) as u16;
+    actions.scroll = actions.scroll.min(actions.scroll_max);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((actions.scroll, 0))
+            .style(Style::default().fg(palette().ink)),
+        output,
+    );
+
+    let footer = match actions.status {
+        CommandStatus::Input => "Enter run   Ctrl+U clear   Esc close",
+        CommandStatus::Running => "Running in background   Esc close",
+        CommandStatus::Complete { .. } => {
+            "Type next command   Enter run/re-run   ↑↓ scroll   Esc close"
+        }
+    };
+    frame.render_widget(
+        Paragraph::new(footer)
+            .alignment(Alignment::Right)
+            .style(Style::default().fg(palette().muted)),
+        Rect::new(inner_x, area.bottom().saturating_sub(1), inner_width, 1),
+    );
+
+    CommandRegions {
+        overlay: area,
+        output,
+    }
+}
+
+fn command_lines(actions: &ActionsState) -> Vec<Line<'static>> {
+    if actions.status == CommandStatus::Input && actions.transcript.is_empty() {
+        return if actions.stderr.is_empty() {
+            vec![
+                Line::styled(
+                    "Run any non-interactive Git command from this repository.",
+                    Style::default().fg(palette().ink),
+                ),
+                Line::raw(""),
+                Line::styled(
+                    "Examples: status --short · log --oneline -10 · remote -v",
+                    Style::default().fg(palette().faint),
+                ),
+                Line::styled(
+                    "Shell pipes and redirects are not interpreted.",
+                    Style::default().fg(palette().faint),
+                ),
+            ]
+        } else {
+            vec![Line::styled(
+                actions.stderr.clone(),
+                Style::default().fg(palette().red),
+            )]
+        };
+    }
+    let mut lines = Vec::new();
+    for (index, record) in actions.transcript.iter().enumerate() {
+        if index > 0 {
+            lines.push(Line::raw(""));
+        }
+        let status = if record.success {
+            format!("exit {}", record.exit_code.unwrap_or(0))
+        } else {
+            record
+                .exit_code
+                .map_or_else(|| "failed".to_owned(), |code| format!("exit {code}"))
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                record.command.clone(),
+                Style::default()
+                    .fg(palette().accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {status}"), Style::default().fg(palette().muted)),
+        ]));
+        if !record.stdout.is_empty() {
+            lines.extend(
+                record
+                    .stdout
+                    .lines()
+                    .map(|line| Line::styled(line.to_owned(), Style::default().fg(palette().ink))),
+            );
+        }
+        if !record.stderr.is_empty() {
+            lines.extend(
+                record
+                    .stderr
+                    .lines()
+                    .map(|line| Line::styled(line.to_owned(), Style::default().fg(palette().red))),
+            );
+        }
+        if record.stdout.is_empty() && record.stderr.is_empty() {
+            lines.push(Line::styled(
+                "Completed without output.",
+                Style::default().fg(palette().faint),
+            ));
+        }
+    }
+    if actions.status == CommandStatus::Input && !actions.stderr.is_empty() {
+        if !lines.is_empty() {
+            lines.push(Line::raw(""));
+        }
+        lines.push(Line::styled(
+            actions.stderr.clone(),
+            Style::default().fg(palette().red),
+        ));
+    }
+    if actions.status == CommandStatus::Running {
+        if !lines.is_empty() {
+            lines.push(Line::raw(""));
+        }
+        lines.push(Line::styled(
+            "Waiting for Git...",
+            Style::default().fg(palette().yellow),
+        ));
+    }
+    if lines.is_empty() {
+        lines.push(Line::styled(
+            "Command completed without output.",
+            Style::default().fg(palette().faint),
+        ));
+    }
+    lines
+}
+
+fn rendered_height(lines: &[Line<'_>], width: usize) -> usize {
+    let width = width.max(1);
+    lines
+        .iter()
+        .map(|line| {
+            let line_width: usize = line
+                .spans
+                .iter()
+                .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+                .sum();
+            line_width.max(1).div_ceil(width)
+        })
+        .sum()
 }
 
 pub(super) fn draw_picker(frame: &mut Frame<'_>, picker: &mut RepositoryPicker) -> PickerRegions {
@@ -417,7 +766,7 @@ pub(super) fn draw_settings(
 }
 
 pub(super) fn draw_help(frame: &mut Frame<'_>) {
-    let area = centered_min(frame.area(), 72, 0, 58, 14);
+    let area = centered_min(frame.area(), 72, 0, 58, 15);
     frame.render_widget(Clear, area);
     fill(frame, area, palette().panel);
     fill(
@@ -468,10 +817,12 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
         ),
         help_line("1 / 2 / Tab", "Switch view"),
         help_line("j / k", "Move"),
-        help_line("g / G", "First / last"),
+        help_line("Home / G", "First / last"),
         help_line("r", "Refresh"),
         help_line("o", "Repository"),
         help_line("s", "Settings"),
+        help_line("x", "Git actions"),
+        help_line("g", "Git command"),
         help_line("e", "Worktree / files"),
         help_line("w", "Wrap diff"),
     ];

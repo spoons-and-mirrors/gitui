@@ -86,7 +86,13 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         5,
     );
     app.regions.commit = Some(commit_area);
-    let worktree_list_y = commit_area.bottom();
+    let actions_row = Rect::new(
+        worktree_content.x,
+        commit_area.bottom(),
+        worktree_content.width,
+        1,
+    );
+    let worktree_list_y = actions_row.bottom();
     let maximum_history = worktree_content
         .bottom()
         .saturating_sub(worktree_list_y)
@@ -228,6 +234,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     let history_header = app.regions.history_splitter.expect("set above");
     let history_list = app.regions.history_list.expect("set above");
+    app.regions.actions = Some(draw_actions(frame, actions_row, app.mode));
     history::draw_branch(
         frame,
         &repo.history,
@@ -411,6 +418,28 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             .style(Style::default().bg(palette().canvas)),
         commit_content,
     );
+}
+
+fn draw_actions(frame: &mut Frame<'_>, area: Rect, mode: Mode) -> Rect {
+    let label = " x ACTIONS ▾ ";
+    let width = (UnicodeWidthStr::width(label) as u16).min(area.width);
+    let button = Rect::new(area.right().saturating_sub(width), area.y, width, 1);
+    fill(frame, area, palette().panel);
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            label,
+            Style::default()
+                .fg(palette().accent)
+                .bg(if mode == Mode::ActionMenu {
+                    palette().selected
+                } else {
+                    palette().raised
+                })
+                .add_modifier(Modifier::BOLD),
+        )),
+        button,
+    );
+    button
 }
 
 fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2]) {
