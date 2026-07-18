@@ -1,9 +1,9 @@
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
+    layout::{Alignment, Constraint, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, Wrap},
+    widgets::{Block, Cell, Clear, List, ListItem, Paragraph, Row, Table, Wrap},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -584,50 +584,104 @@ fn ref_badge(label: &str, color: Color) -> Span<'static> {
 }
 
 fn draw_picker(frame: &mut Frame<'_>, app: &mut App) {
-    let area = centered(frame.area(), 76, 78);
+    let desired_height = (11 + app.picker.entries.len().min(11) as u16).clamp(14, 22);
+    let area = centered_min(frame.area(), 82, 0, 56, desired_height);
     app.regions.picker_overlay = Some(area);
     frame.render_widget(Clear, area);
-    frame.render_widget(
-        Block::default()
-            .title(Span::styled(
-                " OPEN REPOSITORY ",
-                Style::default()
-                    .fg(palette().ink)
-                    .add_modifier(Modifier::BOLD),
-            ))
-            .title_bottom(
-                Line::from(if app.picker.editing_path {
-                    " enter open path  ctrl-u clear  esc browse "
-                } else {
-                    " enter open  p type path  h parent  esc cancel "
-                })
-                .alignment(Alignment::Right),
-            )
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(palette().accent))
-            .style(Style::default().bg(palette().raised)),
-        area,
+    fill(frame, area, palette().panel);
+    fill(
+        frame,
+        Rect::new(area.x, area.y, area.width, 3),
+        palette().surface_alt,
     );
-    let inner = area.inner(Margin::new(2, 1));
-    let parts = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(2),
-        Constraint::Length(1),
-    ])
-    .split(inner);
-    app.regions.picker_path = Some(parts[0]);
-    app.regions.picker_list = Some(parts[2]);
+    fill(
+        frame,
+        Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
+        palette().surface_alt,
+    );
+
+    let inner_x = area.x.saturating_add(2);
+    let inner_width = area.width.saturating_sub(4);
+    let current_is_repo = app
+        .picker
+        .entries
+        .first()
+        .is_some_and(|entry| entry.is_repo);
+    let location_kind = if current_is_repo {
+        "GIT REPOSITORY"
+    } else {
+        "DIRECTORY"
+    };
+    let title_width = "REPOSITORY  Switch working directory".len();
+    let title_padding = usize::from(inner_width)
+        .saturating_sub(title_width + UnicodeWidthStr::width(location_kind));
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                "PATH      ",
+                "REPOSITORY",
                 Style::default()
-                    .fg(palette().muted)
+                    .fg(palette().ink)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                &app.picker.path_input,
+                "  Switch working directory",
+                Style::default().fg(palette().faint),
+            ),
+            Span::raw(" ".repeat(title_padding)),
+            Span::styled(
+                location_kind,
+                Style::default()
+                    .fg(if current_is_repo {
+                        palette().green
+                    } else {
+                        palette().muted
+                    })
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        Rect::new(inner_x, area.y.saturating_add(1), inner_width, 1),
+    );
+
+    let path_area = Rect::new(inner_x, area.y.saturating_add(4), inner_width, 3);
+    fill(
+        frame,
+        path_area,
+        if app.picker.editing_path {
+            palette().selected
+        } else {
+            palette().raised
+        },
+    );
+    if app.picker.editing_path {
+        fill(
+            frame,
+            Rect::new(path_area.x, path_area.y, 1, path_area.height),
+            palette().accent,
+        );
+    }
+    app.regions.picker_path = Some(path_area);
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            "PATH",
+            Style::default()
+                .fg(palette().muted)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Rect::new(
+            path_area.x.saturating_add(2),
+            path_area.y,
+            path_area.width.saturating_sub(4),
+            1,
+        ),
+    );
+    let path_text = truncate_start_width(
+        &app.picker.path_input,
+        usize::from(path_area.width.saturating_sub(4)),
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                path_text,
                 Style::default().fg(if app.picker.editing_path {
                     palette().ink
                 } else {
@@ -639,53 +693,99 @@ fn draw_picker(frame: &mut Frame<'_>, app: &mut App) {
                 Style::default().fg(palette().accent),
             ),
         ])),
-        parts[0],
+        Rect::new(
+            path_area.x.saturating_add(2),
+            path_area.y.saturating_add(1),
+            path_area.width.saturating_sub(4),
+            1,
+        ),
     );
+
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                "LOCATION  ",
+                "BROWSE",
                 Style::default()
                     .fg(palette().muted)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                app.picker.directory.display().to_string(),
-                Style::default().fg(palette().ink),
+                format!("  {} entries", app.picker.entries.len()),
+                Style::default().fg(palette().faint),
             ),
         ])),
-        parts[1],
+        Rect::new(inner_x, area.y.saturating_add(8), inner_width, 1),
     );
-    let items = app.picker.entries.iter().map(|entry| {
-        let marker = match entry.action {
-            PickerAction::Open if entry.is_repo => "● ",
-            PickerAction::Open => "○ ",
-            PickerAction::Navigate if entry.is_repo => "◆ ",
-            PickerAction::Navigate => "  ",
-        };
-        let color = if entry.is_repo {
-            palette().green
-        } else {
-            palette().muted
-        };
-        ListItem::new(Line::from(vec![
-            Span::styled(marker, Style::default().fg(color)),
-            Span::styled(entry.label.clone(), Style::default().fg(palette().ink)),
-        ]))
-    });
+    let list_y = area.y.saturating_add(10);
+    let list_area = Rect::new(
+        inner_x,
+        list_y,
+        inner_width,
+        area.bottom().saturating_sub(1).saturating_sub(list_y),
+    );
+    app.regions.picker_list = Some(list_area);
+    let items = app
+        .picker
+        .entries
+        .iter()
+        .map(|entry| picker_item(entry, usize::from(list_area.width)));
     frame.render_stateful_widget(
-        List::new(items)
-            .highlight_style(Style::default().bg(palette().selected))
-            .highlight_symbol("› "),
-        parts[2],
+        List::new(items).highlight_style(Style::default().bg(palette().selected)),
+        list_area,
         &mut app.picker.state,
     );
+
+    let footer = Rect::new(inner_x, area.bottom().saturating_sub(1), inner_width, 1);
     if let Some(error) = &app.picker.error {
         frame.render_widget(
-            Paragraph::new(error.as_str()).style(Style::default().fg(palette().red)),
-            parts[3],
+            Paragraph::new(truncate_width(error, usize::from(footer.width)))
+                .style(Style::default().fg(palette().red)),
+            footer,
+        );
+    } else {
+        let hint = if app.picker.editing_path {
+            "Enter open   Ctrl-U clear   Esc browse"
+        } else {
+            "Enter open   h parent   / path   Esc close"
+        };
+        frame.render_widget(
+            Paragraph::new(hint)
+                .style(Style::default().fg(palette().muted))
+                .alignment(Alignment::Right),
+            footer,
         );
     }
+}
+
+fn picker_item(entry: &crate::app::PickerEntry, width: usize) -> ListItem<'static> {
+    let (marker, label, detail, color) = match entry.action {
+        PickerAction::Open if entry.is_repo => ("● ", entry.label.clone(), "open", palette().green),
+        PickerAction::Open => ("○ ", entry.label.clone(), "check", palette().muted),
+        PickerAction::Navigate if entry.label == ".." => {
+            ("↑ ", "Parent directory".to_owned(), "", palette().muted)
+        }
+        PickerAction::Navigate if entry.is_repo => {
+            ("◆ ", entry.label.clone(), "repository", palette().green)
+        }
+        PickerAction::Navigate => ("› ", entry.label.clone(), "", palette().faint),
+    };
+    let detail_width = usize::from(!detail.is_empty()) + UnicodeWidthStr::width(detail);
+    let label_width = width.saturating_sub(2 + detail_width);
+    let label = truncate_width(&label, label_width);
+    let padding = width.saturating_sub(2 + UnicodeWidthStr::width(label.as_str()) + detail_width);
+    let mut spans = vec![
+        Span::styled(marker, Style::default().fg(color)),
+        Span::styled(label, Style::default().fg(palette().ink)),
+        Span::raw(" ".repeat(padding)),
+    ];
+    if !detail.is_empty() {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            detail.to_owned(),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ));
+    }
+    ListItem::new(Line::from(spans))
 }
 
 fn draw_settings(frame: &mut Frame<'_>, app: &mut App) {
@@ -996,6 +1096,28 @@ fn truncate_width(value: &str, width: usize) -> String {
     }
     result.push('…');
     result
+}
+
+fn truncate_start_width(value: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(value) <= width {
+        return value.to_owned();
+    }
+    if width == 0 {
+        return String::new();
+    }
+
+    let target = width.saturating_sub(1);
+    let mut suffix = String::new();
+    let mut used = 0;
+    for character in value.chars().rev() {
+        let character_width = character.width().unwrap_or(0);
+        if used + character_width > target {
+            break;
+        }
+        suffix.insert(0, character);
+        used += character_width;
+    }
+    format!("…{suffix}")
 }
 
 fn styled_diff(diff: &str, path: &str, width: usize) -> Vec<Line<'static>> {
@@ -1333,25 +1455,6 @@ fn help_line<'a>(key: &'a str, description: &'a str) -> Line<'a> {
     ])
 }
 
-fn centered(area: Rect, width_percent: u16, height_percent: u16) -> Rect {
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - height_percent) / 2),
-            Constraint::Percentage(height_percent),
-            Constraint::Percentage((100 - height_percent) / 2),
-        ])
-        .split(area);
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - width_percent) / 2),
-            Constraint::Percentage(width_percent),
-            Constraint::Percentage((100 - width_percent) / 2),
-        ])
-        .split(vertical[1])[1]
-}
-
 fn centered_min(
     area: Rect,
     width_percent: u16,
@@ -1591,13 +1694,27 @@ mod tests {
         ));
         assert_eq!(app.graph_state.selected(), Some(1));
 
-        app.mode = Mode::Picker;
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert_eq!(app.picker.directory, root);
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let picker_screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(picker_screen.contains("REPOSITORY"));
+        assert!(picker_screen.contains("Switch working directory"));
+        assert!(picker_screen.contains("BROWSE"));
+        assert!(!picker_screen.contains("OPEN REPOSITORY"));
+        assert!(!picker_screen.contains('┌'));
+        assert!(app.regions.picker_list.is_some());
         let path = app.regions.picker_path.unwrap();
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            path.x,
-            path.y,
+            path.x + 2,
+            path.y + 1,
         ));
         assert!(app.picker.editing_path);
 

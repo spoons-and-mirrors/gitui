@@ -503,6 +503,7 @@ impl App {
                     .is_some_and(|rect| rect.contains(point))
                 {
                     self.picker.editing_path = true;
+                    self.picker.error = None;
                     return;
                 }
                 let Some(rect) = self.regions.picker_list.filter(|rect| rect.contains(point))
@@ -794,7 +795,9 @@ impl App {
                 KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.picker.path_input.clear();
                 }
-                KeyCode::Char(character) => self.picker.path_input.push(character),
+                KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.picker.path_input.push(character);
+                }
                 _ => {}
             }
             return;
@@ -806,7 +809,10 @@ impl App {
             KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => self.picker.go_parent(),
             KeyCode::Enter => self.activate_picker_entry(true),
             KeyCode::Right | KeyCode::Char('l') => self.activate_picker_entry(false),
-            KeyCode::Char('p') | KeyCode::Char('/') => self.picker.editing_path = true,
+            KeyCode::Char('p') | KeyCode::Char('/') => {
+                self.picker.editing_path = true;
+                self.picker.error = None;
+            }
             KeyCode::Char('r') => self.picker.reload(),
             KeyCode::Char('q') if self.repo.is_none() => self.should_quit = true,
             _ => {}
@@ -874,8 +880,7 @@ impl App {
         let start = self
             .repo
             .as_ref()
-            .and_then(|repo| repo.root.parent())
-            .map(Path::to_path_buf)
+            .map(|repo| repo.root.clone())
             .unwrap_or_else(|| self.picker.directory.clone());
         self.picker.navigate(start);
         self.picker.editing_path = false;
@@ -1272,11 +1277,16 @@ impl RepositoryPicker {
 
     fn reload(&mut self) {
         self.error = None;
+        let current_is_repo = git::discover(&self.directory).is_ok();
         let mut entries = vec![PickerEntry {
-            label: "Open repository at this location".to_owned(),
+            label: if current_is_repo {
+                "Open current repository".to_owned()
+            } else {
+                "Open current location".to_owned()
+            },
             path: self.directory.clone(),
             action: PickerAction::Open,
-            is_repo: git::discover(&self.directory).is_ok(),
+            is_repo: current_is_repo,
         }];
 
         if let Some(parent) = self.directory.parent() {
