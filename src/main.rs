@@ -1,5 +1,6 @@
 mod app;
 mod git;
+mod theme;
 mod ui;
 
 use std::{io, path::PathBuf, time::Duration};
@@ -9,7 +10,7 @@ use app::App;
 use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event,
+        Event, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -52,7 +53,8 @@ fn start_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
             stdout,
             EnterAlternateScreen,
             EnableMouseCapture,
-            EnableBracketedPaste
+            EnableBracketedPaste,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         )?;
         let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
         terminal.clear()?;
@@ -70,7 +72,8 @@ fn restore_terminal() {
         io::stdout(),
         LeaveAlternateScreen,
         DisableMouseCapture,
-        DisableBracketedPaste
+        DisableBracketedPaste,
+        PopKeyboardEnhancementFlags
     );
 }
 

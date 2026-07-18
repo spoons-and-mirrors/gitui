@@ -1,7 +1,10 @@
 use std::{
+    collections::hash_map::DefaultHasher,
     fs,
+    hash::{Hash, Hasher},
     path::{Path, PathBuf},
     process::{Command, Output},
+    time::UNIX_EPOCH,
 };
 
 use anyhow::{Context, Result, bail};
@@ -126,6 +129,59 @@ pub fn commit(root: &Path, message: &str) -> Result<CommandOutput> {
     }
     let output = run(root, &["commit", "-m", message.trim()])?;
     Ok(command_output(output))
+}
+
+pub fn fetch(root: &Path) -> Result<CommandOutput> {
+    let output = run(root, &["fetch", "--all", "--prune"])?;
+    Ok(command_output(output))
+}
+
+pub fn worktree_signature(root: &Path) -> Result<u64> {
+    let output = run(
+        root,
+        &[
+            "-c",
+            "core.fsmonitor=false",
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "-z",
+            "--untracked-files=all",
+        ],
+    )?;
+    if !output.status.success() {
+        bail!("{}", clean_stderr(&output));
+    }
+
+    let mut signature = DefaultHasher::new();
+    output.stdout.hash(&mut signature);
+    for record in output.stdout.split(|byte| *byte == 0) {
+        let Some(path) = porcelain_v2_path(record) else {
+            continue;
+        };
+        path.hash(&mut signature);
+        let path = root.join(String::from_utf8_lossy(path).as_ref());
+        if let Ok(metadata) = fs::symlink_metadata(path) {
+            metadata.len().hash(&mut signature);
+            metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_nanos())
+                .hash(&mut signature);
+        }
+    }
+    Ok(signature.finish())
+}
+
+fn porcelain_v2_path(record: &[u8]) -> Option<&[u8]> {
+    match record.first()? {
+        b'1' => record.splitn(9, |byte| *byte == b' ').nth(8),
+        b'2' => record.splitn(10, |byte| *byte == b' ').nth(9),
+        b'u' => record.splitn(11, |byte| *byte == b' ').nth(10),
+        b'?' => record.strip_prefix(b"? "),
+        _ => None,
+    }
 }
 
 pub fn diff(root: &Path, change: &Change) -> Result<String> {
@@ -454,6 +510,9 @@ fn run(root: &Path, args: &[&str]) -> Result<Output> {
         .args(["--no-pager", "--no-optional-locks"])
         .args(args)
         .env("GIT_PAGER", "cat")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "false")
+        .env("SSH_ASKPASS", "false")
         .output()
         .with_context(|| format!("could not run git {}", args.join(" ")))
 }
@@ -613,6 +672,9 @@ mod tests {
         let committed = load(root).unwrap();
         assert!(committed.changes.is_empty());
         assert_eq!(committed.commits.len(), 5);
+
+        let fetched = super::fetch(root).unwrap();
+        assert!(fetched.success, "{}", fetched.stderr);
     }
 
     #[cfg(test)]
