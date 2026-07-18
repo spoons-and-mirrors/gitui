@@ -1,7 +1,8 @@
 use std::{
-    collections::hash_map::DefaultHasher,
+    collections::{HashMap, hash_map::DefaultHasher},
     fs,
     hash::{Hash, Hasher},
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
     process::{Command, Output},
     time::UNIX_EPOCH,
@@ -25,6 +26,8 @@ pub struct Change {
     pub original_path: Option<String>,
     pub code: char,
     pub staged: bool,
+    pub additions: u64,
+    pub deletions: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -72,7 +75,8 @@ pub fn discover(path: &Path) -> Result<PathBuf> {
 pub fn load(path: &Path) -> Result<RepositoryData> {
     let root = discover(path)?;
     let branch = branch_name(&root)?;
-    let changes = status(&root)?;
+    let mut changes = status(&root)?;
+    populate_diff_stats(&root, &mut changes)?;
     let files = repository_files(&root)?;
     let history = branch_history(&root)?;
     let mut commits = log(&root)?;
@@ -348,6 +352,8 @@ fn parse_status(bytes: &[u8]) -> Vec<Change> {
                 original_path: original_path.clone(),
                 code: x,
                 staged: true,
+                additions: 0,
+                deletions: 0,
             });
         }
         if y != ' ' && y != '!' {
@@ -356,6 +362,8 @@ fn parse_status(bytes: &[u8]) -> Vec<Change> {
                 original_path,
                 code: y,
                 staged: false,
+                additions: 0,
+                deletions: 0,
             });
         }
 
@@ -367,6 +375,77 @@ fn parse_status(bytes: &[u8]) -> Vec<Change> {
 
     changes.sort_by(|a, b| b.staged.cmp(&a.staged).then_with(|| a.path.cmp(&b.path)));
     changes
+}
+
+fn populate_diff_stats(root: &Path, changes: &mut [Change]) -> Result<()> {
+    let staged = diff_stats(root, true)?;
+    let unstaged = diff_stats(root, false)?;
+    for change in changes {
+        if change.code == '?' && !change.staged {
+            change.additions = count_file_lines(&root.join(&change.path)).unwrap_or(0);
+            continue;
+        }
+        let stats = if change.staged { &staged } else { &unstaged };
+        let (mut additions, mut deletions) = stats.get(&change.path).copied().unwrap_or_default();
+        if let Some(original) = &change.original_path {
+            let original_stats = stats.get(original).copied().unwrap_or_default();
+            additions = additions.saturating_add(original_stats.0);
+            deletions = deletions.saturating_add(original_stats.1);
+        }
+        change.additions = additions;
+        change.deletions = deletions;
+    }
+    Ok(())
+}
+
+fn diff_stats(root: &Path, staged: bool) -> Result<HashMap<String, (u64, u64)>> {
+    let args = if staged {
+        ["diff", "--cached", "--no-renames", "--numstat", "-z"].as_slice()
+    } else {
+        ["diff", "--no-renames", "--numstat", "-z"].as_slice()
+    };
+    let output = run(root, args)?;
+    if !output.status.success() {
+        bail!("{}", clean_stderr(&output));
+    }
+    let mut stats = HashMap::new();
+    for record in output.stdout.split(|byte| *byte == 0) {
+        let mut fields = record.splitn(3, |byte| *byte == b'\t');
+        let (Some(additions), Some(deletions), Some(path)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let additions = String::from_utf8_lossy(additions).parse().unwrap_or(0);
+        let deletions = String::from_utf8_lossy(deletions).parse().unwrap_or(0);
+        stats.insert(
+            String::from_utf8_lossy(path).into_owned(),
+            (additions, deletions),
+        );
+    }
+    Ok(stats)
+}
+
+fn count_file_lines(path: &Path) -> Result<u64> {
+    let mut reader = BufReader::new(fs::File::open(path)?);
+    let mut lines = 0u64;
+    let mut has_bytes = false;
+    let mut ends_with_newline = true;
+    loop {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
+            break;
+        }
+        if buffer.contains(&0) {
+            return Ok(0);
+        }
+        has_bytes = true;
+        lines = lines.saturating_add(buffer.iter().filter(|byte| **byte == b'\n').count() as u64);
+        ends_with_newline = buffer.last() == Some(&b'\n');
+        let consumed = buffer.len();
+        reader.consume(consumed);
+    }
+    Ok(lines + u64::from(has_bytes && !ends_with_newline))
 }
 
 fn log(root: &Path) -> Result<Vec<Commit>> {
@@ -760,6 +839,10 @@ mod tests {
         assert!(repo.commits[0].graph.iter().any(|cell| cell.symbol == '─'));
         assert_eq!(repo.changes.len(), 1);
         assert_eq!(repo.changes[0].path, "main.txt");
+        assert_eq!(
+            (repo.changes[0].additions, repo.changes[0].deletions),
+            (1, 1)
+        );
         assert!(repo.files.iter().any(|path| path == "base.txt"));
         assert!(repo.files.iter().any(|path| path == "feature.txt"));
         assert!(repo.files.iter().any(|path| path == "ignored/cache.txt"));
@@ -776,6 +859,10 @@ mod tests {
         stage(root, &repo.changes[0]).unwrap();
         let staged = load(root).unwrap();
         assert!(staged.changes[0].staged);
+        assert_eq!(
+            (staged.changes[0].additions, staged.changes[0].deletions),
+            (1, 1)
+        );
 
         unstage(root, &staged.changes[0]).unwrap();
         let unstaged = load(root).unwrap();

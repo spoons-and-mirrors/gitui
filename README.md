@@ -2,7 +2,7 @@
 
 A focused Rust/Ratatui interface for the two Git views that matter most during everyday work:
 
-- A collapsible worktree tree with compact directory chains for inspecting, staging, unstaging, and committing changes.
+- A collapsible worktree tree with per-file added/deleted line counts for inspecting, staging, unstaging, and committing changes.
 - A switchable repository file tree, including Git-ignored files, with read-only, syntax-colored previews.
 - A resizable current-branch history shelf with HEAD, branch, remote, and tag decorations; selecting a commit shows its patch.
 - An all-refs commit graph showing branches, remotes, tags, authors, dates, and hashes.

@@ -192,11 +192,11 @@ fn draw_changes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let repo = app.repo.as_ref().expect("checked above");
     let staged_count = repo.changes.iter().filter(|change| change.staged).count();
     let checkbox = if !repo.changes.is_empty() && staged_count == repo.changes.len() {
-        "[x]"
+        "◉"
     } else if staged_count > 0 {
-        "[-]"
+        "◐"
     } else {
-        "[ ]"
+        "○"
     };
     let checkbox_color = if staged_count == repo.changes.len() && staged_count > 0 {
         palette().green
@@ -243,15 +243,15 @@ fn draw_changes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     );
     app.regions.worktree_list = Some(worktree_list);
     app.regions.worktree_status = Some(Rect::new(
-        worktree_list.right().saturating_sub(3),
+        worktree_list.right().saturating_sub(2),
         worktree_list.y,
-        worktree_list.width.min(3),
+        worktree_list.width.min(2),
         worktree_list.height,
     ));
     app.regions.stage_all = Some(Rect::new(
-        worktree_header.right().saturating_sub(3),
+        worktree_header.right().saturating_sub(2),
         worktree_header.y,
-        3,
+        worktree_header.width.min(2),
         1,
     ));
     app.regions.unstage_all = None;
@@ -314,7 +314,7 @@ fn draw_changes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let files_title = "FILES";
     let worktree_title_width = UnicodeWidthStr::width(worktree_title.as_str());
     let title_width = worktree_title_width + 2 + files_title.len();
-    let stage_width = UnicodeWidthStr::width(stage_label.as_str()) + 4;
+    let stage_width = UnicodeWidthStr::width(stage_label.as_str()) + 3;
     let stage_padding =
         usize::from(worktree_header.width).saturating_sub(title_width + stage_width);
     frame.render_widget(
@@ -333,7 +333,7 @@ fn draw_changes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 Style::default().fg(palette().muted),
             ),
             Span::styled(
-                checkbox,
+                format!("{checkbox} "),
                 Style::default()
                     .fg(checkbox_color)
                     .add_modifier(Modifier::BOLD),
@@ -1294,17 +1294,18 @@ fn draw_settings(frame: &mut Frame<'_>, app: &mut App) {
     );
 
     let checkbox = if app.settings.auto_fetch {
-        "[x]"
+        "◉"
     } else {
-        "[ ]"
+        "○"
     };
-    let auto_padding = usize::from(auto_row.width).saturating_sub(18 + checkbox.len());
+    let auto_padding =
+        usize::from(auto_row.width).saturating_sub(19 + UnicodeWidthStr::width(checkbox));
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("Auto-fetch remotes", Style::default().fg(palette().ink)),
             Span::raw(" ".repeat(auto_padding)),
             Span::styled(
-                checkbox,
+                format!("{checkbox} "),
                 Style::default()
                     .fg(if app.settings.auto_fetch {
                         palette().green
@@ -1466,9 +1467,9 @@ fn worktree_item<'a>(row: &'a WorktreeRow, changes: &'a [Change], width: usize) 
     };
     let change = &changes[change_index];
     let (checkbox, color) = if change.staged {
-        ("[x]", palette().green)
+        ("◉", palette().green)
     } else {
-        ("[ ]", palette().muted)
+        ("○", palette().muted)
     };
     let label = change.original_path.as_ref().map_or_else(
         || row.label.clone(),
@@ -1477,17 +1478,31 @@ fn worktree_item<'a>(row: &'a WorktreeRow, changes: &'a [Change], width: usize) 
             format!("{original_name} → {}", row.label)
         },
     );
-    let available_label = width.saturating_sub(3);
+    let additions = format!("+{}", change.additions);
+    let deletions = format!("-{}", change.deletions);
+    let stats_width = additions.len() + 1 + deletions.len();
+    let show_stats = width >= stats_width + 10;
+    let controls_width = 2 + usize::from(show_stats) * (stats_width + 1);
+    let available_label = width.saturating_sub(controls_width);
     let path = truncate_width(&format!("{}{}", row.prefix, label), available_label);
     let padding = available_label.saturating_sub(UnicodeWidthStr::width(path.as_str()));
-    ListItem::new(Line::from(vec![
+    let mut spans = vec![
         Span::styled(path, Style::default().fg(palette().ink)),
         Span::raw(" ".repeat(padding)),
-        Span::styled(
-            checkbox,
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ),
-    ]))
+    ];
+    if show_stats {
+        spans.extend([
+            Span::styled(additions, Style::default().fg(palette().green)),
+            Span::raw(" "),
+            Span::styled(deletions, Style::default().fg(palette().red)),
+            Span::raw(" "),
+        ]);
+    }
+    spans.push(Span::styled(
+        format!("{checkbox} "),
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    ));
+    ListItem::new(Line::from(spans))
 }
 
 fn explorer_item(row: &ExplorerRow, width: usize) -> ListItem<'static> {
@@ -2107,6 +2122,7 @@ mod tests {
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
         let stage_all = app.regions.stage_all.unwrap();
+        assert_eq!(stage_all.width, 2);
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             stage_all.x,
@@ -2121,6 +2137,21 @@ mod tests {
                 .all(|change| change.staged)
         );
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let staged_screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(staged_screen.contains('◉'));
+        for (index, cell) in terminal.backend().buffer().content.iter().enumerate() {
+            if cell.symbol() == "◉" {
+                let trailing = &terminal.backend().buffer().content[index + 1];
+                assert_eq!(trailing.symbol(), " ");
+                assert_eq!(cell.bg, trailing.bg);
+            }
+        }
         let stage_all = app.regions.stage_all.unwrap();
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
@@ -2137,7 +2168,17 @@ mod tests {
         );
 
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let unstaged_screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(unstaged_screen.contains('○'));
+        assert!(!unstaged_screen.contains("[ ]"));
         let status = app.regions.worktree_status.unwrap();
+        assert_eq!(status.width, 2);
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             status.x,

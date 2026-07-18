@@ -242,13 +242,10 @@ fn join_tree_path(parent: &str, name: &str) -> String {
     }
 }
 
-fn tree_prefix(lineage: &[bool], is_last: bool, first_root: bool) -> String {
+fn tree_prefix(lineage: &[bool], _is_last: bool, _first_root: bool) -> String {
     let mut prefix = String::from(" ");
-    for ancestor_is_last in lineage {
-        prefix.push_str(if *ancestor_is_last { "   " } else { "│  " });
-    }
-    if !first_root {
-        prefix.push_str(if is_last { "└─ " } else { "├─ " });
+    for _ in lineage {
+        prefix.push_str("│ ");
     }
     prefix
 }
@@ -2499,7 +2496,7 @@ mod tests {
             ]
         );
         assert_eq!(rows[0].prefix, " ");
-        assert_eq!(rows[1].prefix, "    ├─ ");
+        assert_eq!(rows[1].prefix, " │ ");
         assert_eq!(rows[2].label, "views");
         assert_eq!(rows[4].change_index, Some(0));
         assert_eq!(rows[3].change_index, Some(1));
@@ -2775,6 +2772,8 @@ mod tests {
             original_path: None,
             code: 'M',
             staged: false,
+            additions: 0,
+            deletions: 0,
         }
     }
 }
