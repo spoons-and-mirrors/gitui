@@ -8,7 +8,7 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
-    app::{App, Mode, PickerAction, Regions, View, WorktreeRow},
+    app::{App, ExplorerRow, LeftPane, Mode, PickerAction, Regions, View, WorktreeRow},
     git::{Change, Commit},
     theme::{Palette, load_theme},
 };
@@ -183,6 +183,10 @@ fn draw_changes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             palette().accent,
         );
     }
+    if app.left_pane == LeftPane::Files {
+        draw_explorer_changes(frame, app, columns);
+        return;
+    }
 
     let worktree_content = columns[0].inner(Margin::new(1, 0));
     let repo = app.repo.as_ref().expect("checked above");
@@ -287,12 +291,14 @@ fn draw_changes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     } else {
         "All".to_owned()
     };
-    let worktree_title = if worktree_header.width >= 30 {
+    let worktree_title = if worktree_header.width >= 36 {
         format!("WORKTREE  {}", repo.changes.len())
     } else {
         "WORKTREE".to_owned()
     };
-    let title_width = UnicodeWidthStr::width(worktree_title.as_str());
+    let files_title = "FILES";
+    let worktree_title_width = UnicodeWidthStr::width(worktree_title.as_str());
+    let title_width = worktree_title_width + 2 + files_title.len();
     let stage_width = UnicodeWidthStr::width(stage_label.as_str()) + 4;
     let stage_padding =
         usize::from(worktree_header.width).saturating_sub(title_width + stage_width);
@@ -304,6 +310,8 @@ fn draw_changes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     .fg(palette().muted)
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::raw("  "),
+            Span::styled(files_title, Style::default().fg(palette().faint)),
             Span::raw(" ".repeat(stage_padding)),
             Span::styled(
                 format!("{stage_label} "),
@@ -318,6 +326,20 @@ fn draw_changes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         ])),
         worktree_header,
     );
+    app.regions.worktree_tab = Some(Rect::new(
+        worktree_header.x,
+        worktree_header.y,
+        worktree_title_width as u16,
+        1,
+    ));
+    app.regions.files_tab = Some(Rect::new(
+        worktree_header
+            .x
+            .saturating_add(worktree_title_width as u16 + 2),
+        worktree_header.y,
+        files_title.len() as u16,
+        1,
+    ));
     frame.render_stateful_widget(list, worktree_list, &mut app.changes_state);
 
     let history_header = app.regions.history_splitter.expect("set above");
@@ -468,64 +490,7 @@ fn draw_changes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         diff_header,
     );
     let diff_lines = styled_diff(&app.diff, syntax_path, usize::from(diff_body.width));
-    let rendered_height =
-        rendered_text_height(&diff_lines, usize::from(diff_body.width), app.diff_wrap);
-    let viewport_height = usize::from(diff_body.height);
-    let max_scroll = rendered_height
-        .saturating_sub(viewport_height)
-        .min(usize::from(u16::MAX)) as u16;
-    app.regions.diff_scroll_max = max_scroll;
-    app.diff_scroll = app.diff_scroll.min(max_scroll);
-    let scrollbar = Rect::new(
-        columns[1].right().saturating_sub(1),
-        diff_body.y,
-        1,
-        diff_body.height,
-    );
-    app.regions.diff_scrollbar = Some(scrollbar);
-    app.regions.diff_scroll_thumb = (max_scroll > 0).then(|| {
-        diff_scroll_thumb(
-            scrollbar,
-            rendered_height,
-            viewport_height,
-            app.diff_scroll,
-            max_scroll,
-        )
-    });
-    let mut diff = Paragraph::new(diff_lines)
-        .scroll((app.diff_scroll, 0))
-        .style(Style::default().bg(palette().panel));
-    if app.diff_wrap {
-        diff = diff.wrap(Wrap { trim: false });
-    }
-    frame.render_widget(diff, diff_body);
-    if let Some(thumb) = app.regions.diff_scroll_thumb {
-        frame.render_widget(
-            Paragraph::new(Text::from(
-                (0..scrollbar.height)
-                    .map(|_| Line::styled("│", Style::default().fg(palette().faint)))
-                    .collect::<Vec<_>>(),
-            )),
-            scrollbar,
-        );
-        frame.render_widget(
-            Paragraph::new(Text::from(
-                (0..thumb.height)
-                    .map(|_| {
-                        Line::styled(
-                            "┃",
-                            Style::default().fg(if app.dragging_diff_scrollbar {
-                                palette().accent
-                            } else {
-                                palette().muted
-                            }),
-                        )
-                    })
-                    .collect::<Vec<_>>(),
-            )),
-            thumb,
-        );
-    }
+    render_scrollable_content(frame, app, columns[1], diff_body, diff_lines);
 
     let commit_active = app.mode == Mode::Commit;
     fill(frame, commit_area, palette().canvas);
@@ -600,6 +565,187 @@ fn draw_changes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             .style(Style::default().bg(palette().canvas)),
         commit_content,
     );
+}
+
+fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2]) {
+    app.regions.worktree_list = None;
+    app.regions.worktree_status = None;
+    app.regions.stage_all = None;
+    app.regions.commit = None;
+    app.regions.history_list = None;
+    app.regions.history_splitter = None;
+    app.regions.history_bounds = None;
+
+    let content = columns[0].inner(Margin::new(1, 0));
+    let header = Rect::new(content.x, content.y.saturating_add(1), content.width, 1);
+    let list_area = Rect::new(
+        content.x,
+        header.y.saturating_add(2),
+        content.width,
+        content.bottom().saturating_sub(header.y.saturating_add(2)),
+    );
+    let file_count = app.repo.as_ref().map_or(0, |repo| repo.files.len());
+    let files_title = if header.width >= 30 {
+        format!("FILES  {file_count}")
+    } else {
+        "FILES".to_owned()
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("WORKTREE", Style::default().fg(palette().faint)),
+            Span::raw("  "),
+            Span::styled(
+                files_title.clone(),
+                Style::default()
+                    .fg(palette().muted)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        header,
+    );
+    app.regions.worktree_tab = Some(Rect::new(header.x, header.y, 8, 1));
+    app.regions.files_tab = Some(Rect::new(
+        header.x.saturating_add(10),
+        header.y,
+        UnicodeWidthStr::width(files_title.as_str()) as u16,
+        1,
+    ));
+    app.regions.explorer_list = Some(list_area);
+
+    let rows = app.explorer_rows();
+    let items: Vec<ListItem<'_>> = if rows.is_empty() {
+        vec![ListItem::new(Line::styled(
+            " No tracked or unignored files",
+            Style::default().fg(palette().faint),
+        ))]
+    } else {
+        rows.iter()
+            .map(|row| explorer_item(row, usize::from(list_area.width)))
+            .collect()
+    };
+    frame.render_stateful_widget(
+        List::new(items).highlight_style(Style::default().bg(palette().selected)),
+        list_area,
+        &mut app.explorer_state,
+    );
+
+    let selected_path = app
+        .selected_explorer_file_path()
+        .unwrap_or("No file selected")
+        .to_owned();
+    let preview_header = Rect::new(
+        columns[1].x.saturating_add(1),
+        columns[1].y.saturating_add(1),
+        columns[1].width.saturating_sub(2),
+        1,
+    );
+    let preview_body = Rect::new(
+        preview_header.x,
+        preview_header.y.saturating_add(2),
+        preview_header.width,
+        columns[1]
+            .bottom()
+            .saturating_sub(preview_header.y.saturating_add(3)),
+    );
+    let wrap_label = if app.diff_wrap { "  w:on" } else { "  w:off" };
+    let display_path = truncate_width(
+        &selected_path,
+        usize::from(preview_header.width)
+            .saturating_sub(7 + "read-only".len() + UnicodeWidthStr::width(wrap_label)),
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "FILE  ",
+                Style::default()
+                    .fg(palette().muted)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                display_path,
+                Style::default()
+                    .fg(palette().ink)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  read-only", Style::default().fg(palette().accent)),
+            Span::styled(
+                wrap_label,
+                Style::default().fg(if app.diff_wrap {
+                    palette().accent
+                } else {
+                    palette().faint
+                }),
+            ),
+        ])),
+        preview_header,
+    );
+    let lines = styled_source(
+        &app.diff,
+        app.selected_explorer_file_path().unwrap_or_default(),
+        usize::from(preview_body.width),
+    );
+    render_scrollable_content(frame, app, columns[1], preview_body, lines);
+}
+
+fn render_scrollable_content(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    panel: Rect,
+    body: Rect,
+    lines: Vec<Line<'static>>,
+) {
+    let rendered_height = rendered_text_height(&lines, usize::from(body.width), app.diff_wrap);
+    let viewport_height = usize::from(body.height);
+    let max_scroll = rendered_height
+        .saturating_sub(viewport_height)
+        .min(usize::from(u16::MAX)) as u16;
+    app.regions.diff_scroll_max = max_scroll;
+    app.diff_scroll = app.diff_scroll.min(max_scroll);
+    let scrollbar = Rect::new(panel.right().saturating_sub(1), body.y, 1, body.height);
+    app.regions.diff_scrollbar = Some(scrollbar);
+    app.regions.diff_scroll_thumb = (max_scroll > 0).then(|| {
+        diff_scroll_thumb(
+            scrollbar,
+            rendered_height,
+            viewport_height,
+            app.diff_scroll,
+            max_scroll,
+        )
+    });
+    let mut paragraph = Paragraph::new(lines)
+        .scroll((app.diff_scroll, 0))
+        .style(Style::default().bg(palette().panel));
+    if app.diff_wrap {
+        paragraph = paragraph.wrap(Wrap { trim: false });
+    }
+    frame.render_widget(paragraph, body);
+    if let Some(thumb) = app.regions.diff_scroll_thumb {
+        frame.render_widget(
+            Paragraph::new(Text::from(
+                (0..scrollbar.height)
+                    .map(|_| Line::styled("│", Style::default().fg(palette().faint)))
+                    .collect::<Vec<_>>(),
+            )),
+            scrollbar,
+        );
+        frame.render_widget(
+            Paragraph::new(Text::from(
+                (0..thumb.height)
+                    .map(|_| {
+                        Line::styled(
+                            "┃",
+                            Style::default().fg(if app.dragging_diff_scrollbar {
+                                palette().accent
+                            } else {
+                                palette().muted
+                            }),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+            thumb,
+        );
+    }
 }
 
 fn draw_graph(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -1250,6 +1396,7 @@ fn draw_help(frame: &mut Frame<'_>) {
         help_line("r", "Refresh"),
         help_line("o", "Repository"),
         help_line("s", "Settings"),
+        help_line("e", "Worktree / files"),
         help_line("w", "Wrap diff"),
     ];
     let worktree = vec![
@@ -1322,6 +1469,24 @@ fn worktree_item<'a>(row: &'a WorktreeRow, changes: &'a [Change], width: usize) 
     ]))
 }
 
+fn explorer_item(row: &ExplorerRow, width: usize) -> ListItem<'static> {
+    if row.file_index.is_none() {
+        let marker = if row.directory_expanded == Some(false) {
+            "▸ "
+        } else {
+            "▾ "
+        };
+        return ListItem::new(Line::styled(
+            truncate_width(&format!("{}{}{}", row.prefix, marker, row.label), width),
+            Style::default().fg(palette().muted),
+        ));
+    }
+    ListItem::new(Line::styled(
+        truncate_width(&format!("{}{}", row.prefix, row.label), width),
+        Style::default().fg(palette().ink),
+    ))
+}
+
 fn truncate_width(value: &str, width: usize) -> String {
     if UnicodeWidthStr::width(value) <= width {
         return value.to_owned();
@@ -1365,6 +1530,26 @@ fn truncate_start_width(value: &str, width: usize) -> String {
         used += character_width;
     }
     format!("…{suffix}")
+}
+
+fn styled_source(source: &str, path: &str, width: usize) -> Vec<Line<'static>> {
+    let numbered = width >= 72;
+    source
+        .lines()
+        .enumerate()
+        .map(|(index, line)| {
+            let mut spans = if numbered {
+                vec![Span::styled(
+                    format!("{:>5}  ", index + 1),
+                    Style::default().fg(palette().faint),
+                )]
+            } else {
+                Vec::new()
+            };
+            spans.extend(syntax_spans(line, path));
+            finish_diff_line(spans, width, palette().panel)
+        })
+        .collect()
 }
 
 fn styled_diff(diff: &str, path: &str, width: usize) -> Vec<Line<'static>> {
@@ -1811,6 +1996,55 @@ mod tests {
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         assert_eq!(app.regions.worktree.unwrap().x, 0);
         assert_eq!(app.regions.diff.unwrap().right(), 120);
+
+        let files_tab = app.regions.files_tab.unwrap();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            files_tab.x,
+            files_tab.y,
+        ));
+        assert_eq!(app.left_pane, LeftPane::Files);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(app.regions.commit.is_none());
+        assert!(app.regions.history_list.is_none());
+        let explorer = app.regions.explorer_list.unwrap();
+        let explorer_rows = app.explorer_rows();
+        let repo = app.repo.as_ref().unwrap();
+        let tracked_row = explorer_rows
+            .iter()
+            .position(|row| {
+                row.file_index
+                    .and_then(|index| repo.files.get(index))
+                    .is_some_and(|path| path == "tracked.txt")
+            })
+            .unwrap();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            explorer.x + 2,
+            explorer.y + tracked_row as u16,
+        ));
+        assert_eq!(app.selected_explorer_file_path(), Some("tracked.txt"));
+        assert_eq!(app.diff, "changed\n");
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let file_screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(file_screen.contains("FILE"));
+        assert!(file_screen.contains("read-only"));
+        assert!(file_screen.contains("changed"));
+
+        let worktree_tab = app.regions.worktree_tab.unwrap();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            worktree_tab.x,
+            worktree_tab.y,
+        ));
+        assert_eq!(app.left_pane, LeftPane::Worktree);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
         let stage_all = app.regions.stage_all.unwrap();
         app.handle_mouse(mouse(

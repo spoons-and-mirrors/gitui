@@ -23,6 +23,12 @@ pub enum View {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeftPane {
+    Worktree,
+    Files,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Normal,
     Commit,
@@ -60,6 +66,16 @@ pub struct WorktreeRow {
     pub directory_expanded: Option<bool>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplorerRow {
+    pub prefix: String,
+    pub label: String,
+    pub depth: usize,
+    pub file_index: Option<usize>,
+    pub directory_path: Option<String>,
+    pub directory_expanded: Option<bool>,
+}
+
 #[derive(Default)]
 struct WorktreeNode {
     children: BTreeMap<String, WorktreeNode>,
@@ -75,6 +91,75 @@ pub fn build_worktree(changes: &[Change], collapsed: &HashSet<String>) -> Vec<Wo
     let mut rows = Vec::new();
     flatten_worktree(&root, "", &[], true, collapsed, &mut rows);
     rows
+}
+
+pub fn build_file_tree(files: &[String], collapsed: &HashSet<String>) -> Vec<ExplorerRow> {
+    let mut root = WorktreeNode::default();
+    for (index, path) in files.iter().enumerate() {
+        insert_worktree_path(&mut root, path, index);
+    }
+    let mut rows = Vec::new();
+    flatten_file_tree(&root, "", &[], true, collapsed, &mut rows);
+    rows
+}
+
+fn flatten_file_tree(
+    node: &WorktreeNode,
+    parent_path: &str,
+    lineage: &[bool],
+    top_level: bool,
+    collapsed: &HashSet<String>,
+    rows: &mut Vec<ExplorerRow>,
+) {
+    let mut children: Vec<_> = node.children.iter().collect();
+    children.sort_by_key(|(name, child)| (child.children.is_empty(), name.as_str()));
+    let child_count = children.len();
+    for (position, (name, child)) in children.into_iter().enumerate() {
+        let is_last = position + 1 == child_count;
+        let first_root = top_level && position == 0;
+        let mut path = join_tree_path(parent_path, name);
+        let prefix = tree_prefix(lineage, is_last, first_root);
+        if child.children.is_empty() {
+            if let Some(file_index) = child.changes.first() {
+                rows.push(ExplorerRow {
+                    prefix,
+                    label: name.clone(),
+                    depth: lineage.len(),
+                    file_index: Some(*file_index),
+                    directory_path: None,
+                    directory_expanded: None,
+                });
+            }
+            continue;
+        }
+
+        let mut label = name.clone();
+        let mut directory = child;
+        while directory.changes.is_empty() && directory.children.len() == 1 {
+            let (next_name, next) = directory.children.first_key_value().expect("one child");
+            if next.children.is_empty() {
+                break;
+            }
+            label.push('/');
+            label.push_str(next_name);
+            path = join_tree_path(&path, next_name);
+            directory = next;
+        }
+        let expanded = !collapsed.contains(&path);
+        rows.push(ExplorerRow {
+            prefix,
+            label,
+            depth: lineage.len(),
+            file_index: None,
+            directory_path: Some(path.clone()),
+            directory_expanded: Some(expanded),
+        });
+        if expanded {
+            let mut child_lineage = lineage.to_vec();
+            child_lineage.push(is_last);
+            flatten_file_tree(directory, &path, &child_lineage, false, collapsed, rows);
+        }
+    }
 }
 
 fn insert_worktree_path(root: &mut WorktreeNode, path: &str, change_index: usize) {
@@ -177,7 +262,10 @@ pub struct Regions {
     pub settings: Option<Rect>,
     pub help: Option<Rect>,
     pub worktree: Option<Rect>,
+    pub worktree_tab: Option<Rect>,
+    pub files_tab: Option<Rect>,
     pub worktree_list: Option<Rect>,
+    pub explorer_list: Option<Rect>,
     pub worktree_status: Option<Rect>,
     pub history_list: Option<Rect>,
     pub history_splitter: Option<Rect>,
@@ -254,8 +342,10 @@ enum WorkerKind {
 pub struct App {
     pub repo: Option<RepositoryData>,
     pub view: View,
+    pub left_pane: LeftPane,
     pub mode: Mode,
     pub changes_state: ListState,
+    pub explorer_state: ListState,
     pub graph_state: TableState,
     pub history_state: ListState,
     pub diff: String,
@@ -264,6 +354,7 @@ pub struct App {
     pub commit_message: String,
     pub commit_running: bool,
     pub collapsed_directories: HashSet<String>,
+    pub collapsed_explorer_directories: HashSet<String>,
     pub dragging_splitter: bool,
     pub dragging_history: bool,
     pub dragging_diff_scrollbar: bool,
@@ -314,8 +405,10 @@ impl App {
         let mut app = Self {
             repo,
             view: View::Changes,
+            left_pane: LeftPane::Worktree,
             mode,
             changes_state: ListState::default(),
+            explorer_state: ListState::default(),
             graph_state: TableState::default(),
             history_state: ListState::default(),
             diff: String::new(),
@@ -324,6 +417,7 @@ impl App {
             commit_message: String::new(),
             commit_running: false,
             collapsed_directories: HashSet::new(),
+            collapsed_explorer_directories: HashSet::new(),
             dragging_splitter: false,
             dragging_history: false,
             dragging_diff_scrollbar: false,
@@ -504,6 +598,22 @@ impl App {
         }
         if self
             .regions
+            .worktree_tab
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.set_left_pane(LeftPane::Worktree);
+            return;
+        }
+        if self
+            .regions
+            .files_tab
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.set_left_pane(LeftPane::Files);
+            return;
+        }
+        if self
+            .regions
             .stage_all
             .is_some_and(|rect| rect.contains(point))
         {
@@ -547,6 +657,10 @@ impl App {
             self.mode = Mode::Settings;
         } else if self.regions.help.is_some_and(|rect| rect.contains(point)) {
             self.mode = Mode::Help;
+        } else if self.select_explorer_row(point) {
+            if self.selected_explorer_directory_path().is_some() {
+                self.toggle_selected_explorer_directory();
+            }
         } else if self.select_worktree_row(point) {
             if self.selected_directory_path().is_some() {
                 self.toggle_selected_directory();
@@ -657,7 +771,7 @@ impl App {
     }
 
     fn select_worktree_row(&mut self, point: Position) -> bool {
-        if self.view != View::Changes {
+        if self.view != View::Changes || self.left_pane != LeftPane::Worktree {
             return false;
         }
         let Some(rect) = self
@@ -674,6 +788,26 @@ impl App {
         }
         self.changes_state.select(Some(index));
         self.clear_history_selection();
+        self.refresh_diff();
+        true
+    }
+
+    fn select_explorer_row(&mut self, point: Position) -> bool {
+        if self.view != View::Changes || self.left_pane != LeftPane::Files {
+            return false;
+        }
+        let Some(rect) = self
+            .regions
+            .explorer_list
+            .filter(|rect| rect.contains(point))
+        else {
+            return false;
+        };
+        let index = self.explorer_state.offset() + usize::from(point.y - rect.y);
+        if index >= self.explorer_rows().len() {
+            return false;
+        }
+        self.explorer_state.select(Some(index));
         self.refresh_diff();
         true
     }
@@ -732,6 +866,12 @@ impl App {
     fn scroll_at(&mut self, point: Position, delta: isize) {
         if self.regions.diff.is_some_and(|rect| rect.contains(point)) {
             self.scroll_diff_by(delta.saturating_mul(3));
+        } else if self
+            .regions
+            .explorer_list
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.move_explorer_selection(delta);
         } else if self
             .regions
             .history_list
@@ -914,22 +1054,59 @@ impl App {
                     .to_owned(),
                 );
             }
-            KeyCode::Char('c') if self.view == View::Changes => self.mode = Mode::Commit,
-            KeyCode::Char('a') if self.view == View::Changes => self.stage_all(),
-            KeyCode::Char('u') if self.view == View::Changes => self.unstage_all(),
-            KeyCode::Char(' ') if self.view == View::Changes && !self.history_focused => {
+            KeyCode::Char('e') if self.view == View::Changes => self.toggle_left_pane(),
+            KeyCode::Char('c') if self.view == View::Changes => {
+                self.set_left_pane(LeftPane::Worktree);
+                self.mode = Mode::Commit;
+            }
+            KeyCode::Char('a')
+                if self.view == View::Changes && self.left_pane == LeftPane::Worktree =>
+            {
+                self.stage_all();
+            }
+            KeyCode::Char('u')
+                if self.view == View::Changes && self.left_pane == LeftPane::Worktree =>
+            {
+                self.unstage_all();
+            }
+            KeyCode::Char(' ')
+                if self.view == View::Changes
+                    && self.left_pane == LeftPane::Worktree
+                    && !self.history_focused =>
+            {
                 self.toggle_stage()
             }
-            KeyCode::Enter if self.view == View::Changes && !self.history_focused => {
+            KeyCode::Enter if self.view == View::Changes && self.left_pane == LeftPane::Files => {
+                self.toggle_selected_explorer_directory()
+            }
+            KeyCode::Enter
+                if self.view == View::Changes
+                    && self.left_pane == LeftPane::Worktree
+                    && !self.history_focused =>
+            {
                 self.toggle_selected_directory()
             }
             KeyCode::Right | KeyCode::Char('l')
-                if self.view == View::Changes && !self.history_focused =>
+                if self.view == View::Changes && self.left_pane == LeftPane::Files =>
+            {
+                self.expand_or_descend_explorer()
+            }
+            KeyCode::Right | KeyCode::Char('l')
+                if self.view == View::Changes
+                    && self.left_pane == LeftPane::Worktree
+                    && !self.history_focused =>
             {
                 self.expand_or_descend_worktree()
             }
             KeyCode::Left | KeyCode::Char('h')
-                if self.view == View::Changes && !self.history_focused =>
+                if self.view == View::Changes && self.left_pane == LeftPane::Files =>
+            {
+                self.collapse_or_ascend_explorer()
+            }
+            KeyCode::Left | KeyCode::Char('h')
+                if self.view == View::Changes
+                    && self.left_pane == LeftPane::Worktree
+                    && !self.history_focused =>
             {
                 self.collapse_or_ascend_worktree()
             }
@@ -1076,7 +1253,9 @@ impl App {
                 self.notice = Some("Repository opened".to_owned());
                 self.next_fetch_at = Instant::now() + fetch_interval(&self.settings);
                 self.collapsed_directories.clear();
+                self.collapsed_explorer_directories.clear();
                 self.changes_state = ListState::default();
+                self.explorer_state = ListState::default();
                 self.graph_state = TableState::default();
                 self.history_state = ListState::default();
                 self.history_focused = false;
@@ -1170,7 +1349,9 @@ impl App {
     fn move_selection(&mut self, delta: isize) {
         match self.view {
             View::Changes => {
-                if self.history_focused {
+                if self.left_pane == LeftPane::Files {
+                    self.move_explorer_selection(delta);
+                } else if self.history_focused {
                     let len = self.repo.as_ref().map_or(0, |repo| repo.history.len());
                     move_list(&mut self.history_state, len, delta);
                     self.refresh_diff();
@@ -1190,7 +1371,11 @@ impl App {
     fn select_first(&mut self) {
         match self.view {
             View::Changes => {
-                if self.history_focused {
+                if self.left_pane == LeftPane::Files {
+                    self.explorer_state
+                        .select((!self.explorer_rows().is_empty()).then_some(0));
+                    self.refresh_diff();
+                } else if self.history_focused {
                     self.history_state.select(
                         self.repo
                             .as_ref()
@@ -1215,7 +1400,11 @@ impl App {
     fn select_last(&mut self) {
         match self.view {
             View::Changes => {
-                if self.history_focused {
+                if self.left_pane == LeftPane::Files {
+                    self.explorer_state
+                        .select(self.explorer_rows().len().checked_sub(1));
+                    self.refresh_diff();
+                } else if self.history_focused {
                     self.history_state.select(
                         self.repo
                             .as_ref()
@@ -1297,6 +1486,8 @@ impl App {
             .and_then(|index| self.repo.as_ref()?.changes.get(index))
             .map(|change| (change.path.clone(), change.staged));
         let selected_directory = self.selected_directory_path();
+        let selected_explorer_file = self.selected_explorer_file_path().map(str::to_owned);
+        let selected_explorer_directory = self.selected_explorer_directory_path();
         let selected_oid = self
             .graph_state
             .selected()
@@ -1336,6 +1527,24 @@ impl App {
                     commit_index.or_else(|| self.repo.as_ref()?.commits.first().map(|_| 0)),
                 );
                 self.history_state.select(history_index);
+                let explorer_row = selected_explorer_file
+                    .and_then(|path| {
+                        let file_index = self
+                            .repo
+                            .as_ref()?
+                            .files
+                            .iter()
+                            .position(|candidate| candidate == &path)?;
+                        self.row_for_explorer_file(file_index)
+                    })
+                    .or_else(|| {
+                        let directory = selected_explorer_directory.as_ref()?;
+                        self.explorer_rows()
+                            .iter()
+                            .position(|row| row.directory_path.as_ref() == Some(directory))
+                    })
+                    .or_else(|| self.first_explorer_file_row());
+                self.explorer_state.select(explorer_row);
                 self.notice = Some("Refreshed".to_owned());
                 self.refresh_diff();
             }
@@ -1349,6 +1558,29 @@ impl App {
             self.diff.clear();
             return;
         };
+        if self.left_pane == LeftPane::Files {
+            let rows = build_file_tree(&repo.files, &self.collapsed_explorer_directories);
+            let Some(row) = self
+                .explorer_state
+                .selected()
+                .and_then(|index| rows.get(index))
+            else {
+                self.diff = "Select a file to preview".to_owned();
+                return;
+            };
+            if let Some(index) = row.file_index {
+                self.diff = git::file_content(&repo.root, &repo.files[index])
+                    .unwrap_or_else(|error| error.to_string());
+            } else if let Some(path) = &row.directory_path {
+                let count = repo
+                    .files
+                    .iter()
+                    .filter(|file| file.starts_with(&format!("{path}/")))
+                    .count();
+                self.diff = format!("{count} files in {path}/");
+            }
+            return;
+        }
         if self.history_focused
             && let Some(commit) = self
                 .history_state
@@ -1390,12 +1622,135 @@ impl App {
                 .then_some(0),
         );
         self.history_state.select(None);
+        self.explorer_state.select(self.first_explorer_file_row());
     }
 
     pub fn worktree_rows(&self) -> Vec<WorktreeRow> {
         self.repo.as_ref().map_or_else(Vec::new, |repo| {
             build_worktree(&repo.changes, &self.collapsed_directories)
         })
+    }
+
+    pub fn explorer_rows(&self) -> Vec<ExplorerRow> {
+        self.repo.as_ref().map_or_else(Vec::new, |repo| {
+            build_file_tree(&repo.files, &self.collapsed_explorer_directories)
+        })
+    }
+
+    pub fn selected_explorer_file_path(&self) -> Option<&str> {
+        let selected = self.explorer_state.selected()?;
+        let file_index = self.explorer_rows().get(selected)?.file_index?;
+        self.repo
+            .as_ref()?
+            .files
+            .get(file_index)
+            .map(String::as_str)
+    }
+
+    fn selected_explorer_directory_path(&self) -> Option<String> {
+        let selected = self.explorer_state.selected()?;
+        self.explorer_rows().get(selected)?.directory_path.clone()
+    }
+
+    fn set_left_pane(&mut self, pane: LeftPane) {
+        if self.left_pane == pane {
+            return;
+        }
+        self.left_pane = pane;
+        self.mode = Mode::Normal;
+        self.clear_history_selection();
+        if pane == LeftPane::Files && self.explorer_state.selected().is_none() {
+            self.explorer_state.select(self.first_explorer_file_row());
+        }
+        self.refresh_diff();
+    }
+
+    fn toggle_left_pane(&mut self) {
+        self.set_left_pane(match self.left_pane {
+            LeftPane::Worktree => LeftPane::Files,
+            LeftPane::Files => LeftPane::Worktree,
+        });
+    }
+
+    fn move_explorer_selection(&mut self, delta: isize) {
+        let len = self.explorer_rows().len();
+        move_list(&mut self.explorer_state, len, delta);
+        self.refresh_diff();
+    }
+
+    fn toggle_selected_explorer_directory(&mut self) {
+        let Some(path) = self.selected_explorer_directory_path() else {
+            return;
+        };
+        if !self.collapsed_explorer_directories.remove(&path) {
+            self.collapsed_explorer_directories.insert(path.clone());
+        }
+        self.select_explorer_directory(&path);
+        self.refresh_diff();
+    }
+
+    fn expand_or_descend_explorer(&mut self) {
+        let rows = self.explorer_rows();
+        let Some(index) = self.explorer_state.selected() else {
+            return;
+        };
+        let Some(row) = rows.get(index) else { return };
+        let Some(path) = &row.directory_path else {
+            return;
+        };
+        if row.directory_expanded == Some(false) {
+            self.collapsed_explorer_directories.remove(path);
+            self.select_explorer_directory(path);
+        } else if rows
+            .get(index + 1)
+            .is_some_and(|child| child.depth > row.depth)
+        {
+            self.explorer_state.select(Some(index + 1));
+        }
+        self.refresh_diff();
+    }
+
+    fn collapse_or_ascend_explorer(&mut self) {
+        let rows = self.explorer_rows();
+        let Some(index) = self.explorer_state.selected() else {
+            return;
+        };
+        let Some(row) = rows.get(index) else { return };
+        if let Some(path) = &row.directory_path
+            && row.directory_expanded == Some(true)
+        {
+            self.collapsed_explorer_directories.insert(path.clone());
+            self.select_explorer_directory(path);
+            self.refresh_diff();
+            return;
+        }
+        if let Some(parent) = rows[..index]
+            .iter()
+            .rposition(|candidate| candidate.depth < row.depth)
+        {
+            self.explorer_state.select(Some(parent));
+            self.refresh_diff();
+        }
+    }
+
+    fn select_explorer_directory(&mut self, path: &str) {
+        let row = self
+            .explorer_rows()
+            .iter()
+            .position(|row| row.directory_path.as_deref() == Some(path));
+        self.explorer_state.select(row);
+    }
+
+    fn row_for_explorer_file(&self, file_index: usize) -> Option<usize> {
+        self.explorer_rows()
+            .iter()
+            .position(|row| row.file_index == Some(file_index))
+    }
+
+    fn first_explorer_file_row(&self) -> Option<usize> {
+        self.explorer_rows()
+            .iter()
+            .position(|row| row.file_index.is_some())
     }
 
     fn selected_change_index(&self) -> Option<usize> {
@@ -2063,6 +2418,31 @@ mod tests {
         let rows = build_worktree(&changes, &collapsed);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].directory_expanded, Some(false));
+    }
+
+    #[test]
+    fn builds_a_collapsible_repository_file_tree() {
+        let files = vec![
+            "src/app/mod.rs".to_owned(),
+            "src/app/view.rs".to_owned(),
+            "src/main.rs".to_owned(),
+            "README.md".to_owned(),
+        ];
+        let rows = build_file_tree(&files, &HashSet::new());
+        let labels: Vec<_> = rows.iter().map(|row| row.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["src", "app", "mod.rs", "view.rs", "main.rs", "README.md"]
+        );
+        assert_eq!(rows[2].file_index, Some(0));
+        assert_eq!(rows[4].file_index, Some(2));
+
+        let rows = build_file_tree(&files, &HashSet::from(["src/app".to_owned()]));
+        assert!(rows.iter().any(|row| {
+            row.directory_path.as_deref() == Some("src/app")
+                && row.directory_expanded == Some(false)
+        }));
+        assert!(!rows.iter().any(|row| row.label == "mod.rs"));
     }
 
     #[test]

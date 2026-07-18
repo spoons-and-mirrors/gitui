@@ -14,6 +14,7 @@ pub struct RepositoryData {
     pub root: PathBuf,
     pub branch: String,
     pub changes: Vec<Change>,
+    pub files: Vec<String>,
     pub history: Vec<Commit>,
     pub commits: Vec<Commit>,
 }
@@ -72,6 +73,7 @@ pub fn load(path: &Path) -> Result<RepositoryData> {
     let root = discover(path)?;
     let branch = branch_name(&root)?;
     let changes = status(&root)?;
+    let files = repository_files(&root)?;
     let history = branch_history(&root)?;
     let mut commits = log(&root)?;
     layout_graph(&mut commits);
@@ -80,9 +82,62 @@ pub fn load(path: &Path) -> Result<RepositoryData> {
         root,
         branch,
         changes,
+        files,
         history,
         commits,
     })
+}
+
+pub fn repository_files(root: &Path) -> Result<Vec<String>> {
+    let output = run(
+        root,
+        &[
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ],
+    )?;
+    if !output.status.success() {
+        bail!("{}", clean_stderr(&output));
+    }
+    let mut files: Vec<_> = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .filter(|path| {
+            fs::symlink_metadata(root.join(path)).is_ok_and(|metadata| !metadata.is_dir())
+        })
+        .collect();
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
+pub fn file_content(root: &Path, relative_path: &str) -> Result<String> {
+    const MAX_PREVIEW_BYTES: u64 = 1_048_576;
+
+    let path = root.join(relative_path);
+    let metadata = fs::symlink_metadata(&path)
+        .with_context(|| format!("could not inspect {}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        let target = fs::read_link(&path)
+            .with_context(|| format!("could not read link {}", path.display()))?;
+        return Ok(format!("Symbolic link -> {}", target.display()));
+    }
+    if metadata.len() > MAX_PREVIEW_BYTES {
+        return Ok(format!(
+            "File is too large to preview\n\n{} bytes",
+            metadata.len()
+        ));
+    }
+    let bytes = fs::read(&path).with_context(|| format!("could not read {}", path.display()))?;
+    if bytes.contains(&0) {
+        return Ok(format!("Binary file\n\n{} bytes", bytes.len()));
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 pub fn stage(root: &Path, change: &Change) -> Result<()> {
@@ -701,6 +756,9 @@ mod tests {
         assert!(repo.commits[0].graph.iter().any(|cell| cell.symbol == '─'));
         assert_eq!(repo.changes.len(), 1);
         assert_eq!(repo.changes[0].path, "main.txt");
+        assert!(repo.files.iter().any(|path| path == "base.txt"));
+        assert!(repo.files.iter().any(|path| path == "feature.txt"));
+        assert_eq!(file_content(root, "main.txt").unwrap(), "changed\n");
         let selected_commit_diff = commit_diff(root, &repo.history[0].oid).unwrap();
         assert!(selected_commit_diff.contains("diff --git"));
 
