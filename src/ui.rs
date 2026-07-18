@@ -38,6 +38,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 .style(Style::default().fg(palette().ink)),
             frame.area(),
         );
+        finish_selection(frame, app);
         return;
     }
 
@@ -99,6 +100,15 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         Mode::Help => overlays::draw_help(frame),
         _ => {}
     }
+    finish_selection(frame, app);
+}
+
+fn finish_selection(frame: &mut Frame<'_>, app: &mut App) {
+    app.selection.render(
+        frame.buffer_mut(),
+        Style::default().fg(palette().canvas).bg(palette().accent),
+    );
+    app.selection.capture(frame.buffer_mut());
 }
 
 fn dim(frame: &mut Frame<'_>) {

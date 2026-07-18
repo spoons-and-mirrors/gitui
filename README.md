@@ -63,6 +63,7 @@ In the repository explorer, start typing a folder name, press `p` to search from
 - Click the Worktree `Stage all` checkbox to stage everything; click it again when checked to unstage everything.
 - Click the commit editor inside Worktree, type a message, and press `Ctrl+Enter` to commit.
 - Click the repository path field to type, or click a directory/repository entry to navigate or open it.
+- Drag across visible text to select it and automatically copy it to the clipboard. Selection stays within the panel where the drag starts.
 
 ## Settings
 
@@ -85,6 +86,7 @@ The binary stays deliberately direct, with modules split by the behavior they ow
 | `app::repository_picker` | Repository discovery, navigation, and fuzzy search |
 | `repository_session` | Active repository lifecycle and background operations |
 | `git` | Installed-Git commands, parsing, and repository data |
+| `selection` | Screen-cell selection, text extraction, and clipboard fallback |
 | `tree` | Pure worktree and file-tree projection |
 | `ui` | Rendering shell, header, and view dispatch |
 | `ui::changes` | Worktree, Files, Diff, and commit workspace |

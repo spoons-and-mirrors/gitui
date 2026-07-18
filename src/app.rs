@@ -21,6 +21,7 @@ use ratatui::{
 use crate::{
     git::{self, RepositoryData},
     repository_session::{RepositorySession, WorkerCompletion},
+    selection::{SelectionOutcome, SelectionState},
 };
 
 use actions::{ActionId, action_command, display_git_command, parse_git_args};
@@ -121,6 +122,8 @@ pub struct App {
     pub settings_selection: usize,
     pub notice: Option<String>,
     pub regions: Regions,
+    pub(crate) selection: SelectionState,
+    copy_request: Option<String>,
     pub should_quit: bool,
     pub(crate) settings_path: Option<PathBuf>,
 }
@@ -168,6 +171,8 @@ impl App {
             settings_selection: 0,
             notice: None,
             regions: Regions::default(),
+            selection: SelectionState::default(),
+            copy_request: None,
             should_quit: false,
             settings_path,
         }
@@ -186,6 +191,12 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        if self.selection.has_selection() {
+            self.selection.clear();
+            if key.code == KeyCode::Esc {
+                return;
+            }
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
             return;
@@ -220,39 +231,7 @@ impl App {
     }
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
-        if self.mode == Mode::ActionMenu {
-            self.handle_action_mouse(mouse);
-            return;
-        }
-        if self.mode == Mode::Command {
-            self.handle_command_mouse(mouse);
-            return;
-        }
-        if self.mode == Mode::Picker {
-            self.handle_picker_mouse(mouse);
-            return;
-        }
-        if self.mode == Mode::Settings {
-            self.handle_settings_mouse(mouse);
-            return;
-        }
-        if self.mode == Mode::Help {
-            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                self.mode = Mode::Normal;
-            }
-            return;
-        }
-
         let point = Position::new(mouse.column, mouse.row);
-        if self.mode == Mode::Commit
-            && matches!(
-                mouse.kind,
-                MouseEventKind::Down(MouseButton::Left | MouseButton::Right)
-            )
-            && !self.regions.commit.is_some_and(|rect| rect.contains(point))
-        {
-            self.mode = Mode::Normal;
-        }
         if self.dragging_splitter {
             match mouse.kind {
                 MouseEventKind::Drag(MouseButton::Left) => self.resize_worktree(mouse.column),
@@ -290,50 +269,98 @@ impl App {
         }
 
         match mouse.kind {
-            MouseEventKind::ScrollDown => {
-                self.scroll_at(point, 1);
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.selection.clear();
+                if self.begin_mouse_control(point) {
+                    return;
+                }
+                let region = self.selection_region(point);
+                self.selection.begin(point, region);
                 return;
             }
-            MouseEventKind::ScrollUp => {
-                self.scroll_at(point, -1);
+            MouseEventKind::Drag(MouseButton::Left) if self.selection.is_active() => {
+                self.selection.update(point);
                 return;
             }
-            MouseEventKind::Down(MouseButton::Right) => {
-                if self.select_worktree_row(point) {
-                    self.toggle_stage();
+            MouseEventKind::Up(MouseButton::Left) if self.selection.is_active() => {
+                match self.selection.finish(point) {
+                    SelectionOutcome::Click => self.handle_left_click(point),
+                    SelectionOutcome::Selected(Some(text)) => self.copy_request = Some(text),
+                    SelectionOutcome::Selected(None) => {}
                 }
                 return;
             }
-            MouseEventKind::Down(MouseButton::Left) => {}
-            _ => return,
+            _ => {}
         }
 
-        if self
-            .regions
-            .actions
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.open_actions();
+        if self.mode == Mode::ActionMenu {
+            self.handle_action_mouse(mouse);
             return;
+        }
+        if self.mode == Mode::Command {
+            self.handle_command_mouse(mouse);
+            return;
+        }
+        if self.mode == Mode::Picker {
+            self.handle_picker_mouse(mouse);
+            return;
+        }
+        if self.mode == Mode::Settings {
+            self.handle_settings_mouse(mouse);
+            return;
+        }
+        if self.mode == Mode::Help {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                self.mode = Mode::Normal;
+            }
+            return;
+        }
+
+        if self.mode == Mode::Commit
+            && mouse.kind == MouseEventKind::Down(MouseButton::Right)
+            && !self.regions.commit.is_some_and(|rect| rect.contains(point))
+        {
+            self.mode = Mode::Normal;
+        }
+
+        match mouse.kind {
+            MouseEventKind::ScrollDown => self.scroll_at(point, 1),
+            MouseEventKind::ScrollUp => self.scroll_at(point, -1),
+            MouseEventKind::Down(MouseButton::Right) if self.select_worktree_row(point) => {
+                self.toggle_stage();
+            }
+            _ => {}
+        }
+    }
+
+    pub fn take_copy_request(&mut self) -> Option<String> {
+        self.copy_request.take()
+    }
+
+    fn begin_mouse_control(&mut self, point: Position) -> bool {
+        if !matches!(self.mode, Mode::Normal | Mode::Commit) {
+            return false;
         }
         if self
             .regions
             .splitter
             .is_some_and(|rect| rect.contains(point))
         {
+            self.mode = Mode::Normal;
             self.dragging_splitter = true;
-            self.resize_worktree(mouse.column);
-            return;
+            self.resize_worktree(point.x);
+            return true;
         }
         if self
             .regions
             .history_splitter
             .is_some_and(|rect| rect.contains(point))
         {
+            self.mode = Mode::Normal;
             self.dragging_history = true;
             self.changes.history_focused = true;
-            self.resize_history(mouse.row);
-            return;
+            self.resize_history(point.y);
+            return true;
         }
         if self
             .regions
@@ -341,6 +368,7 @@ impl App {
             .is_some_and(|rect| rect.contains(point))
             && self.regions.diff_scroll_max > 0
         {
+            self.mode = Mode::Normal;
             self.dragging_diff_scrollbar = true;
             self.diff_scroll_drag_offset = self
                 .regions
@@ -354,7 +382,58 @@ impl App {
                     },
                     |thumb| point.y.saturating_sub(thumb.y),
                 );
-            self.scroll_diff_to(mouse.row);
+            self.scroll_diff_to(point.y);
+            return true;
+        }
+        false
+    }
+
+    fn selection_region(&self, point: Position) -> Rect {
+        [
+            self.regions.command_overlay,
+            self.regions.picker_overlay,
+            self.regions.settings_overlay,
+            self.regions.action_menu,
+            self.regions.diff,
+            self.regions.worktree,
+            self.regions.graph_table,
+        ]
+        .into_iter()
+        .flatten()
+        .find(|region| region.contains(point))
+        .or_else(|| self.selection.screen_area())
+        .unwrap_or(Rect::new(point.x, point.y, 1, 1))
+    }
+
+    fn handle_left_click(&mut self, point: Position) {
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: point.x,
+            row: point.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        match self.mode {
+            Mode::ActionMenu => self.handle_action_mouse(mouse),
+            Mode::Command => self.handle_command_mouse(mouse),
+            Mode::Picker => self.handle_picker_mouse(mouse),
+            Mode::Settings => self.handle_settings_mouse(mouse),
+            Mode::Help => self.mode = Mode::Normal,
+            Mode::Normal | Mode::Commit => self.handle_primary_left_click(point),
+        }
+    }
+
+    fn handle_primary_left_click(&mut self, point: Position) {
+        if self.mode == Mode::Commit
+            && !self.regions.commit.is_some_and(|rect| rect.contains(point))
+        {
+            self.mode = Mode::Normal;
+        }
+        if self
+            .regions
+            .actions
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.open_actions();
             return;
         }
         if self

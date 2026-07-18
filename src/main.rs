@@ -1,6 +1,7 @@
 mod app;
 mod git;
 mod repository_session;
+mod selection;
 mod theme;
 mod tree;
 mod ui;
@@ -41,6 +42,12 @@ fn main() -> Result<()> {
             Event::Mouse(mouse) => app.handle_mouse(mouse),
             Event::Paste(text) => app.handle_paste(&text),
             _ => {}
+        }
+        if let Some(text) = app.take_copy_request() {
+            app.notice = Some(match selection::copy_to_clipboard(&text) {
+                Ok(()) => "Copied selection".to_owned(),
+                Err(error) => format!("Could not copy selection: {error}"),
+            });
         }
     }
 

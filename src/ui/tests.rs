@@ -49,11 +49,7 @@ fn renders_every_primary_surface() {
     assert!(header.trim_end().ends_with("main"));
 
     let files_tab = app.regions.files_tab.unwrap();
-    app.handle_mouse(mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        files_tab.x,
-        files_tab.y,
-    ));
+    click(&mut app, files_tab.x, files_tab.y);
     assert_eq!(app.changes.pane, LeftPane::Files);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.regions.commit.is_none());
@@ -69,11 +65,7 @@ fn renders_every_primary_surface() {
         app.changes.explorer_rows()[directory_row].directory_expanded,
         Some(false)
     );
-    app.handle_mouse(mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        explorer.x + 2,
-        explorer.y + directory_row as u16,
-    ));
+    click(&mut app, explorer.x + 2, explorer.y + directory_row as u16);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     explorer = app.regions.explorer_list.unwrap();
     let explorer_rows = app.changes.explorer_rows();
@@ -87,11 +79,11 @@ fn renders_every_primary_surface() {
         .and_then(|index| repo.files.get(index))
         .unwrap()
         .clone();
-    app.handle_mouse(mouse(
-        MouseEventKind::Down(MouseButton::Left),
+    click(
+        &mut app,
         explorer.x + 2,
         explorer.y + selected_file_row as u16,
-    ));
+    );
     assert_eq!(
         app.selected_explorer_file_path(),
         Some(selected_file.as_str())
@@ -118,11 +110,7 @@ fn renders_every_primary_surface() {
         .iter()
         .position(|row| row.file_index.is_some())
         .unwrap();
-    app.handle_mouse(mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        explorer.x + 2,
-        explorer.y + visible_file as u16,
-    ));
+    click(&mut app, explorer.x + 2, explorer.y + visible_file as u16);
     assert_ne!(
         app.changes.explorer_state.selected(),
         selected_before_scroll
@@ -139,21 +127,13 @@ fn renders_every_primary_surface() {
     assert!(file_screen.contains("fixture"));
 
     let worktree_tab = app.regions.worktree_tab.unwrap();
-    app.handle_mouse(mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        worktree_tab.x,
-        worktree_tab.y,
-    ));
+    click(&mut app, worktree_tab.x, worktree_tab.y);
     assert_eq!(app.changes.pane, LeftPane::Worktree);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     let stage_all = app.regions.stage_all.unwrap();
     assert_eq!(stage_all.width, 2);
-    app.handle_mouse(mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        stage_all.x,
-        stage_all.y,
-    ));
+    click(&mut app, stage_all.x, stage_all.y);
     assert!(
         app.repository()
             .unwrap()
@@ -178,11 +158,7 @@ fn renders_every_primary_surface() {
         }
     }
     let stage_all = app.regions.stage_all.unwrap();
-    app.handle_mouse(mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        stage_all.x,
-        stage_all.y,
-    ));
+    click(&mut app, stage_all.x, stage_all.y);
     assert!(
         app.repository()
             .unwrap()
@@ -203,11 +179,7 @@ fn renders_every_primary_surface() {
     assert!(!unstaged_screen.contains("[ ]"));
     let status = app.regions.worktree_status.unwrap();
     assert_eq!(status.width, 2);
-    app.handle_mouse(mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        status.x,
-        status.y,
-    ));
+    click(&mut app, status.x, status.y);
     assert_eq!(
         app.repository()
             .unwrap()
@@ -219,11 +191,7 @@ fn renders_every_primary_surface() {
     );
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let status = app.regions.worktree_status.unwrap();
-    app.handle_mouse(mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        status.x,
-        status.y,
-    ));
+    click(&mut app, status.x, status.y);
     assert!(
         app.repository()
             .unwrap()
@@ -234,11 +202,7 @@ fn renders_every_primary_surface() {
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let worktree = app.regions.worktree_list.unwrap();
-    app.handle_mouse(mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        worktree.x + 10,
-        worktree.y + 1,
-    ));
+    click(&mut app, worktree.x + 10, worktree.y + 1);
     assert_eq!(app.changes.worktree_state.selected(), Some(1));
 
     let splitter = app.regions.splitter.unwrap();
@@ -303,22 +267,14 @@ fn renders_every_primary_surface() {
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let history = app.regions.history_list.unwrap();
-    app.handle_mouse(mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        history.x + 2,
-        history.y + 2,
-    ));
+    click(&mut app, history.x + 2, history.y + 2);
     assert_eq!(app.changes.history_state.selected(), Some(1));
     assert!(app.changes.history_focused);
     assert!(app.changes.diff.contains("diff --git"));
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let worktree = app.regions.worktree_list.unwrap();
-    app.handle_mouse(mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        worktree.x + 2,
-        worktree.y,
-    ));
+    click(&mut app, worktree.x + 2, worktree.y);
     assert_eq!(app.changes.history_state.selected(), None);
     assert!(!app.changes.history_focused);
     assert!(app.changes.diff.contains("tracked.txt") || app.changes.diff.contains("untracked.txt"));
@@ -381,11 +337,7 @@ fn renders_every_primary_surface() {
     assert!(!changes_screen.contains("COMMIT"));
     assert!(!changes_screen.contains('┌'));
     let actions = app.regions.actions.unwrap();
-    app.handle_mouse(mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        actions.x + 2,
-        actions.y,
-    ));
+    click(&mut app, actions.x + 2, actions.y);
     assert_eq!(app.mode, Mode::ActionMenu);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let action_screen: String = terminal
@@ -438,11 +390,7 @@ fn renders_every_primary_surface() {
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.mode, Mode::Normal);
     let commit = app.regions.commit.unwrap();
-    app.handle_mouse(mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        commit.x + 2,
-        commit.y + 1,
-    ));
+    click(&mut app, commit.x + 2, commit.y + 1);
     assert_eq!(app.mode, Mode::Commit);
     app.commit_message = "Subject".to_owned();
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -477,11 +425,7 @@ fn renders_every_primary_surface() {
     app.mode = Mode::Commit;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let diff = app.regions.diff.unwrap();
-    app.handle_mouse(mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        diff.x + 1,
-        diff.y + 1,
-    ));
+    click(&mut app, diff.x + 1, diff.y + 1);
     assert_eq!(app.mode, Mode::Normal);
     assert_eq!(app.commit_message, "Subject\nBody");
 
@@ -508,11 +452,7 @@ fn renders_every_primary_surface() {
     assert!(screen.contains("HEAD"));
     assert!(screen.contains("Render Test"));
     let graph = app.regions.graph_table.unwrap();
-    app.handle_mouse(mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        graph.x + 1,
-        graph.y + 1,
-    ));
+    click(&mut app, graph.x + 1, graph.y + 1);
     assert_eq!(app.graph_state.selected(), Some(1));
 
     app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
@@ -532,11 +472,7 @@ fn renders_every_primary_surface() {
     assert!(!picker_screen.contains('┌'));
     assert!(app.regions.picker_list.is_some());
     let path = app.regions.picker_path.unwrap();
-    app.handle_mouse(mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        path.x + 2,
-        path.y + 1,
-    ));
+    click(&mut app, path.x + 2, path.y + 1);
     assert!(app.picker.editing_path);
 
     app.mode = Mode::Settings;
@@ -589,26 +525,69 @@ fn toggles_worktree_directories_with_the_mouse() {
     );
 
     let worktree = app.regions.worktree_list.unwrap();
-    app.handle_mouse(mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        worktree.x + 1,
-        worktree.y,
-    ));
+    click(&mut app, worktree.x + 1, worktree.y);
     let rows = app.changes.worktree_rows(app.repository().unwrap());
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].directory_expanded, Some(false));
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let worktree = app.regions.worktree_list.unwrap();
-    app.handle_mouse(mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        worktree.x + 1,
-        worktree.y,
-    ));
+    click(&mut app, worktree.x + 1, worktree.y);
     assert_eq!(
         app.changes.worktree_rows(app.repository().unwrap()).len(),
         2
     );
+}
+
+#[test]
+fn selects_visible_text_and_suppresses_clicks_after_dragging() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    fs::write(root.join("selected.txt"), "select me\n").unwrap();
+
+    let mut app = App::new(root.to_path_buf());
+    app.changes.diff = "select me".to_owned();
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let diff = app.regions.diff.unwrap();
+    let start = (diff.x + 1, diff.y + 3);
+    let end = (start.0 + 5, start.1);
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        start.0,
+        start.1,
+    ));
+    app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), end.0, end.1));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let index = usize::from(start.1) * usize::from(buffer.area.width) + usize::from(start.0);
+    assert_eq!(buffer.content[index].bg, super::palette().accent);
+
+    app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), end.0, end.1));
+    assert_eq!(app.take_copy_request().as_deref(), Some("select"));
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let graph = app.regions.graph.unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        graph.x,
+        graph.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        graph.x + 2,
+        graph.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        graph.x + 2,
+        graph.y,
+    ));
+    assert_eq!(app.view, View::Changes);
+    assert!(app.take_copy_request().is_some());
 }
 
 fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
@@ -618,6 +597,11 @@ fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
         row,
         modifiers: KeyModifiers::NONE,
     }
+}
+
+fn click(app: &mut App, column: u16, row: u16) {
+    app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), column, row));
+    app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), column, row));
 }
 
 fn run_git(root: &std::path::Path, args: &[&str]) {
