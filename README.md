@@ -68,6 +68,28 @@ Settings are saved to `$XDG_CONFIG_HOME/gitui/config`, or `~/.config/gitui/confi
 
 GitUI uses the active OpenCode TUI theme when OpenCode is installed. It follows OpenCode's `tui.json`/`tui.jsonc` selection first, then `~/.local/state/opencode/kv.json`, and supports all bundled OpenCode themes plus user and project themes under `opencode/themes/*.json`. If no usable theme is found, GitUI uses Catppuccin Macchiato.
 
+## Architecture
+
+The binary stays deliberately direct, with modules split by the behavior they own:
+
+| Module | Responsibility |
+|---|---|
+| `main` | Terminal setup, cleanup, and event loop |
+| `app` | Global input routing, Git mutations, settings, and notices |
+| `app::changes` | Changes-screen selection, navigation, and displayed content |
+| `app::repository_picker` | Repository discovery, navigation, and fuzzy search |
+| `repository_session` | Active repository lifecycle and background operations |
+| `git` | Installed-Git commands, parsing, and repository data |
+| `tree` | Pure worktree and file-tree projection |
+| `ui` | Rendering shell, header, and view dispatch |
+| `ui::changes` | Worktree, Files, Diff, and commit workspace |
+| `ui::history` | Current-branch history and all-refs graph |
+| `ui::overlays` | Repository picker, settings, and help overlays |
+| `ui::text` | Deterministic source and diff presentation |
+| `theme` | Theme discovery, resolution, and palette data |
+
+Keep Git command details in `git`, operation scheduling in `repository_session`, interaction decisions in `app`, and visual formatting in `ui`. Add another module only when it can own a cohesive behavior behind a smaller interface than the implementation it hides.
+
 ## Scope
 
 This first version stays deliberately small. It uses the installed Git executable so ordering, configuration, worktrees, refs, and repository formats behave like Git itself. The graph uses terminal-native Unicode rather than terminal-specific image protocols.

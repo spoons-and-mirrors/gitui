@@ -1,6 +1,8 @@
 mod app;
 mod git;
+mod repository_session;
 mod theme;
+mod tree;
 mod ui;
 
 use std::{io, path::PathBuf, time::Duration};

@@ -1,0 +1,547 @@
+use std::{fs, process::Command};
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::{Terminal, backend::TestBackend};
+
+use crate::app::{App, LeftPane, Mode, Settings, View};
+
+use super::draw;
+
+#[test]
+fn renders_every_primary_surface() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    run_git(root, &["config", "user.name", "Render Test"]);
+    run_git(root, &["config", "user.email", "render@example.com"]);
+    fs::write(root.join("tracked.txt"), "first\n").unwrap();
+    fs::create_dir(root.join("fixtures")).unwrap();
+    for index in 0..40 {
+        fs::write(
+            root.join(format!("fixtures/file-{index:02}.txt")),
+            format!("fixture {index}\n"),
+        )
+        .unwrap();
+    }
+    run_git(root, &["add", "."]);
+    run_git(root, &["commit", "-m", "initial commit"]);
+    fs::write(root.join("second.txt"), "second\n").unwrap();
+    run_git(root, &["add", "."]);
+    run_git(root, &["commit", "-m", "second commit"]);
+    fs::write(root.join("tracked.txt"), "changed\n").unwrap();
+    fs::write(root.join("untracked.txt"), "new\n").unwrap();
+
+    let mut app = App::new(root.to_path_buf());
+    assert_eq!(app.changes.history_state.selected(), None);
+    let settings_path = root.join(".git/gitui-test-config");
+    app.settings_path = Some(settings_path.clone());
+    let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(app.regions.worktree.unwrap().x, 0);
+    assert_eq!(app.regions.diff.unwrap().right(), 120);
+
+    let files_tab = app.regions.files_tab.unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        files_tab.x,
+        files_tab.y,
+    ));
+    assert_eq!(app.changes.pane, LeftPane::Files);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.commit.is_none());
+    assert!(app.regions.history_list.is_none());
+    let explorer = app.regions.explorer_list.unwrap();
+    let explorer_rows = app.changes.explorer_rows();
+    let repo = app.repository().unwrap();
+    let selected_file_row = explorer_rows
+        .iter()
+        .position(|row| row.file_index.is_some())
+        .unwrap();
+    let selected_file = explorer_rows[selected_file_row]
+        .file_index
+        .and_then(|index| repo.files.get(index))
+        .unwrap()
+        .clone();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        explorer.x + 2,
+        explorer.y + selected_file_row as u16,
+    ));
+    assert_eq!(
+        app.selected_explorer_file_path(),
+        Some(selected_file.as_str())
+    );
+    assert_eq!(
+        app.changes.diff,
+        fs::read_to_string(root.join(&selected_file)).unwrap()
+    );
+    let selected_before_scroll = app.changes.explorer_state.selected();
+    let preview_before_scroll = app.changes.diff.clone();
+    app.handle_mouse(mouse(
+        MouseEventKind::ScrollDown,
+        explorer.x + 2,
+        explorer.y + 2,
+    ));
+    assert_eq!(app.changes.explorer_scroll, 3);
+    assert_eq!(
+        app.changes.explorer_state.selected(),
+        selected_before_scroll
+    );
+    assert_eq!(app.changes.diff, preview_before_scroll);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let visible_file = app.changes.explorer_rows()[app.changes.explorer_scroll..]
+        .iter()
+        .position(|row| row.file_index.is_some())
+        .unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        explorer.x + 2,
+        explorer.y + visible_file as u16,
+    ));
+    assert_ne!(
+        app.changes.explorer_state.selected(),
+        selected_before_scroll
+    );
+    let file_screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(file_screen.contains("FILE"));
+    assert!(file_screen.contains("read-only"));
+    assert!(file_screen.contains("fixture"));
+
+    let worktree_tab = app.regions.worktree_tab.unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        worktree_tab.x,
+        worktree_tab.y,
+    ));
+    assert_eq!(app.changes.pane, LeftPane::Worktree);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let stage_all = app.regions.stage_all.unwrap();
+    assert_eq!(stage_all.width, 2);
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        stage_all.x,
+        stage_all.y,
+    ));
+    assert!(
+        app.repository()
+            .unwrap()
+            .changes
+            .iter()
+            .all(|change| change.staged)
+    );
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let staged_screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(staged_screen.contains('◉'));
+    for (index, cell) in terminal.backend().buffer().content.iter().enumerate() {
+        if cell.symbol() == "◉" {
+            let trailing = &terminal.backend().buffer().content[index + 1];
+            assert_eq!(trailing.symbol(), " ");
+            assert_eq!(cell.bg, trailing.bg);
+        }
+    }
+    let stage_all = app.regions.stage_all.unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        stage_all.x,
+        stage_all.y,
+    ));
+    assert!(
+        app.repository()
+            .unwrap()
+            .changes
+            .iter()
+            .all(|change| !change.staged)
+    );
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let unstaged_screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(unstaged_screen.contains('○'));
+    assert!(!unstaged_screen.contains("[ ]"));
+    let status = app.regions.worktree_status.unwrap();
+    assert_eq!(status.width, 2);
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        status.x,
+        status.y,
+    ));
+    assert_eq!(
+        app.repository()
+            .unwrap()
+            .changes
+            .iter()
+            .filter(|change| change.staged)
+            .count(),
+        1
+    );
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let status = app.regions.worktree_status.unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        status.x,
+        status.y,
+    ));
+    assert!(
+        app.repository()
+            .unwrap()
+            .changes
+            .iter()
+            .all(|change| !change.staged)
+    );
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let worktree = app.regions.worktree_list.unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        worktree.x + 10,
+        worktree.y + 1,
+    ));
+    assert_eq!(app.changes.worktree_state.selected(), Some(1));
+
+    let splitter = app.regions.splitter.unwrap();
+    let bounds = app.regions.split_bounds.unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        splitter.x,
+        splitter.y + 2,
+    ));
+    let target = bounds.x + 65;
+    app.handle_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        target,
+        splitter.y + 2,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        target,
+        splitter.y + 2,
+    ));
+    assert_eq!(app.settings.worktree_width, 65);
+    assert!(
+        fs::read_to_string(&settings_path)
+            .unwrap()
+            .contains("worktree_width=65")
+    );
+    assert!(!app.dragging_splitter);
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let history_splitter = app.regions.history_splitter.unwrap();
+    let commit = app.regions.commit.unwrap();
+    let worktree = app.regions.worktree_list.unwrap();
+    assert!(commit.bottom() <= worktree.y);
+    assert!(commit.bottom() <= history_splitter.y);
+    let history_bounds = app.regions.history_bounds.unwrap();
+    let history_target = history_bounds.bottom().saturating_sub(9);
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        history_splitter.x + 2,
+        history_splitter.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        history_splitter.x + 2,
+        history_target,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        history_splitter.x + 2,
+        history_target,
+    ));
+    assert_eq!(app.settings.history_height, 9);
+    assert!(
+        fs::read_to_string(&settings_path)
+            .unwrap()
+            .contains("history_height=9")
+    );
+    assert!(!app.dragging_history);
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let history = app.regions.history_list.unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        history.x + 2,
+        history.y + 2,
+    ));
+    assert_eq!(app.changes.history_state.selected(), Some(1));
+    assert!(app.changes.history_focused);
+    assert!(app.changes.diff.contains("diff --git"));
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let worktree = app.regions.worktree_list.unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        worktree.x + 2,
+        worktree.y,
+    ));
+    assert_eq!(app.changes.history_state.selected(), None);
+    assert!(!app.changes.history_focused);
+    assert!(app.changes.diff.contains("tracked.txt") || app.changes.diff.contains("untracked.txt"));
+
+    app.changes.diff = (0..100)
+        .map(|line| format!("+scrollbar line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    app.changes.diff_scroll = 0;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let scrollbar = app.regions.diff_scrollbar.unwrap();
+    assert_eq!(scrollbar.width, 1);
+    assert_eq!(scrollbar.right(), 120);
+    assert!(app.regions.diff_scroll_max > 0);
+    assert!(app.regions.diff_scroll_thumb.is_some());
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        scrollbar.x,
+        scrollbar.bottom() - 1,
+    ));
+    assert!(app.dragging_diff_scrollbar);
+    assert!(app.changes.diff_scroll > 0);
+    app.handle_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        scrollbar.x,
+        scrollbar.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        scrollbar.x,
+        scrollbar.y,
+    ));
+    assert_eq!(app.changes.diff_scroll, 0);
+    assert!(!app.dragging_diff_scrollbar);
+
+    let changes_screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(changes_screen.contains("Write a commit message"));
+    assert!(changes_screen.contains("HISTORY"));
+    assert!(changes_screen.contains("HEAD"));
+    let history_oid: String = app.repository().unwrap().history[0]
+        .oid
+        .chars()
+        .take(7)
+        .collect();
+    let history_date = app.repository().unwrap().history[0].date.clone();
+    assert!(changes_screen.contains(&history_oid));
+    assert!(!changes_screen.contains(&history_date));
+    assert!(!changes_screen.contains("Render Test"));
+    assert!(!changes_screen.contains('●'));
+    assert!(!changes_screen.contains("[Commit]"));
+    assert!(!changes_screen.contains("COMMIT"));
+    assert!(!changes_screen.contains('┌'));
+    let commit = app.regions.commit.unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        commit.x + 2,
+        commit.y + 1,
+    ));
+    assert_eq!(app.mode, Mode::Commit);
+    app.commit_message = "Subject".to_owned();
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.commit_message, "Subject\n");
+    app.commit_message.push_str("Body");
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::Normal);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let unfocused_screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(unfocused_screen.contains("Subject"));
+    assert!(unfocused_screen.contains("Body"));
+
+    app.commit_message = format!("wrap-start {} wrap-end", "x".repeat(90));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let wrapped_screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(wrapped_screen.contains("wrap-start"));
+    assert!(wrapped_screen.contains("wrap-end"));
+    app.commit_message = "Subject\nBody".to_owned();
+
+    app.mode = Mode::Commit;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let diff = app.regions.diff.unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        diff.x + 1,
+        diff.y + 1,
+    ));
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.commit_message, "Subject\nBody");
+
+    app.mode = Mode::Commit;
+    app.commit_message.clear();
+    app.notice = None;
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("Commit message cannot be empty")
+    );
+
+    app.view = View::Graph;
+    app.mode = Mode::Normal;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(screen.contains("AUTHOR"));
+    assert!(screen.contains("HEAD"));
+    assert!(screen.contains("Render Test"));
+    let graph = app.regions.graph_table.unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        graph.x + 1,
+        graph.y + 1,
+    ));
+    assert_eq!(app.graph_state.selected(), Some(1));
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+    assert_eq!(app.picker.directory, root);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let picker_screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(picker_screen.contains("REPOSITORY"));
+    assert!(picker_screen.contains("Switch working directory"));
+    assert!(picker_screen.contains("BROWSE"));
+    assert!(!picker_screen.contains("OPEN REPOSITORY"));
+    assert!(!picker_screen.contains('┌'));
+    assert!(app.regions.picker_list.is_some());
+    let path = app.regions.picker_path.unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        path.x + 2,
+        path.y + 1,
+    ));
+    assert!(app.picker.editing_path);
+
+    app.mode = Mode::Settings;
+    app.settings = Settings::default();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let settings_screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(settings_screen.contains("Auto-fetch remotes"));
+    assert!(settings_screen.contains("Fetch interval"));
+    assert!(!settings_screen.contains('┌'));
+    assert!(app.regions.auto_fetch.is_some());
+    assert!(app.regions.fetch_interval_up.is_some());
+
+    app.mode = Mode::Help;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let help_screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(help_screen.contains("KEYBOARD"));
+    assert!(help_screen.contains("Ctrl+Enter"));
+    assert!(!help_screen.contains('┌'));
+
+    let mut narrow = Terminal::new(TestBackend::new(50, 12)).unwrap();
+    narrow.draw(|frame| draw(frame, &mut app)).unwrap();
+}
+
+#[test]
+fn toggles_worktree_directories_with_the_mouse() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(root.join("src/app.rs"), "fn main() {}\n").unwrap();
+
+    let mut app = App::new(root.to_path_buf());
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(
+        app.changes.worktree_rows(app.repository().unwrap()).len(),
+        2
+    );
+
+    let worktree = app.regions.worktree_list.unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        worktree.x + 1,
+        worktree.y,
+    ));
+    let rows = app.changes.worktree_rows(app.repository().unwrap());
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].directory_expanded, Some(false));
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let worktree = app.regions.worktree_list.unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        worktree.x + 1,
+        worktree.y,
+    ));
+    assert_eq!(
+        app.changes.worktree_rows(app.repository().unwrap()).len(),
+        2
+    );
+}
+
+fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+    MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    }
+}
+
+fn run_git(root: &std::path::Path, args: &[&str]) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
