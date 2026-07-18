@@ -185,14 +185,6 @@ fn draw_changes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 
     let worktree_content = columns[0].inner(Margin::new(1, 0));
-    let commit_area = Rect::new(
-        worktree_content.x,
-        worktree_content.bottom().saturating_sub(5),
-        worktree_content.width,
-        5,
-    );
-    app.regions.commit = Some(commit_area);
-
     let repo = app.repo.as_ref().expect("checked above");
     let staged_count = repo.changes.iter().filter(|change| change.staged).count();
     let checkbox = if !repo.changes.is_empty() && staged_count == repo.changes.len() {
@@ -215,13 +207,35 @@ fn draw_changes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         worktree_content.width,
         1,
     );
+    let commit_area = Rect::new(
+        worktree_content.x,
+        worktree_header.y.saturating_add(2),
+        worktree_content.width,
+        5,
+    );
+    app.regions.commit = Some(commit_area);
+    let worktree_list_y = commit_area.bottom();
+    let maximum_history = worktree_content
+        .bottom()
+        .saturating_sub(worktree_list_y)
+        .saturating_sub(2)
+        .max(3);
+    let history_height = app
+        .settings
+        .history_height
+        .clamp(3, maximum_history)
+        .min(worktree_content.bottom().saturating_sub(worktree_list_y));
+    let history_area = Rect::new(
+        worktree_content.x,
+        worktree_content.bottom().saturating_sub(history_height),
+        worktree_content.width,
+        history_height,
+    );
     let worktree_list = Rect::new(
         worktree_header.x,
-        worktree_header.y.saturating_add(2),
+        worktree_list_y,
         worktree_header.width,
-        commit_area
-            .y
-            .saturating_sub(worktree_header.y.saturating_add(2)),
+        history_area.y.saturating_sub(worktree_list_y),
     );
     app.regions.worktree_list = Some(worktree_list);
     app.regions.worktree_status = Some(Rect::new(
@@ -237,6 +251,26 @@ fn draw_changes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         1,
     ));
     app.regions.unstage_all = None;
+    app.regions.history_bounds = Some(Rect::new(
+        worktree_content.x,
+        worktree_list_y.saturating_add(2),
+        worktree_content.width,
+        worktree_content
+            .bottom()
+            .saturating_sub(worktree_list_y.saturating_add(2)),
+    ));
+    app.regions.history_splitter = Some(Rect::new(
+        history_area.x,
+        history_area.y,
+        history_area.width,
+        1,
+    ));
+    app.regions.history_list = Some(Rect::new(
+        history_area.x,
+        history_area.y.saturating_add(1),
+        history_area.width,
+        history_area.height.saturating_sub(1),
+    ));
 
     let worktree_rows = app.worktree_rows();
     let items: Vec<ListItem<'_>> = worktree_rows
@@ -286,13 +320,89 @@ fn draw_changes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     );
     frame.render_stateful_widget(list, worktree_list, &mut app.changes_state);
 
-    let selected_change = app
-        .changes_state
-        .selected()
-        .and_then(|index| worktree_rows.get(index))
-        .and_then(|row| row.change_index)
-        .and_then(|index| repo.changes.get(index));
-    let selected_path = selected_change.map_or("No file selected", |change| change.path.as_str());
+    let history_header = app.regions.history_splitter.expect("set above");
+    let history_list = app.regions.history_list.expect("set above");
+    fill(
+        frame,
+        history_header,
+        if app.dragging_history {
+            palette().selected
+        } else {
+            palette().surface_alt
+        },
+    );
+    let history_title = if history_header.width >= 20 {
+        format!("HISTORY  {}", repo.branch)
+    } else {
+        "HISTORY".to_owned()
+    };
+    let history_meta = format!("↕  {}", repo.history.len());
+    let history_padding = usize::from(history_header.width).saturating_sub(
+        UnicodeWidthStr::width(history_title.as_str())
+            + UnicodeWidthStr::width(history_meta.as_str()),
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                truncate_width(
+                    &history_title,
+                    usize::from(history_header.width)
+                        .saturating_sub(UnicodeWidthStr::width(history_meta.as_str()) + 1),
+                ),
+                Style::default()
+                    .fg(palette().muted)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" ".repeat(history_padding)),
+            Span::styled(history_meta, Style::default().fg(palette().faint)),
+        ])),
+        history_header,
+    );
+    let history_items: Vec<ListItem<'_>> = if repo.history.is_empty() {
+        vec![ListItem::new(Line::styled(
+            "  No commits on this branch",
+            Style::default().fg(palette().faint),
+        ))]
+    } else {
+        repo.history
+            .iter()
+            .map(|commit| history_item(commit, usize::from(history_list.width)))
+            .collect()
+    };
+    let history = List::new(history_items).highlight_style(Style::default().bg(
+        if app.history_focused && app.mode == Mode::Normal {
+            palette().selected
+        } else {
+            palette().inactive_selected
+        },
+    ));
+    frame.render_stateful_widget(history, history_list, &mut app.history_state);
+
+    let selected_history = if app.history_focused {
+        app.history_state
+            .selected()
+            .and_then(|index| repo.history.get(index))
+    } else {
+        None
+    };
+    let selected_change = if selected_history.is_none() {
+        app.changes_state
+            .selected()
+            .and_then(|index| worktree_rows.get(index))
+            .and_then(|row| row.change_index)
+            .and_then(|index| repo.changes.get(index))
+    } else {
+        None
+    };
+    let selected_label = selected_history.map_or_else(
+        || {
+            selected_change
+                .map_or("No file selected", |change| change.path.as_str())
+                .to_owned()
+        },
+        |commit| commit.subject.clone(),
+    );
+    let syntax_path = selected_change.map_or("", |change| change.path.as_str());
     let diff_header = Rect::new(
         columns[1].x.saturating_add(1),
         columns[1].y.saturating_add(1),
@@ -307,15 +417,20 @@ fn draw_changes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             .bottom()
             .saturating_sub(diff_header.y.saturating_add(3)),
     );
-    let state = selected_change.map_or(
-        "",
-        |change| {
-            if change.staged { "staged" } else { "unstaged" }
+    let state = selected_history.map_or_else(
+        || {
+            selected_change.map_or(
+                "",
+                |change| {
+                    if change.staged { "staged" } else { "unstaged" }
+                },
+            )
         },
+        |_| "commit",
     );
     let wrap_label = if app.diff_wrap { "  w:on" } else { "  w:off" };
     let display_path = truncate_width(
-        selected_path,
+        &selected_label,
         usize::from(diff_header.width)
             .saturating_sub(8 + UnicodeWidthStr::width(state) + UnicodeWidthStr::width(wrap_label)),
     );
@@ -335,10 +450,10 @@ fn draw_changes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             ),
             Span::styled(
                 format!("  {state}"),
-                Style::default().fg(if state == "staged" {
-                    palette().green
-                } else {
-                    palette().yellow
+                Style::default().fg(match state {
+                    "staged" => palette().green,
+                    "commit" => palette().accent,
+                    _ => palette().yellow,
                 }),
             ),
             Span::styled(
@@ -352,7 +467,7 @@ fn draw_changes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         ])),
         diff_header,
     );
-    let diff_lines = styled_diff(&app.diff, selected_path, usize::from(diff_body.width));
+    let diff_lines = styled_diff(&app.diff, syntax_path, usize::from(diff_body.width));
     let mut diff = Paragraph::new(diff_lines)
         .scroll((app.diff_scroll, 0))
         .style(Style::default().bg(palette().panel));
@@ -571,6 +686,46 @@ fn graph_row(commit: &Commit, compact: bool) -> Row<'static> {
             Cell::from(short_oid).style(Style::default().fg(palette().muted)),
         ])
     }
+}
+
+fn history_item(commit: &Commit, width: usize) -> ListItem<'static> {
+    let short_oid: String = commit.oid.chars().take(7).collect();
+    let subject_width = width.saturating_sub(8);
+    let subject = truncate_width(&commit.subject, subject_width);
+    let subject_padding = width.saturating_sub(
+        UnicodeWidthStr::width(subject.as_str()) + UnicodeWidthStr::width(short_oid.as_str()),
+    );
+    let mut details = Vec::new();
+    let has_head = commit
+        .refs
+        .iter()
+        .any(|reference| reference == "HEAD" || reference.starts_with("HEAD -> "));
+    if has_head {
+        details.push(ref_badge("HEAD", palette().green));
+    }
+    for reference in &commit.refs {
+        if reference == "HEAD" || reference.starts_with("HEAD -> ") {
+            continue;
+        }
+        let (label, color) = if let Some(tag) = reference.strip_prefix("tag: ") {
+            (tag, palette().yellow)
+        } else if reference.contains('/') {
+            (reference.as_str(), palette().purple)
+        } else {
+            (reference.as_str(), palette().accent)
+        };
+        details.push(ref_badge(label, color));
+    }
+
+    let mut lines = vec![Line::from(vec![
+        Span::styled(subject, Style::default().fg(palette().ink)),
+        Span::raw(" ".repeat(subject_padding)),
+        Span::styled(short_oid, Style::default().fg(palette().faint)),
+    ])];
+    if !details.is_empty() {
+        lines.push(Line::from(details));
+    }
+    ListItem::new(Text::from(lines))
 }
 
 fn ref_badge(label: &str, color: Color) -> Span<'static> {
@@ -1512,6 +1667,7 @@ mod tests {
         fs::write(root.join("untracked.txt"), "new\n").unwrap();
 
         let mut app = App::new(root.to_path_buf());
+        assert_eq!(app.history_state.selected(), None);
         let settings_path = root.join(".git/gitui-test-config");
         app.settings_path = Some(settings_path.clone());
         let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
@@ -1611,13 +1767,65 @@ mod tests {
         ));
         assert_eq!(app.settings.worktree_width, 65);
         assert!(
-            fs::read_to_string(settings_path)
+            fs::read_to_string(&settings_path)
                 .unwrap()
                 .contains("worktree_width=65")
         );
         assert!(!app.dragging_splitter);
 
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let history_splitter = app.regions.history_splitter.unwrap();
+        let commit = app.regions.commit.unwrap();
+        let worktree = app.regions.worktree_list.unwrap();
+        assert!(commit.bottom() <= worktree.y);
+        assert!(commit.bottom() <= history_splitter.y);
+        let history_bounds = app.regions.history_bounds.unwrap();
+        let history_target = history_bounds.bottom().saturating_sub(9);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            history_splitter.x + 2,
+            history_splitter.y,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            history_splitter.x + 2,
+            history_target,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            history_splitter.x + 2,
+            history_target,
+        ));
+        assert_eq!(app.settings.history_height, 9);
+        assert!(
+            fs::read_to_string(&settings_path)
+                .unwrap()
+                .contains("history_height=9")
+        );
+        assert!(!app.dragging_history);
+
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let history = app.regions.history_list.unwrap();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            history.x + 2,
+            history.y + 2,
+        ));
+        assert_eq!(app.history_state.selected(), Some(1));
+        assert!(app.history_focused);
+        assert!(app.diff.contains("diff --git"));
+
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let worktree = app.regions.worktree_list.unwrap();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            worktree.x + 2,
+            worktree.y,
+        ));
+        assert_eq!(app.history_state.selected(), None);
+        assert!(!app.history_focused);
+        assert!(app.diff.contains("tracked.txt") || app.diff.contains("untracked.txt"));
+
         let changes_screen: String = terminal
             .backend()
             .buffer()
@@ -1626,6 +1834,18 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect();
         assert!(changes_screen.contains("Write a commit message"));
+        assert!(changes_screen.contains("HISTORY"));
+        assert!(changes_screen.contains("HEAD"));
+        let history_oid: String = app.repo.as_ref().unwrap().history[0]
+            .oid
+            .chars()
+            .take(7)
+            .collect();
+        let history_date = app.repo.as_ref().unwrap().history[0].date.clone();
+        assert!(changes_screen.contains(&history_oid));
+        assert!(!changes_screen.contains(&history_date));
+        assert!(!changes_screen.contains("Render Test"));
+        assert!(!changes_screen.contains('●'));
         assert!(!changes_screen.contains("[Commit]"));
         assert!(!changes_screen.contains("COMMIT"));
         assert!(!changes_screen.contains('┌'));

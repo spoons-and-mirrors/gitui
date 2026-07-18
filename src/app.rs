@@ -36,6 +36,7 @@ pub struct Settings {
     pub auto_fetch: bool,
     pub fetch_interval_minutes: u16,
     pub worktree_width: u16,
+    pub history_height: u16,
 }
 
 impl Default for Settings {
@@ -44,6 +45,7 @@ impl Default for Settings {
             auto_fetch: false,
             fetch_interval_minutes: 5,
             worktree_width: 38,
+            history_height: 7,
         }
     }
 }
@@ -177,6 +179,9 @@ pub struct Regions {
     pub worktree: Option<Rect>,
     pub worktree_list: Option<Rect>,
     pub worktree_status: Option<Rect>,
+    pub history_list: Option<Rect>,
+    pub history_splitter: Option<Rect>,
+    pub history_bounds: Option<Rect>,
     pub diff: Option<Rect>,
     pub splitter: Option<Rect>,
     pub split_bounds: Option<Rect>,
@@ -244,6 +249,7 @@ pub struct App {
     pub mode: Mode,
     pub changes_state: ListState,
     pub graph_state: TableState,
+    pub history_state: ListState,
     pub diff: String,
     pub diff_scroll: u16,
     pub diff_wrap: bool,
@@ -251,6 +257,8 @@ pub struct App {
     pub commit_running: bool,
     pub collapsed_directories: HashSet<String>,
     pub dragging_splitter: bool,
+    pub dragging_history: bool,
+    pub history_focused: bool,
     pub picker: RepositoryPicker,
     pub settings: Settings,
     pub settings_selection: usize,
@@ -299,6 +307,7 @@ impl App {
             mode,
             changes_state: ListState::default(),
             graph_state: TableState::default(),
+            history_state: ListState::default(),
             diff: String::new(),
             diff_scroll: 0,
             diff_wrap: false,
@@ -306,6 +315,8 @@ impl App {
             commit_running: false,
             collapsed_directories: HashSet::new(),
             dragging_splitter: false,
+            dragging_history: false,
+            history_focused: false,
             picker: RepositoryPicker::new(start),
             settings,
             settings_selection: 0,
@@ -392,6 +403,18 @@ impl App {
             }
             return;
         }
+        if self.dragging_history {
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left) => self.resize_history(mouse.row),
+                MouseEventKind::Up(MouseButton::Left) => {
+                    self.resize_history(mouse.row);
+                    self.dragging_history = false;
+                    self.persist_settings();
+                }
+                _ => {}
+            }
+            return;
+        }
 
         match mouse.kind {
             MouseEventKind::ScrollDown => {
@@ -423,9 +446,20 @@ impl App {
         }
         if self
             .regions
+            .history_splitter
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.dragging_history = true;
+            self.history_focused = true;
+            self.resize_history(mouse.row);
+            return;
+        }
+        if self
+            .regions
             .stage_all
             .is_some_and(|rect| rect.contains(point))
         {
+            self.clear_history_selection();
             self.toggle_all_staging();
             return;
         }
@@ -475,6 +509,14 @@ impl App {
             {
                 self.toggle_stage();
             }
+        } else if self
+            .regions
+            .worktree_list
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.clear_history_selection();
+            self.refresh_diff();
+        } else if self.select_history_row(point) {
         } else if self.select_graph_row(point) {
             self.view = View::Graph;
         } else if self.regions.commit.is_some_and(|rect| rect.contains(point)) {
@@ -578,6 +620,42 @@ impl App {
             return false;
         }
         self.changes_state.select(Some(index));
+        self.clear_history_selection();
+        self.refresh_diff();
+        true
+    }
+
+    fn select_history_row(&mut self, point: Position) -> bool {
+        if self.view != View::Changes {
+            return false;
+        }
+        let Some(rect) = self
+            .regions
+            .history_list
+            .filter(|rect| rect.contains(point))
+        else {
+            return false;
+        };
+        let Some(repo) = self.repo.as_ref() else {
+            return false;
+        };
+        let relative_row = usize::from(point.y - rect.y);
+        let mut rendered_row = 0;
+        let index = (self.history_state.offset()..repo.history.len()).find(|index| {
+            let height = if repo.history[*index].refs.is_empty() {
+                1
+            } else {
+                2
+            };
+            let contains = relative_row < rendered_row + height;
+            rendered_row += height;
+            contains
+        });
+        let Some(index) = index else {
+            return false;
+        };
+        self.history_state.select(Some(index));
+        self.history_focused = true;
         self.refresh_diff();
         true
     }
@@ -607,6 +685,15 @@ impl App {
             };
         } else if self
             .regions
+            .history_list
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.history_focused = true;
+            let len = self.repo.as_ref().map_or(0, |repo| repo.history.len());
+            move_list(&mut self.history_state, len, delta);
+            self.refresh_diff();
+        } else if self
+            .regions
             .worktree
             .is_some_and(|rect| rect.contains(point))
             || self
@@ -626,6 +713,14 @@ impl App {
         let maximum = bounds.right().saturating_sub(25).max(minimum);
         let position = column.clamp(minimum, maximum);
         self.settings.worktree_width = position.saturating_sub(bounds.x);
+    }
+
+    fn resize_history(&mut self, row: u16) {
+        let Some(bounds) = self.regions.history_bounds else {
+            return;
+        };
+        let top = row.clamp(bounds.y, bounds.bottom().saturating_sub(3));
+        self.settings.history_height = bounds.bottom().saturating_sub(top).max(3);
     }
 
     pub fn poll_worker(&mut self) {
@@ -739,12 +834,20 @@ impl App {
             KeyCode::Char('c') if self.view == View::Changes => self.mode = Mode::Commit,
             KeyCode::Char('a') if self.view == View::Changes => self.stage_all(),
             KeyCode::Char('u') if self.view == View::Changes => self.unstage_all(),
-            KeyCode::Char(' ') if self.view == View::Changes => self.toggle_stage(),
-            KeyCode::Enter if self.view == View::Changes => self.toggle_selected_directory(),
-            KeyCode::Right | KeyCode::Char('l') if self.view == View::Changes => {
+            KeyCode::Char(' ') if self.view == View::Changes && !self.history_focused => {
+                self.toggle_stage()
+            }
+            KeyCode::Enter if self.view == View::Changes && !self.history_focused => {
+                self.toggle_selected_directory()
+            }
+            KeyCode::Right | KeyCode::Char('l')
+                if self.view == View::Changes && !self.history_focused =>
+            {
                 self.expand_or_descend_worktree()
             }
-            KeyCode::Left | KeyCode::Char('h') if self.view == View::Changes => {
+            KeyCode::Left | KeyCode::Char('h')
+                if self.view == View::Changes && !self.history_focused =>
+            {
                 self.collapse_or_ascend_worktree()
             }
             KeyCode::PageDown if self.view == View::Changes => {
@@ -869,6 +972,8 @@ impl App {
                 self.collapsed_directories.clear();
                 self.changes_state = ListState::default();
                 self.graph_state = TableState::default();
+                self.history_state = ListState::default();
+                self.history_focused = false;
                 self.select_initial_rows();
                 self.refresh_diff();
             }
@@ -959,9 +1064,15 @@ impl App {
     fn move_selection(&mut self, delta: isize) {
         match self.view {
             View::Changes => {
-                let len = self.worktree_rows().len();
-                move_list(&mut self.changes_state, len, delta);
-                self.refresh_diff();
+                if self.history_focused {
+                    let len = self.repo.as_ref().map_or(0, |repo| repo.history.len());
+                    move_list(&mut self.history_state, len, delta);
+                    self.refresh_diff();
+                } else {
+                    let len = self.worktree_rows().len();
+                    move_list(&mut self.changes_state, len, delta);
+                    self.refresh_diff();
+                }
             }
             View::Graph => {
                 let len = self.repo.as_ref().map_or(0, |repo| repo.commits.len());
@@ -973,8 +1084,18 @@ impl App {
     fn select_first(&mut self) {
         match self.view {
             View::Changes => {
-                self.changes_state.select(self.first_change_row());
-                self.refresh_diff();
+                if self.history_focused {
+                    self.history_state.select(
+                        self.repo
+                            .as_ref()
+                            .is_some_and(|repo| !repo.history.is_empty())
+                            .then_some(0),
+                    );
+                    self.refresh_diff();
+                } else {
+                    self.changes_state.select(self.first_change_row());
+                    self.refresh_diff();
+                }
             }
             View::Graph => self.graph_state.select(
                 self.repo
@@ -988,8 +1109,17 @@ impl App {
     fn select_last(&mut self) {
         match self.view {
             View::Changes => {
-                self.changes_state.select(self.last_change_row());
-                self.refresh_diff();
+                if self.history_focused {
+                    self.history_state.select(
+                        self.repo
+                            .as_ref()
+                            .and_then(|repo| repo.history.len().checked_sub(1)),
+                    );
+                    self.refresh_diff();
+                } else {
+                    self.changes_state.select(self.last_change_row());
+                    self.refresh_diff();
+                }
             }
             View::Graph => self.graph_state.select(
                 self.repo
@@ -1066,6 +1196,11 @@ impl App {
             .selected()
             .and_then(|index| self.repo.as_ref()?.commits.get(index))
             .map(|commit| commit.oid.clone());
+        let selected_history_oid = self
+            .history_state
+            .selected()
+            .and_then(|index| self.repo.as_ref()?.history.get(index))
+            .map(|commit| commit.oid.clone());
 
         match git::load(&root) {
             Ok(repo) => {
@@ -1078,6 +1213,8 @@ impl App {
                 });
                 let commit_index = selected_oid
                     .and_then(|oid| repo.commits.iter().position(|commit| commit.oid == oid));
+                let history_index = selected_history_oid
+                    .and_then(|oid| repo.history.iter().position(|commit| commit.oid == oid));
                 self.repo = Some(repo);
                 let change_row = change_index
                     .and_then(|index| self.row_for_change(index))
@@ -1092,6 +1229,7 @@ impl App {
                 self.graph_state.select(
                     commit_index.or_else(|| self.repo.as_ref()?.commits.first().map(|_| 0)),
                 );
+                self.history_state.select(history_index);
                 self.notice = Some("Refreshed".to_owned());
                 self.refresh_diff();
             }
@@ -1105,6 +1243,16 @@ impl App {
             self.diff.clear();
             return;
         };
+        if self.history_focused
+            && let Some(commit) = self
+                .history_state
+                .selected()
+                .and_then(|index| repo.history.get(index))
+        {
+            self.diff =
+                git::commit_diff(&repo.root, &commit.oid).unwrap_or_else(|error| error.to_string());
+            return;
+        }
         let rows = build_worktree(&repo.changes, &self.collapsed_directories);
         let Some(row) = self
             .changes_state
@@ -1135,6 +1283,7 @@ impl App {
                 .is_some_and(|repo| !repo.commits.is_empty())
                 .then_some(0),
         );
+        self.history_state.select(None);
     }
 
     pub fn worktree_rows(&self) -> Vec<WorktreeRow> {
@@ -1151,6 +1300,11 @@ impl App {
     fn selected_directory_path(&self) -> Option<String> {
         let selected = self.changes_state.selected()?;
         self.worktree_rows().get(selected)?.directory_path.clone()
+    }
+
+    fn clear_history_selection(&mut self) {
+        self.history_focused = false;
+        self.history_state.select(None);
     }
 
     fn toggle_selected_directory(&mut self) {
@@ -1403,6 +1557,11 @@ fn load_settings(path: &Path) -> Settings {
                     settings.worktree_width = width.clamp(24, 4096);
                 }
             }
+            "history_height" => {
+                if let Ok(height) = value.trim().parse::<u16>() {
+                    settings.history_height = height.clamp(3, 256);
+                }
+            }
             _ => {}
         }
     }
@@ -1416,8 +1575,11 @@ fn save_settings(path: &Path, settings: &Settings) -> std::io::Result<()> {
     fs::write(
         path,
         format!(
-            "auto_fetch={}\nfetch_interval_minutes={}\nworktree_width={}\n",
-            settings.auto_fetch, settings.fetch_interval_minutes, settings.worktree_width
+            "auto_fetch={}\nfetch_interval_minutes={}\nworktree_width={}\nhistory_height={}\n",
+            settings.auto_fetch,
+            settings.fetch_interval_minutes,
+            settings.worktree_width,
+            settings.history_height
         ),
     )
 }
@@ -1520,6 +1682,7 @@ mod tests {
             auto_fetch: true,
             fetch_interval_minutes: 17,
             worktree_width: 61,
+            history_height: 9,
         };
 
         save_settings(&path, &settings).unwrap();
@@ -1527,12 +1690,13 @@ mod tests {
 
         fs::write(
             &path,
-            "auto_fetch=true\nfetch_interval_minutes=0\nworktree_width=5\n",
+            "auto_fetch=true\nfetch_interval_minutes=0\nworktree_width=5\nhistory_height=1\n",
         )
         .unwrap();
         let loaded = load_settings(&path);
         assert_eq!(loaded.fetch_interval_minutes, 1);
         assert_eq!(loaded.worktree_width, 24);
+        assert_eq!(loaded.history_height, 3);
     }
 
     #[test]
@@ -1560,6 +1724,7 @@ mod tests {
                 auto_fetch: true,
                 fetch_interval_minutes: 6,
                 worktree_width: 38,
+                history_height: 7,
             }
         );
         assert_eq!(load_settings(&path), app.settings);

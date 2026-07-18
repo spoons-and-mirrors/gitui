@@ -14,6 +14,7 @@ pub struct RepositoryData {
     pub root: PathBuf,
     pub branch: String,
     pub changes: Vec<Change>,
+    pub history: Vec<Commit>,
     pub commits: Vec<Commit>,
 }
 
@@ -71,6 +72,7 @@ pub fn load(path: &Path) -> Result<RepositoryData> {
     let root = discover(path)?;
     let branch = branch_name(&root)?;
     let changes = status(&root)?;
+    let history = branch_history(&root)?;
     let mut commits = log(&root)?;
     layout_graph(&mut commits);
 
@@ -78,6 +80,7 @@ pub fn load(path: &Path) -> Result<RepositoryData> {
         root,
         branch,
         changes,
+        history,
         commits,
     })
 }
@@ -213,6 +216,24 @@ pub fn diff(root: &Path, change: &Change) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+pub fn commit_diff(root: &Path, oid: &str) -> Result<String> {
+    let output = run(
+        root,
+        &[
+            "show",
+            "--format=",
+            "--no-ext-diff",
+            "--first-parent",
+            "--unified=3",
+            oid,
+        ],
+    )?;
+    if !output.status.success() {
+        bail!("{}", clean_stderr(&output));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 fn branch_name(root: &Path) -> Result<String> {
     let output = run(root, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
     if output.status.success() {
@@ -293,13 +314,9 @@ fn parse_status(bytes: &[u8]) -> Vec<Change> {
 }
 
 fn log(root: &Path) -> Result<Vec<Commit>> {
-    let format = "--format=%H%x1f%P%x1f%D%x1f%an%x1f%ad%x1f%s%x1e";
-    let output = run(
+    read_log(
         root,
         &[
-            "log",
-            format,
-            "--date=short",
             "--date-order",
             "--ignore-missing",
             "--branches",
@@ -307,12 +324,32 @@ fn log(root: &Path) -> Result<Vec<Commit>> {
             "--tags",
             "HEAD",
         ],
-    )?;
+    )
+}
+
+fn branch_history(root: &Path) -> Result<Vec<Commit>> {
+    read_log(
+        root,
+        &[
+            "--date-order",
+            "--ignore-missing",
+            "--max-count=200",
+            "HEAD",
+        ],
+    )
+}
+
+fn read_log(root: &Path, revisions: &[&str]) -> Result<Vec<Commit>> {
+    let format = "--format=%H%x1f%P%x1f%D%x1f%an%x1f%ad%x1f%s%x1e";
+    let mut args = vec!["log", format, "--date=short", "--decorate=short"];
+    args.extend_from_slice(revisions);
+    let output = run(root, &args)?;
 
     if !output.status.success() {
         let stderr = clean_stderr(&output);
         if stderr.contains("does not have any commits yet")
             || stderr.contains("bad revision 'HEAD'")
+            || stderr.contains("ambiguous argument 'HEAD'")
         {
             return Ok(Vec::new());
         }
@@ -653,10 +690,19 @@ mod tests {
         let repo = load(root).unwrap();
         assert_eq!(repo.branch, "main");
         assert_eq!(repo.commits.len(), 4);
+        assert_eq!(repo.history.len(), 4);
+        assert!(
+            repo.history[0]
+                .refs
+                .iter()
+                .any(|name| name.contains("HEAD"))
+        );
         assert_eq!(repo.commits[0].parents.len(), 2);
         assert!(repo.commits[0].graph.iter().any(|cell| cell.symbol == '─'));
         assert_eq!(repo.changes.len(), 1);
         assert_eq!(repo.changes[0].path, "main.txt");
+        let selected_commit_diff = commit_diff(root, &repo.history[0].oid).unwrap();
+        assert!(selected_commit_diff.contains("diff --git"));
 
         stage(root, &repo.changes[0]).unwrap();
         let staged = load(root).unwrap();
@@ -672,6 +718,7 @@ mod tests {
         let committed = load(root).unwrap();
         assert!(committed.changes.is_empty());
         assert_eq!(committed.commits.len(), 5);
+        assert_eq!(committed.history.len(), 5);
 
         let fetched = super::fetch(root).unwrap();
         assert!(fetched.success, "{}", fetched.stderr);

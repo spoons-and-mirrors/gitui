@@ -3,6 +3,7 @@
 A focused Rust/Ratatui interface for the two Git views that matter most during everyday work:
 
 - A collapsible worktree tree with compact directory chains for inspecting, staging, unstaging, and committing changes.
+- A resizable current-branch history shelf with HEAD, branch, remote, and tag decorations; selecting a commit shows its patch.
 - An all-refs commit graph showing branches, remotes, tags, authors, dates, and hashes.
 - Source-aware diffs with line numbers, syntax color, and tinted additions, deletions, and hunk headers.
 - Nonblocking worktree refresh when files, the index, branches, or HEAD change outside GitUI.
@@ -46,6 +47,8 @@ In the repository explorer, press `p` or `/` to type or paste a path directly. R
 
 - Click header controls to switch views, refresh, choose a repository, or open help.
 - Drag the divider between Worktree and Diff to resize either panel.
+- Drag the History section header vertically to resize the current-branch commit shelf.
+- Click or scroll History to inspect a commit's patch; click a Worktree file to return to its current diff.
 - Click a directory to expand or collapse it. Click a file's right-aligned checkbox or right-click its row to stage or unstage it.
 - Use the wheel over Worktree, Diff, or Graph to scroll that surface.
 - Click the Worktree `Stage all` checkbox to stage everything; click it again when checked to unstage everything.
@@ -54,7 +57,7 @@ In the repository explorer, press `p` or `/` to type or paste a path directly. R
 
 ## Settings
 
-Settings are saved to `$XDG_CONFIG_HOME/gitui/config`, or `~/.config/gitui/config` when `XDG_CONFIG_HOME` is unset. On Windows, GitUI uses `%APPDATA%\gitui\config`. Auto-fetch can periodically run `git fetch --all --prune` for the active repository without blocking the interface; its interval is configurable from 1 to 1440 minutes. The last manually selected Worktree width is stored as an exact terminal-column count.
+Settings are saved to `$XDG_CONFIG_HOME/gitui/config`, or `~/.config/gitui/config` when `XDG_CONFIG_HOME` is unset. On Windows, GitUI uses `%APPDATA%\gitui\config`. Auto-fetch can periodically run `git fetch --all --prune` for the active repository without blocking the interface; its interval is configurable from 1 to 1440 minutes. The last manually selected Worktree width and History height are stored as exact terminal-cell counts.
 
 ## Theme
 
