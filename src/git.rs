@@ -89,28 +89,29 @@ pub fn load(path: &Path) -> Result<RepositoryData> {
 }
 
 pub fn repository_files(root: &Path) -> Result<Vec<String>> {
-    let output = run(
-        root,
-        &[
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ],
-    )?;
-    if !output.status.success() {
-        bail!("{}", clean_stderr(&output));
+    let mut files = Vec::new();
+    let mut directories = vec![root.to_owned()];
+    while let Some(directory) = directories.pop() {
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(_) if directory != root => continue,
+            Err(error) => return Err(error).context("read repository files"),
+        };
+        for entry in entries.flatten() {
+            if entry.file_name() == ".git" {
+                continue;
+            }
+            let path = entry.path();
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if metadata.is_dir() {
+                directories.push(path);
+            } else if let Ok(relative) = path.strip_prefix(root) {
+                files.push(relative.to_string_lossy().into_owned());
+            }
+        }
     }
-    let mut files: Vec<_> = output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-        .map(|path| String::from_utf8_lossy(path).into_owned())
-        .filter(|path| {
-            fs::symlink_metadata(root.join(path)).is_ok_and(|metadata| !metadata.is_dir())
-        })
-        .collect();
     files.sort();
     files.dedup();
     Ok(files)
@@ -726,6 +727,7 @@ mod tests {
         git(root, &["config", "user.name", "Test Author"]);
         git(root, &["config", "user.email", "test@example.com"]);
         fs::write(root.join("base.txt"), "base\n").unwrap();
+        fs::write(root.join(".gitignore"), "ignored/\n").unwrap();
         git(root, &["add", "."]);
         git(root, &["commit", "-m", "base"]);
         git(root, &["checkout", "-b", "feature"]);
@@ -741,6 +743,8 @@ mod tests {
             &["merge", "--no-ff", "feature", "-m", "merge feature"],
         );
         fs::write(root.join("main.txt"), "changed\n").unwrap();
+        fs::create_dir(root.join("ignored")).unwrap();
+        fs::write(root.join("ignored/cache.txt"), "generated\n").unwrap();
 
         let repo = load(root).unwrap();
         assert_eq!(repo.branch, "main");
@@ -758,6 +762,13 @@ mod tests {
         assert_eq!(repo.changes[0].path, "main.txt");
         assert!(repo.files.iter().any(|path| path == "base.txt"));
         assert!(repo.files.iter().any(|path| path == "feature.txt"));
+        assert!(repo.files.iter().any(|path| path == "ignored/cache.txt"));
+        assert!(
+            !repo
+                .changes
+                .iter()
+                .any(|change| change.path == "ignored/cache.txt")
+        );
         assert_eq!(file_content(root, "main.txt").unwrap(), "changed\n");
         let selected_commit_diff = commit_diff(root, &repo.history[0].oid).unwrap();
         assert!(selected_commit_diff.contains("diff --git"));

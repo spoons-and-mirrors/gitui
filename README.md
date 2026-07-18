@@ -3,7 +3,7 @@
 A focused Rust/Ratatui interface for the two Git views that matter most during everyday work:
 
 - A collapsible worktree tree with compact directory chains for inspecting, staging, unstaging, and committing changes.
-- A switchable repository file tree with read-only, syntax-colored file previews.
+- A switchable repository file tree, including Git-ignored files, with read-only, syntax-colored previews.
 - A resizable current-branch history shelf with HEAD, branch, remote, and tag decorations; selecting a commit shows its patch.
 - An all-refs commit graph showing branches, remotes, tags, authors, dates, and hashes.
 - Source-aware diffs with line numbers, syntax color, and tinted additions, deletions, and hunk headers.
@@ -31,7 +31,7 @@ Starting outside a repository opens the directory navigator automatically.
 | `PageUp`, `PageDown` | Scroll the selected file's diff |
 | `w` | Toggle line wrapping in the Diff panel |
 | `e` | Switch the left pane between Worktree and Files |
-| `h`, `l`, `Left`, `Right` | Collapse, expand, or navigate the worktree tree |
+| `h`, `l`, `Left`, `Right` | Collapse, expand, or navigate the active file tree |
 | `Enter` | Toggle the selected directory |
 | `Space` | Stage or unstage selected entry |
 | `a`, `u` | Stage all or unstage all |
@@ -53,7 +53,8 @@ In the repository explorer, start typing a folder name, press `p` to search from
 - Click or scroll History to inspect a commit's patch; click a Worktree file to return to its current diff.
 - Click a directory to expand or collapse it. Click a file's right-aligned checkbox or right-click its row to stage or unstage it.
 - Click `WORKTREE` or `FILES` in the left header to switch modes; clicking a repository file previews its contents.
-- Use the wheel over Worktree, Diff, or Graph to scroll that surface.
+- The wheel pans Worktree and Files as viewports without changing the selected file; click a visible row to select it.
+- Use the wheel over Diff or Graph to scroll that surface.
 - Drag the one-column Diff scrollbar or click its track to move quickly through large patches.
 - Click the Worktree `Stage all` checkbox to stage everything; click it again when checked to unstage everything.
 - Click the commit editor inside Worktree, type a message, and press `Ctrl+Enter` to commit.

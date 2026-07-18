@@ -346,6 +346,8 @@ pub struct App {
     pub mode: Mode,
     pub changes_state: ListState,
     pub explorer_state: ListState,
+    pub worktree_scroll: usize,
+    pub explorer_scroll: usize,
     pub graph_state: TableState,
     pub history_state: ListState,
     pub diff: String,
@@ -355,6 +357,7 @@ pub struct App {
     pub commit_running: bool,
     pub collapsed_directories: HashSet<String>,
     pub collapsed_explorer_directories: HashSet<String>,
+    explorer_rows_cache: Vec<ExplorerRow>,
     pub dragging_splitter: bool,
     pub dragging_history: bool,
     pub dragging_diff_scrollbar: bool,
@@ -409,6 +412,8 @@ impl App {
             mode,
             changes_state: ListState::default(),
             explorer_state: ListState::default(),
+            worktree_scroll: 0,
+            explorer_scroll: 0,
             graph_state: TableState::default(),
             history_state: ListState::default(),
             diff: String::new(),
@@ -418,6 +423,7 @@ impl App {
             commit_running: false,
             collapsed_directories: HashSet::new(),
             collapsed_explorer_directories: HashSet::new(),
+            explorer_rows_cache: Vec::new(),
             dragging_splitter: false,
             dragging_history: false,
             dragging_diff_scrollbar: false,
@@ -440,6 +446,7 @@ impl App {
             next_fetch_at,
             next_status_check: Instant::now() + Duration::from_millis(800),
         };
+        app.rebuild_explorer_rows();
         app.select_initial_rows();
         app.refresh_diff();
         app
@@ -781,7 +788,7 @@ impl App {
         else {
             return false;
         };
-        let index = self.changes_state.offset() + usize::from(point.y - rect.y);
+        let index = self.worktree_scroll + usize::from(point.y - rect.y);
         let len = self.worktree_rows().len();
         if index >= len {
             return false;
@@ -803,7 +810,7 @@ impl App {
         else {
             return false;
         };
-        let index = self.explorer_state.offset() + usize::from(point.y - rect.y);
+        let index = self.explorer_scroll + usize::from(point.y - rect.y);
         if index >= self.explorer_rows().len() {
             return false;
         }
@@ -871,7 +878,7 @@ impl App {
             .explorer_list
             .is_some_and(|rect| rect.contains(point))
         {
-            self.move_explorer_selection(delta);
+            self.scroll_explorer(delta.saturating_mul(3));
         } else if self
             .regions
             .history_list
@@ -883,15 +890,35 @@ impl App {
             self.refresh_diff();
         } else if self
             .regions
-            .worktree
+            .worktree_list
             .is_some_and(|rect| rect.contains(point))
-            || self
-                .regions
-                .graph_table
-                .is_some_and(|rect| rect.contains(point))
+        {
+            self.scroll_worktree(delta.saturating_mul(3));
+        } else if self
+            .regions
+            .graph_table
+            .is_some_and(|rect| rect.contains(point))
         {
             self.move_selection(delta);
         }
+    }
+
+    fn scroll_worktree(&mut self, delta: isize) {
+        let len = self.worktree_rows().len();
+        let viewport = self
+            .regions
+            .worktree_list
+            .map_or(0, |rect| usize::from(rect.height));
+        scroll_viewport(&mut self.worktree_scroll, len, viewport, delta);
+    }
+
+    fn scroll_explorer(&mut self, delta: isize) {
+        let len = self.explorer_rows().len();
+        let viewport = self
+            .regions
+            .explorer_list
+            .map_or(0, |rect| usize::from(rect.height));
+        scroll_viewport(&mut self.explorer_scroll, len, viewport, delta);
     }
 
     fn scroll_diff_by(&mut self, delta: isize) {
@@ -1254,8 +1281,11 @@ impl App {
                 self.next_fetch_at = Instant::now() + fetch_interval(&self.settings);
                 self.collapsed_directories.clear();
                 self.collapsed_explorer_directories.clear();
+                self.rebuild_explorer_rows();
                 self.changes_state = ListState::default();
                 self.explorer_state = ListState::default();
+                self.worktree_scroll = 0;
+                self.explorer_scroll = 0;
                 self.graph_state = TableState::default();
                 self.history_state = ListState::default();
                 self.history_focused = false;
@@ -1358,6 +1388,7 @@ impl App {
                 } else {
                     let len = self.worktree_rows().len();
                     move_list(&mut self.changes_state, len, delta);
+                    self.ensure_worktree_selection_visible();
                     self.refresh_diff();
                 }
             }
@@ -1374,6 +1405,7 @@ impl App {
                 if self.left_pane == LeftPane::Files {
                     self.explorer_state
                         .select((!self.explorer_rows().is_empty()).then_some(0));
+                    self.ensure_explorer_selection_visible();
                     self.refresh_diff();
                 } else if self.history_focused {
                     self.history_state.select(
@@ -1385,6 +1417,7 @@ impl App {
                     self.refresh_diff();
                 } else {
                     self.changes_state.select(self.first_change_row());
+                    self.ensure_worktree_selection_visible();
                     self.refresh_diff();
                 }
             }
@@ -1403,6 +1436,7 @@ impl App {
                 if self.left_pane == LeftPane::Files {
                     self.explorer_state
                         .select(self.explorer_rows().len().checked_sub(1));
+                    self.ensure_explorer_selection_visible();
                     self.refresh_diff();
                 } else if self.history_focused {
                     self.history_state.select(
@@ -1413,6 +1447,7 @@ impl App {
                     self.refresh_diff();
                 } else {
                     self.changes_state.select(self.last_change_row());
+                    self.ensure_worktree_selection_visible();
                     self.refresh_diff();
                 }
             }
@@ -1513,6 +1548,7 @@ impl App {
                 let history_index = selected_history_oid
                     .and_then(|oid| repo.history.iter().position(|commit| commit.oid == oid));
                 self.repo = Some(repo);
+                self.rebuild_explorer_rows();
                 let change_row = change_index
                     .and_then(|index| self.row_for_change(index))
                     .or_else(|| {
@@ -1559,11 +1595,10 @@ impl App {
             return;
         };
         if self.left_pane == LeftPane::Files {
-            let rows = build_file_tree(&repo.files, &self.collapsed_explorer_directories);
             let Some(row) = self
                 .explorer_state
                 .selected()
-                .and_then(|index| rows.get(index))
+                .and_then(|index| self.explorer_rows_cache.get(index))
             else {
                 self.diff = "Select a file to preview".to_owned();
                 return;
@@ -1631,10 +1666,14 @@ impl App {
         })
     }
 
-    pub fn explorer_rows(&self) -> Vec<ExplorerRow> {
-        self.repo.as_ref().map_or_else(Vec::new, |repo| {
+    pub fn explorer_rows(&self) -> &[ExplorerRow] {
+        &self.explorer_rows_cache
+    }
+
+    fn rebuild_explorer_rows(&mut self) {
+        self.explorer_rows_cache = self.repo.as_ref().map_or_else(Vec::new, |repo| {
             build_file_tree(&repo.files, &self.collapsed_explorer_directories)
-        })
+        });
     }
 
     pub fn selected_explorer_file_path(&self) -> Option<&str> {
@@ -1675,7 +1714,28 @@ impl App {
     fn move_explorer_selection(&mut self, delta: isize) {
         let len = self.explorer_rows().len();
         move_list(&mut self.explorer_state, len, delta);
+        self.ensure_explorer_selection_visible();
         self.refresh_diff();
+    }
+
+    fn ensure_worktree_selection_visible(&mut self) {
+        ensure_selection_visible(
+            &mut self.worktree_scroll,
+            self.changes_state.selected(),
+            self.regions
+                .worktree_list
+                .map_or(0, |rect| usize::from(rect.height)),
+        );
+    }
+
+    fn ensure_explorer_selection_visible(&mut self) {
+        ensure_selection_visible(
+            &mut self.explorer_scroll,
+            self.explorer_state.selected(),
+            self.regions
+                .explorer_list
+                .map_or(0, |rect| usize::from(rect.height)),
+        );
     }
 
     fn toggle_selected_explorer_directory(&mut self) {
@@ -1685,25 +1745,31 @@ impl App {
         if !self.collapsed_explorer_directories.remove(&path) {
             self.collapsed_explorer_directories.insert(path.clone());
         }
+        self.rebuild_explorer_rows();
         self.select_explorer_directory(&path);
         self.refresh_diff();
     }
 
     fn expand_or_descend_explorer(&mut self) {
-        let rows = self.explorer_rows();
         let Some(index) = self.explorer_state.selected() else {
             return;
         };
-        let Some(row) = rows.get(index) else { return };
-        let Some(path) = &row.directory_path else {
+        let Some(row) = self.explorer_rows_cache.get(index) else {
             return;
         };
-        if row.directory_expanded == Some(false) {
-            self.collapsed_explorer_directories.remove(path);
-            self.select_explorer_directory(path);
-        } else if rows
+        let Some(path) = row.directory_path.clone() else {
+            return;
+        };
+        let expanded = row.directory_expanded;
+        let depth = row.depth;
+        if expanded == Some(false) {
+            self.collapsed_explorer_directories.remove(&path);
+            self.rebuild_explorer_rows();
+            self.select_explorer_directory(&path);
+        } else if self
+            .explorer_rows_cache
             .get(index + 1)
-            .is_some_and(|child| child.depth > row.depth)
+            .is_some_and(|child| child.depth > depth)
         {
             self.explorer_state.select(Some(index + 1));
         }
@@ -1711,22 +1777,26 @@ impl App {
     }
 
     fn collapse_or_ascend_explorer(&mut self) {
-        let rows = self.explorer_rows();
         let Some(index) = self.explorer_state.selected() else {
             return;
         };
-        let Some(row) = rows.get(index) else { return };
-        if let Some(path) = &row.directory_path
-            && row.directory_expanded == Some(true)
+        let Some(row) = self.explorer_rows_cache.get(index) else {
+            return;
+        };
+        let row_depth = row.depth;
+        let directory = row.directory_path.clone();
+        if row.directory_expanded == Some(true)
+            && let Some(path) = directory
         {
             self.collapsed_explorer_directories.insert(path.clone());
-            self.select_explorer_directory(path);
+            self.rebuild_explorer_rows();
+            self.select_explorer_directory(&path);
             self.refresh_diff();
             return;
         }
-        if let Some(parent) = rows[..index]
+        if let Some(parent) = self.explorer_rows_cache[..index]
             .iter()
-            .rposition(|candidate| candidate.depth < row.depth)
+            .rposition(|candidate| candidate.depth < row_depth)
         {
             self.explorer_state.select(Some(parent));
             self.refresh_diff();
@@ -2352,6 +2422,27 @@ fn move_list<S: SelectionState>(state: &mut S, len: usize, delta: isize) {
     let current = state.selected().unwrap_or(0);
     let next = (current as isize + delta).clamp(0, len.saturating_sub(1) as isize) as usize;
     state.select(Some(next));
+}
+
+fn scroll_viewport(scroll: &mut usize, len: usize, viewport: usize, delta: isize) {
+    let maximum = len.saturating_sub(viewport);
+    *scroll = if delta > 0 {
+        scroll.saturating_add(delta as usize).min(maximum)
+    } else {
+        scroll.saturating_sub(delta.unsigned_abs())
+    };
+}
+
+fn ensure_selection_visible(scroll: &mut usize, selected: Option<usize>, viewport: usize) {
+    let Some(selected) = selected else { return };
+    if viewport == 0 {
+        return;
+    }
+    if selected < *scroll {
+        *scroll = selected;
+    } else if selected >= scroll.saturating_add(viewport) {
+        *scroll = selected.saturating_add(1).saturating_sub(viewport);
+    }
 }
 
 trait SelectionState {

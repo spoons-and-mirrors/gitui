@@ -277,15 +277,30 @@ fn draw_changes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     ));
 
     let worktree_rows = app.worktree_rows();
-    let items: Vec<ListItem<'_>> = worktree_rows
-        .iter()
-        .map(|row| worktree_item(row, &repo.changes, worktree_list.width as usize))
-        .collect();
-    let list = List::new(items).highlight_style(Style::default().bg(if app.mode == Mode::Commit {
+    let worktree_viewport = usize::from(worktree_list.height);
+    app.worktree_scroll = app
+        .worktree_scroll
+        .min(worktree_rows.len().saturating_sub(worktree_viewport));
+    let selected_style = Style::default().bg(if app.mode == Mode::Commit {
         palette().inactive_selected
     } else {
         palette().selected
-    }));
+    });
+    let items: Vec<ListItem<'_>> = worktree_rows
+        .iter()
+        .enumerate()
+        .skip(app.worktree_scroll)
+        .take(worktree_viewport)
+        .map(|(index, row)| {
+            let item = worktree_item(row, &repo.changes, worktree_list.width as usize);
+            if app.changes_state.selected() == Some(index) {
+                item.style(selected_style)
+            } else {
+                item
+            }
+        })
+        .collect();
+    let list = List::new(items);
     let stage_label = if worktree_header.width >= 36 {
         format!("Stage all  {} files", repo.changes.len())
     } else {
@@ -340,7 +355,7 @@ fn draw_changes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         files_title.len() as u16,
         1,
     ));
-    frame.render_stateful_widget(list, worktree_list, &mut app.changes_state);
+    frame.render_widget(list, worktree_list);
 
     let history_header = app.regions.history_splitter.expect("set above");
     let history_list = app.regions.history_list.expect("set above");
@@ -612,22 +627,31 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
     ));
     app.regions.explorer_list = Some(list_area);
 
+    let viewport = usize::from(list_area.height);
+    let row_count = app.explorer_rows().len();
+    app.explorer_scroll = app.explorer_scroll.min(row_count.saturating_sub(viewport));
     let rows = app.explorer_rows();
     let items: Vec<ListItem<'_>> = if rows.is_empty() {
         vec![ListItem::new(Line::styled(
-            " No tracked or unignored files",
+            " No repository files",
             Style::default().fg(palette().faint),
         ))]
     } else {
         rows.iter()
-            .map(|row| explorer_item(row, usize::from(list_area.width)))
+            .enumerate()
+            .skip(app.explorer_scroll)
+            .take(viewport)
+            .map(|(index, row)| {
+                let item = explorer_item(row, usize::from(list_area.width));
+                if app.explorer_state.selected() == Some(index) {
+                    item.style(Style::default().bg(palette().selected))
+                } else {
+                    item
+                }
+            })
             .collect()
     };
-    frame.render_stateful_widget(
-        List::new(items).highlight_style(Style::default().bg(palette().selected)),
-        list_area,
-        &mut app.explorer_state,
-    );
+    frame.render_widget(List::new(items), list_area);
 
     let selected_path = app
         .selected_explorer_file_path()
@@ -1438,10 +1462,7 @@ fn worktree_item<'a>(row: &'a WorktreeRow, changes: &'a [Change], width: usize) 
             "▾ "
         };
         let directory = truncate_width(&format!("{}{}{}", row.prefix, marker, row.label), width);
-        return ListItem::new(Line::from(Span::styled(
-            directory,
-            Style::default().fg(palette().muted),
-        )));
+        return ListItem::new(Line::from(Span::styled(directory, folder_style())));
     };
     let change = &changes[change_index];
     let (checkbox, color) = if change.staged {
@@ -1478,13 +1499,17 @@ fn explorer_item(row: &ExplorerRow, width: usize) -> ListItem<'static> {
         };
         return ListItem::new(Line::styled(
             truncate_width(&format!("{}{}{}", row.prefix, marker, row.label), width),
-            Style::default().fg(palette().muted),
+            folder_style(),
         ));
     }
     ListItem::new(Line::styled(
         truncate_width(&format!("{}{}", row.prefix, row.label), width),
         Style::default().fg(palette().ink),
     ))
+}
+
+fn folder_style() -> Style {
+    Style::default().fg(palette().muted)
 }
 
 fn truncate_width(value: &str, width: usize) -> String {
@@ -1980,6 +2005,14 @@ mod tests {
         run_git(root, &["config", "user.name", "Render Test"]);
         run_git(root, &["config", "user.email", "render@example.com"]);
         fs::write(root.join("tracked.txt"), "first\n").unwrap();
+        fs::create_dir(root.join("fixtures")).unwrap();
+        for index in 0..40 {
+            fs::write(
+                root.join(format!("fixtures/file-{index:02}.txt")),
+                format!("fixture {index}\n"),
+            )
+            .unwrap();
+        }
         run_git(root, &["add", "."]);
         run_git(root, &["commit", "-m", "initial commit"]);
         fs::write(root.join("second.txt"), "second\n").unwrap();
@@ -2010,22 +2043,49 @@ mod tests {
         let explorer = app.regions.explorer_list.unwrap();
         let explorer_rows = app.explorer_rows();
         let repo = app.repo.as_ref().unwrap();
-        let tracked_row = explorer_rows
+        let selected_file_row = explorer_rows
             .iter()
-            .position(|row| {
-                row.file_index
-                    .and_then(|index| repo.files.get(index))
-                    .is_some_and(|path| path == "tracked.txt")
-            })
+            .position(|row| row.file_index.is_some())
+            .unwrap();
+        let selected_file = explorer_rows[selected_file_row]
+            .file_index
+            .and_then(|index| repo.files.get(index))
+            .unwrap()
+            .clone();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            explorer.x + 2,
+            explorer.y + selected_file_row as u16,
+        ));
+        assert_eq!(
+            app.selected_explorer_file_path(),
+            Some(selected_file.as_str())
+        );
+        assert_eq!(
+            app.diff,
+            fs::read_to_string(root.join(&selected_file)).unwrap()
+        );
+        let selected_before_scroll = app.explorer_state.selected();
+        let preview_before_scroll = app.diff.clone();
+        app.handle_mouse(mouse(
+            MouseEventKind::ScrollDown,
+            explorer.x + 2,
+            explorer.y + 2,
+        ));
+        assert_eq!(app.explorer_scroll, 3);
+        assert_eq!(app.explorer_state.selected(), selected_before_scroll);
+        assert_eq!(app.diff, preview_before_scroll);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let visible_file = app.explorer_rows()[app.explorer_scroll..]
+            .iter()
+            .position(|row| row.file_index.is_some())
             .unwrap();
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             explorer.x + 2,
-            explorer.y + tracked_row as u16,
+            explorer.y + visible_file as u16,
         ));
-        assert_eq!(app.selected_explorer_file_path(), Some("tracked.txt"));
-        assert_eq!(app.diff, "changed\n");
-        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert_ne!(app.explorer_state.selected(), selected_before_scroll);
         let file_screen: String = terminal
             .backend()
             .buffer()
@@ -2035,7 +2095,7 @@ mod tests {
             .collect();
         assert!(file_screen.contains("FILE"));
         assert!(file_screen.contains("read-only"));
-        assert!(file_screen.contains("changed"));
+        assert!(file_screen.contains("fixture"));
 
         let worktree_tab = app.regions.worktree_tab.unwrap();
         app.handle_mouse(mouse(
