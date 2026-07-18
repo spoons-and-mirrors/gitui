@@ -41,7 +41,7 @@ Starting outside a repository opens the directory navigator automatically.
 | `?` | Help |
 | `q` | Quit |
 
-In the repository explorer, press `p` or `/` to type or paste a path directly. Relative paths start from the displayed directory; `~/...` paths are supported.
+In the repository explorer, start typing a folder name, press `p` to search from an empty field, or `/` to start an absolute path. Search accepts fuzzy directory names, relative paths, absolute paths, and `~/...`; `Tab` accepts the best completion and `Enter` opens a repository or navigates into a directory. GitUI indexes directories under your home folder and common workspace mounts in the background.
 
 ## Mouse
 
@@ -51,6 +51,7 @@ In the repository explorer, press `p` or `/` to type or paste a path directly. R
 - Click or scroll History to inspect a commit's patch; click a Worktree file to return to its current diff.
 - Click a directory to expand or collapse it. Click a file's right-aligned checkbox or right-click its row to stage or unstage it.
 - Use the wheel over Worktree, Diff, or Graph to scroll that surface.
+- Drag the one-column Diff scrollbar or click its track to move quickly through large patches.
 - Click the Worktree `Stage all` checkbox to stage everything; click it again when checked to unstage everything.
 - Click the commit editor inside Worktree, type a message, and press `Ctrl+Enter` to commit.
 - Click the repository path field to type, or click a directory/repository entry to navigate or open it.

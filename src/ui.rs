@@ -468,6 +468,30 @@ fn draw_changes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         diff_header,
     );
     let diff_lines = styled_diff(&app.diff, syntax_path, usize::from(diff_body.width));
+    let rendered_height =
+        rendered_text_height(&diff_lines, usize::from(diff_body.width), app.diff_wrap);
+    let viewport_height = usize::from(diff_body.height);
+    let max_scroll = rendered_height
+        .saturating_sub(viewport_height)
+        .min(usize::from(u16::MAX)) as u16;
+    app.regions.diff_scroll_max = max_scroll;
+    app.diff_scroll = app.diff_scroll.min(max_scroll);
+    let scrollbar = Rect::new(
+        columns[1].right().saturating_sub(1),
+        diff_body.y,
+        1,
+        diff_body.height,
+    );
+    app.regions.diff_scrollbar = Some(scrollbar);
+    app.regions.diff_scroll_thumb = (max_scroll > 0).then(|| {
+        diff_scroll_thumb(
+            scrollbar,
+            rendered_height,
+            viewport_height,
+            app.diff_scroll,
+            max_scroll,
+        )
+    });
     let mut diff = Paragraph::new(diff_lines)
         .scroll((app.diff_scroll, 0))
         .style(Style::default().bg(palette().panel));
@@ -475,6 +499,33 @@ fn draw_changes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         diff = diff.wrap(Wrap { trim: false });
     }
     frame.render_widget(diff, diff_body);
+    if let Some(thumb) = app.regions.diff_scroll_thumb {
+        frame.render_widget(
+            Paragraph::new(Text::from(
+                (0..scrollbar.height)
+                    .map(|_| Line::styled("│", Style::default().fg(palette().faint)))
+                    .collect::<Vec<_>>(),
+            )),
+            scrollbar,
+        );
+        frame.render_widget(
+            Paragraph::new(Text::from(
+                (0..thumb.height)
+                    .map(|_| {
+                        Line::styled(
+                            "┃",
+                            Style::default().fg(if app.dragging_diff_scrollbar {
+                                palette().accent
+                            } else {
+                                palette().muted
+                            }),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+            thumb,
+        );
+    }
 
     let commit_active = app.mode == Mode::Commit;
     fill(frame, commit_area, palette().canvas);
@@ -486,11 +537,14 @@ fn draw_changes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         );
     }
     let commit_content = commit_area.inner(Margin::new(1, 0));
-    let commit_text = if app.commit_running {
-        Text::from(Line::styled(
-            "Creating commit...",
-            Style::default().fg(palette().yellow),
-        ))
+    let (commit_text, commit_height) = if app.commit_running {
+        (
+            Text::from(Line::styled(
+                "Creating commit...",
+                Style::default().fg(palette().yellow),
+            )),
+            1,
+        )
     } else if commit_active || !app.commit_message.is_empty() {
         let mut lines: Vec<Line<'_>> = app
             .commit_message
@@ -510,28 +564,38 @@ fn draw_changes(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             last.spans
                 .push(Span::styled("█", Style::default().fg(palette().accent)));
         }
-        Text::from(lines)
+        let height = rendered_text_height(&lines, usize::from(commit_content.width), true);
+        (Text::from(lines), height)
     } else {
         let hint = "Ctrl+Enter commit";
         let placeholder = "Write a commit message";
         if commit_content.width >= 40 {
             let padding =
                 usize::from(commit_content.width).saturating_sub(placeholder.len() + hint.len());
-            Text::from(Line::from(vec![
-                Span::styled(placeholder, Style::default().fg(palette().muted)),
-                Span::raw(" ".repeat(padding)),
-                Span::styled(hint, Style::default().fg(palette().faint)),
-            ]))
+            (
+                Text::from(Line::from(vec![
+                    Span::styled(placeholder, Style::default().fg(palette().muted)),
+                    Span::raw(" ".repeat(padding)),
+                    Span::styled(hint, Style::default().fg(palette().faint)),
+                ])),
+                1,
+            )
         } else {
-            Text::from(Line::styled(
-                placeholder,
-                Style::default().fg(palette().muted),
-            ))
+            (
+                Text::from(Line::styled(
+                    placeholder,
+                    Style::default().fg(palette().muted),
+                )),
+                1,
+            )
         }
     };
-    let commit_scroll = app.commit_message.split('\n').count().saturating_sub(5) as u16;
+    let commit_scroll = commit_height
+        .saturating_sub(usize::from(commit_content.height))
+        .min(usize::from(u16::MAX)) as u16;
     frame.render_widget(
         Paragraph::new(commit_text)
+            .wrap(Wrap { trim: false })
             .scroll((commit_scroll, 0))
             .style(Style::default().bg(palette().canvas)),
         commit_content,
@@ -739,7 +803,12 @@ fn ref_badge(label: &str, color: Color) -> Span<'static> {
 }
 
 fn draw_picker(frame: &mut Frame<'_>, app: &mut App) {
-    let desired_height = (11 + app.picker.entries.len().min(11) as u16).clamp(14, 22);
+    let row_count = if app.picker.editing_path {
+        app.picker.matches.len()
+    } else {
+        app.picker.entries.len()
+    };
+    let desired_height = (11 + row_count.min(11) as u16).clamp(14, 22);
     let area = centered_min(frame.area(), 82, 0, 56, desired_height);
     app.regions.picker_overlay = Some(area);
     frame.render_widget(Clear, area);
@@ -856,16 +925,26 @@ fn draw_picker(frame: &mut Frame<'_>, app: &mut App) {
         ),
     );
 
+    let section_title = if app.picker.editing_path {
+        "MATCHES"
+    } else {
+        "BROWSE"
+    };
+    let section_detail = if app.picker.editing_path && app.picker.searching {
+        "indexing…".to_owned()
+    } else {
+        format!("{} entries", row_count)
+    };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                "BROWSE",
+                section_title,
                 Style::default()
                     .fg(palette().muted)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("  {} entries", app.picker.entries.len()),
+                format!("  {section_detail}"),
                 Style::default().fg(palette().faint),
             ),
         ])),
@@ -879,16 +958,29 @@ fn draw_picker(frame: &mut Frame<'_>, app: &mut App) {
         area.bottom().saturating_sub(1).saturating_sub(list_y),
     );
     app.regions.picker_list = Some(list_area);
-    let items = app
-        .picker
-        .entries
-        .iter()
-        .map(|entry| picker_item(entry, usize::from(list_area.width)));
-    frame.render_stateful_widget(
-        List::new(items).highlight_style(Style::default().bg(palette().selected)),
-        list_area,
-        &mut app.picker.state,
-    );
+    if app.picker.editing_path {
+        let items = app
+            .picker
+            .matches
+            .iter()
+            .map(|entry| picker_item(entry, usize::from(list_area.width)));
+        frame.render_stateful_widget(
+            List::new(items).highlight_style(Style::default().bg(palette().selected)),
+            list_area,
+            &mut app.picker.match_state,
+        );
+    } else {
+        let items = app
+            .picker
+            .entries
+            .iter()
+            .map(|entry| picker_item(entry, usize::from(list_area.width)));
+        frame.render_stateful_widget(
+            List::new(items).highlight_style(Style::default().bg(palette().selected)),
+            list_area,
+            &mut app.picker.state,
+        );
+    }
 
     let footer = Rect::new(inner_x, area.bottom().saturating_sub(1), inner_width, 1);
     if let Some(error) = &app.picker.error {
@@ -899,9 +991,9 @@ fn draw_picker(frame: &mut Frame<'_>, app: &mut App) {
         );
     } else {
         let hint = if app.picker.editing_path {
-            "Enter open   Ctrl-U clear   Esc browse"
+            "Tab complete   Enter open   ↑↓ matches   Esc browse"
         } else {
-            "Enter open   h parent   / path   Esc close"
+            "Enter open   h parent   / search   Esc close"
         };
         frame.render_widget(
             Paragraph::new(hint)
@@ -1399,6 +1491,51 @@ fn styled_diff(diff: &str, path: &str, width: usize) -> Vec<Line<'static>> {
         .collect()
 }
 
+fn rendered_text_height(lines: &[Line<'_>], width: usize, wrapped: bool) -> usize {
+    if !wrapped {
+        return lines.len();
+    }
+    let width = width.max(1);
+    lines
+        .iter()
+        .map(|line| {
+            let line_width: usize = line
+                .spans
+                .iter()
+                .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+                .sum();
+            line_width.max(1).div_ceil(width)
+        })
+        .sum()
+}
+
+fn diff_scroll_thumb(
+    track: Rect,
+    content_height: usize,
+    viewport_height: usize,
+    scroll: u16,
+    max_scroll: u16,
+) -> Rect {
+    let thumb_height = (usize::from(track.height) * viewport_height)
+        .checked_div(content_height.max(1))
+        .unwrap_or(0)
+        .max(1)
+        .min(usize::from(track.height)) as u16;
+    let travel = track.height.saturating_sub(thumb_height);
+    let offset = if max_scroll == 0 {
+        0
+    } else {
+        ((u32::from(scroll) * u32::from(travel) + u32::from(max_scroll) / 2)
+            / u32::from(max_scroll)) as u16
+    };
+    Rect::new(
+        track.x,
+        track.y.saturating_add(offset),
+        track.width,
+        thumb_height,
+    )
+}
+
 fn parse_hunk_lines(line: &str) -> Option<(u32, u32)> {
     let mut fields = line.split_whitespace();
     fields.next()?;
@@ -1826,6 +1963,37 @@ mod tests {
         assert!(!app.history_focused);
         assert!(app.diff.contains("tracked.txt") || app.diff.contains("untracked.txt"));
 
+        app.diff = (0..100)
+            .map(|line| format!("+scrollbar line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.diff_scroll = 0;
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let scrollbar = app.regions.diff_scrollbar.unwrap();
+        assert_eq!(scrollbar.width, 1);
+        assert_eq!(scrollbar.right(), 120);
+        assert!(app.regions.diff_scroll_max > 0);
+        assert!(app.regions.diff_scroll_thumb.is_some());
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            scrollbar.x,
+            scrollbar.bottom() - 1,
+        ));
+        assert!(app.dragging_diff_scrollbar);
+        assert!(app.diff_scroll > 0);
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            scrollbar.x,
+            scrollbar.y,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            scrollbar.x,
+            scrollbar.y,
+        ));
+        assert_eq!(app.diff_scroll, 0);
+        assert!(!app.dragging_diff_scrollbar);
+
         let changes_screen: String = terminal
             .backend()
             .buffer()
@@ -1872,6 +2040,19 @@ mod tests {
             .collect();
         assert!(unfocused_screen.contains("Subject"));
         assert!(unfocused_screen.contains("Body"));
+
+        app.commit_message = format!("wrap-start {} wrap-end", "x".repeat(90));
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let wrapped_screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(wrapped_screen.contains("wrap-start"));
+        assert!(wrapped_screen.contains("wrap-end"));
+        app.commit_message = "Subject\nBody".to_owned();
 
         app.mode = Mode::Commit;
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();

@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashSet, VecDeque},
     fs,
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender},
@@ -183,6 +183,9 @@ pub struct Regions {
     pub history_splitter: Option<Rect>,
     pub history_bounds: Option<Rect>,
     pub diff: Option<Rect>,
+    pub diff_scrollbar: Option<Rect>,
+    pub diff_scroll_thumb: Option<Rect>,
+    pub diff_scroll_max: u16,
     pub splitter: Option<Rect>,
     pub split_bounds: Option<Rect>,
     pub commit: Option<Rect>,
@@ -220,7 +223,12 @@ pub struct RepositoryPicker {
     pub editing_path: bool,
     pub entries: Vec<PickerEntry>,
     pub state: ListState,
+    pub matches: Vec<PickerEntry>,
+    pub match_state: ListState,
+    pub searching: bool,
     pub error: Option<String>,
+    directory_index: Vec<PathBuf>,
+    index_rx: Option<Receiver<Vec<PathBuf>>>,
 }
 
 #[derive(Debug)]
@@ -258,6 +266,8 @@ pub struct App {
     pub collapsed_directories: HashSet<String>,
     pub dragging_splitter: bool,
     pub dragging_history: bool,
+    pub dragging_diff_scrollbar: bool,
+    diff_scroll_drag_offset: u16,
     pub history_focused: bool,
     pub picker: RepositoryPicker,
     pub settings: Settings,
@@ -316,6 +326,8 @@ impl App {
             collapsed_directories: HashSet::new(),
             dragging_splitter: false,
             dragging_history: false,
+            dragging_diff_scrollbar: false,
+            diff_scroll_drag_offset: 0,
             history_focused: false,
             picker: RepositoryPicker::new(start),
             settings,
@@ -360,7 +372,10 @@ impl App {
     pub fn handle_paste(&mut self, text: &str) {
         match self.mode {
             Mode::Commit => self.commit_message.push_str(text),
-            Mode::Picker if self.picker.editing_path => self.picker.path_input.push_str(text),
+            Mode::Picker if self.picker.editing_path => {
+                self.picker.path_input.push_str(text);
+                self.picker.refresh_matches();
+            }
             _ => {}
         }
     }
@@ -415,6 +430,17 @@ impl App {
             }
             return;
         }
+        if self.dragging_diff_scrollbar {
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left) => self.scroll_diff_to(mouse.row),
+                MouseEventKind::Up(MouseButton::Left) => {
+                    self.scroll_diff_to(mouse.row);
+                    self.dragging_diff_scrollbar = false;
+                }
+                _ => {}
+            }
+            return;
+        }
 
         match mouse.kind {
             MouseEventKind::ScrollDown => {
@@ -452,6 +478,28 @@ impl App {
             self.dragging_history = true;
             self.history_focused = true;
             self.resize_history(mouse.row);
+            return;
+        }
+        if self
+            .regions
+            .diff_scrollbar
+            .is_some_and(|rect| rect.contains(point))
+            && self.regions.diff_scroll_max > 0
+        {
+            self.dragging_diff_scrollbar = true;
+            self.diff_scroll_drag_offset = self
+                .regions
+                .diff_scroll_thumb
+                .filter(|thumb| thumb.contains(point))
+                .map_or_else(
+                    || {
+                        self.regions
+                            .diff_scroll_thumb
+                            .map_or(0, |thumb| thumb.height / 2)
+                    },
+                    |thumb| point.y.saturating_sub(thumb.y),
+                );
+            self.scroll_diff_to(mouse.row);
             return;
         }
         if self
@@ -544,8 +592,7 @@ impl App {
                     .picker_path
                     .is_some_and(|rect| rect.contains(point))
                 {
-                    self.picker.editing_path = true;
-                    self.picker.error = None;
+                    self.picker.begin_search(None);
                     return;
                 }
                 let Some(rect) = self.regions.picker_list.filter(|rect| rect.contains(point))
@@ -553,7 +600,13 @@ impl App {
                     return;
                 };
                 let index = self.picker.state.offset() + usize::from(mouse.row - rect.y);
-                if index < self.picker.entries.len() {
+                if self.picker.editing_path {
+                    let index = self.picker.match_state.offset() + usize::from(mouse.row - rect.y);
+                    if index < self.picker.matches.len() {
+                        self.picker.match_state.select(Some(index));
+                        self.confirm_picker_path();
+                    }
+                } else if index < self.picker.entries.len() {
                     self.picker.state.select(Some(index));
                     self.activate_picker_entry(true);
                 }
@@ -678,11 +731,7 @@ impl App {
 
     fn scroll_at(&mut self, point: Position, delta: isize) {
         if self.regions.diff.is_some_and(|rect| rect.contains(point)) {
-            self.diff_scroll = if delta > 0 {
-                self.diff_scroll.saturating_add(3)
-            } else {
-                self.diff_scroll.saturating_sub(3)
-            };
+            self.scroll_diff_by(delta.saturating_mul(3));
         } else if self
             .regions
             .history_list
@@ -705,6 +754,37 @@ impl App {
         }
     }
 
+    fn scroll_diff_by(&mut self, delta: isize) {
+        self.diff_scroll = if delta > 0 {
+            self.diff_scroll
+                .saturating_add(delta as u16)
+                .min(self.regions.diff_scroll_max)
+        } else {
+            self.diff_scroll.saturating_sub(delta.unsigned_abs() as u16)
+        };
+    }
+
+    fn scroll_diff_to(&mut self, row: u16) {
+        let Some(track) = self.regions.diff_scrollbar else {
+            return;
+        };
+        let Some(thumb) = self.regions.diff_scroll_thumb else {
+            return;
+        };
+        let travel = track.height.saturating_sub(thumb.height);
+        if travel == 0 || self.regions.diff_scroll_max == 0 {
+            self.diff_scroll = 0;
+            return;
+        }
+        let position = row
+            .saturating_sub(track.y)
+            .saturating_sub(self.diff_scroll_drag_offset)
+            .min(travel);
+        self.diff_scroll = ((u32::from(position) * u32::from(self.regions.diff_scroll_max)
+            + u32::from(travel) / 2)
+            / u32::from(travel)) as u16;
+    }
+
     fn resize_worktree(&mut self, column: u16) {
         let Some(bounds) = self.regions.split_bounds else {
             return;
@@ -724,6 +804,9 @@ impl App {
     }
 
     pub fn poll_worker(&mut self) {
+        if self.mode == Mode::Picker {
+            self.picker.poll_index();
+        }
         self.maybe_start_auto_fetch();
         self.maybe_check_worktree();
         while let Ok(done) = self.worker_rx.try_recv() {
@@ -850,12 +933,8 @@ impl App {
             {
                 self.collapse_or_ascend_worktree()
             }
-            KeyCode::PageDown if self.view == View::Changes => {
-                self.diff_scroll = self.diff_scroll.saturating_add(10)
-            }
-            KeyCode::PageUp if self.view == View::Changes => {
-                self.diff_scroll = self.diff_scroll.saturating_sub(10)
-            }
+            KeyCode::PageDown if self.view == View::Changes => self.scroll_diff_by(10),
+            KeyCode::PageUp if self.view == View::Changes => self.scroll_diff_by(-10),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Home | KeyCode::Char('g') => self.select_first(),
@@ -887,19 +966,25 @@ impl App {
     fn handle_picker(&mut self, key: KeyEvent) {
         if self.picker.editing_path {
             match key.code {
-                KeyCode::Esc => self.picker.editing_path = false,
-                KeyCode::Enter => {
-                    let path = self.picker.input_path();
-                    self.open_repository(path);
+                KeyCode::Esc => {
+                    self.picker.editing_path = false;
+                    self.picker.matches.clear();
                 }
+                KeyCode::Enter => self.confirm_picker_path(),
+                KeyCode::Tab => self.picker.accept_completion(),
+                KeyCode::Down => self.picker.move_match_selection(1),
+                KeyCode::Up => self.picker.move_match_selection(-1),
                 KeyCode::Backspace => {
                     self.picker.path_input.pop();
+                    self.picker.refresh_matches();
                 }
                 KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.picker.path_input.clear();
+                    self.picker.refresh_matches();
                 }
                 KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.picker.path_input.push(character);
+                    self.picker.refresh_matches();
                 }
                 _ => {}
             }
@@ -912,12 +997,18 @@ impl App {
             KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => self.picker.go_parent(),
             KeyCode::Enter => self.activate_picker_entry(true),
             KeyCode::Right | KeyCode::Char('l') => self.activate_picker_entry(false),
-            KeyCode::Char('p') | KeyCode::Char('/') => {
-                self.picker.editing_path = true;
-                self.picker.error = None;
-            }
+            KeyCode::Char('p') => self.picker.begin_search(Some("")),
+            KeyCode::Char('/') => self
+                .picker
+                .begin_search(Some(std::path::MAIN_SEPARATOR_STR)),
             KeyCode::Char('r') => self.picker.reload(),
             KeyCode::Char('q') if self.repo.is_none() => self.should_quit = true,
+            KeyCode::Char(character)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                self.picker.begin_search(Some(&character.to_string()));
+            }
             _ => {}
         }
     }
@@ -957,6 +1048,21 @@ impl App {
         match entry.action {
             PickerAction::Navigate => self.picker.navigate(entry.path),
             PickerAction::Open => self.open_repository(entry.path),
+        }
+    }
+
+    fn confirm_picker_path(&mut self) {
+        let path = self.picker.selected_match_path();
+        if !path.is_dir() {
+            self.picker.error = Some(format!("Directory not found: {}", path.display()));
+            return;
+        }
+        if is_repository_directory(&path) {
+            self.open_repository(path);
+        } else {
+            self.picker.navigate(path);
+            self.picker.editing_path = false;
+            self.picker.matches.clear();
         }
     }
 
@@ -1423,7 +1529,12 @@ impl RepositoryPicker {
             editing_path: false,
             entries: Vec::new(),
             state: ListState::default(),
+            matches: Vec::new(),
+            match_state: ListState::default(),
+            searching: false,
             error: None,
+            directory_index: Vec::new(),
+            index_rx: None,
         };
         picker.reload();
         picker
@@ -1431,7 +1542,7 @@ impl RepositoryPicker {
 
     fn reload(&mut self) {
         self.error = None;
-        let current_is_repo = git::discover(&self.directory).is_ok();
+        let current_is_repo = is_repository_directory(&self.directory);
         let mut entries = vec![PickerEntry {
             label: if current_is_repo {
                 "Open current repository".to_owned()
@@ -1491,6 +1602,109 @@ impl RepositoryPicker {
         move_list(&mut self.state, self.entries.len(), delta);
     }
 
+    fn move_match_selection(&mut self, delta: isize) {
+        move_list(&mut self.match_state, self.matches.len(), delta);
+    }
+
+    fn begin_search(&mut self, initial: Option<&str>) {
+        self.editing_path = true;
+        self.error = None;
+        if let Some(initial) = initial {
+            self.path_input = initial.to_owned();
+        }
+        self.refresh_matches();
+    }
+
+    fn poll_index(&mut self) {
+        let Some(receiver) = &self.index_rx else {
+            return;
+        };
+        let Ok(index) = receiver.try_recv() else {
+            return;
+        };
+        self.directory_index = index;
+        self.index_rx = None;
+        self.searching = false;
+        self.refresh_matches();
+    }
+
+    fn refresh_matches(&mut self) {
+        self.error = None;
+        let query = self.path_input.trim();
+        if query.is_empty() {
+            self.matches.clear();
+            self.match_state.select(None);
+            return;
+        }
+        if !query.contains(['/', '\\'])
+            && self.directory_index.is_empty()
+            && self.index_rx.is_none()
+        {
+            self.searching = true;
+            let (sender, receiver) = mpsc::channel();
+            self.index_rx = Some(receiver);
+            let roots = search_roots(&self.directory);
+            thread::spawn(move || {
+                let _ = sender.send(index_directories(&roots));
+            });
+        }
+
+        let mut candidates = Vec::new();
+        let mut seen = HashSet::new();
+        if let Some(path) = resolve_fuzzy_path(query, &self.directory)
+            && seen.insert(path.clone())
+        {
+            candidates.push((u32::MAX, path));
+        }
+        for path in &self.directory_index {
+            let Some(score) = fuzzy_path_score(query, path) else {
+                continue;
+            };
+            if seen.insert(path.clone()) {
+                candidates.push((score, path.clone()));
+            }
+        }
+        candidates.sort_by(|(left_score, left), (right_score, right)| {
+            right_score
+                .cmp(left_score)
+                .then_with(|| path_depth(left).cmp(&path_depth(right)))
+                .then_with(|| left.cmp(right))
+        });
+        self.matches = candidates
+            .into_iter()
+            .take(12)
+            .map(|(_, path)| PickerEntry {
+                label: display_search_path(&path),
+                is_repo: is_repository_directory(&path),
+                path,
+                action: PickerAction::Navigate,
+            })
+            .collect();
+        self.match_state
+            .select((!self.matches.is_empty()).then_some(0));
+    }
+
+    fn accept_completion(&mut self) {
+        let Some(path) = self
+            .match_state
+            .selected()
+            .and_then(|index| self.matches.get(index))
+            .map(|entry| entry.path.clone())
+        else {
+            return;
+        };
+        self.path_input = path.display().to_string();
+        self.refresh_matches();
+    }
+
+    fn selected_match_path(&self) -> PathBuf {
+        self.match_state
+            .selected()
+            .and_then(|index| self.matches.get(index))
+            .map(|entry| entry.path.clone())
+            .unwrap_or_else(|| self.input_path())
+    }
+
     fn navigate(&mut self, path: PathBuf) {
         self.directory = path;
         self.path_input = self.directory.display().to_string();
@@ -1504,22 +1718,199 @@ impl RepositoryPicker {
     }
 
     fn input_path(&self) -> PathBuf {
-        let input = self.path_input.trim();
-        let expanded = if input == "~" {
-            home_directory().unwrap_or_else(|| PathBuf::from(input))
-        } else if let Some(rest) = input.strip_prefix("~/") {
-            home_directory()
-                .map(|home| home.join(rest))
-                .unwrap_or_else(|| PathBuf::from(input))
-        } else {
-            PathBuf::from(input)
-        };
+        let expanded = expand_search_path(self.path_input.trim());
         if expanded.is_absolute() {
             expanded
         } else {
             self.directory.join(expanded)
         }
     }
+}
+
+fn search_roots(current: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(home) = home_directory() {
+        roots.push(home);
+    }
+    if !roots.iter().any(|root| current.starts_with(root)) {
+        roots.push(current.to_path_buf());
+    }
+    for path in ["/workspace", "/workspaces", "/projects", "/mnt", "/media"] {
+        let path = PathBuf::from(path);
+        if path.is_dir() {
+            roots.push(path);
+        }
+    }
+    roots
+}
+
+fn index_directories(roots: &[PathBuf]) -> Vec<PathBuf> {
+    const MAX_DIRECTORIES: usize = 25_000;
+    const MAX_DEPTH: usize = 7;
+    let mut directories = Vec::new();
+    let mut queue: VecDeque<_> = roots.iter().cloned().map(|path| (path, 0)).collect();
+    let mut seen = HashSet::new();
+    while let Some((directory, depth)) = queue.pop_front() {
+        if directories.len() >= MAX_DIRECTORIES || !seen.insert(directory.clone()) {
+            continue;
+        }
+        directories.push(directory.clone());
+        if depth >= MAX_DEPTH || is_bare_repository_directory(&directory) {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if should_skip_index_directory(&name) {
+                continue;
+            }
+            queue.push_back((entry.path(), depth + 1));
+        }
+    }
+    directories
+}
+
+fn should_skip_index_directory(name: &str) -> bool {
+    name.starts_with('.')
+        || matches!(
+            name,
+            "node_modules" | "target" | "vendor" | "dist" | "build" | "__pycache__"
+        )
+}
+
+fn expand_search_path(input: &str) -> PathBuf {
+    if input == "~" {
+        home_directory().unwrap_or_else(|| PathBuf::from(input))
+    } else if let Some(rest) = input
+        .strip_prefix("~/")
+        .or_else(|| input.strip_prefix("~\\"))
+    {
+        home_directory()
+            .map(|home| home.join(rest))
+            .unwrap_or_else(|| PathBuf::from(input))
+    } else {
+        PathBuf::from(input)
+    }
+}
+
+fn resolve_fuzzy_path(input: &str, base: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+
+    let expanded = expand_search_path(input);
+    let mut resolved = if expanded.is_absolute() {
+        PathBuf::new()
+    } else {
+        base.to_path_buf()
+    };
+    for component in expanded.components() {
+        match component {
+            Component::Prefix(prefix) => resolved.push(prefix.as_os_str()),
+            Component::RootDir => resolved.push(std::path::MAIN_SEPARATOR.to_string()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::Normal(name) => {
+                let exact = resolved.join(name);
+                if exact.is_dir() {
+                    resolved = exact;
+                    continue;
+                }
+                let query = name.to_string_lossy();
+                let entries = fs::read_dir(&resolved).ok()?;
+                let best = entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                    .filter_map(|entry| {
+                        let score = fuzzy_text_score(&query, &entry.file_name().to_string_lossy())?;
+                        Some((score, entry.path()))
+                    })
+                    .max_by(|(left_score, left), (right_score, right)| {
+                        left_score.cmp(right_score).then_with(|| right.cmp(left))
+                    })?;
+                resolved = best.1;
+            }
+        }
+    }
+    resolved.is_dir().then_some(resolved)
+}
+
+fn fuzzy_path_score(query: &str, path: &Path) -> Option<u32> {
+    let query = query.trim_matches(['/', '\\']);
+    if query.is_empty() {
+        return None;
+    }
+    let name = path.file_name()?.to_string_lossy();
+    fuzzy_text_score(query, &name).map(|score| {
+        score
+            + if is_repository_directory(path) {
+                750
+            } else {
+                0
+            }
+    })
+}
+
+fn fuzzy_text_score(query: &str, candidate: &str) -> Option<u32> {
+    let query = query.to_lowercase();
+    let candidate = candidate.to_lowercase();
+    let query_len = query.chars().count();
+    if query == candidate {
+        return Some(10_000);
+    }
+    if candidate.starts_with(&query) {
+        return Some(9_000u32.saturating_sub(candidate.len() as u32));
+    }
+    if let Some(index) = candidate.find(&query) {
+        return Some(8_000u32.saturating_sub(index as u32));
+    }
+    let mut positions = Vec::new();
+    let mut offset = 0;
+    for needle in query.chars() {
+        let relative = candidate[offset..].find(needle)?;
+        offset += relative;
+        positions.push(offset);
+        offset += needle.len_utf8();
+    }
+    let span = positions.last()? - positions.first()?;
+    if span > query_len.saturating_mul(3).max(4) {
+        return None;
+    }
+    Some(6_000u32.saturating_sub(span as u32))
+}
+
+fn is_repository_directory(path: &Path) -> bool {
+    path.join(".git").exists()
+}
+
+fn is_bare_repository_directory(path: &Path) -> bool {
+    path.join("HEAD").is_file() && path.join("objects").is_dir() && path.join("refs").is_dir()
+}
+
+fn display_search_path(path: &Path) -> String {
+    if let Some(home) = home_directory()
+        && let Ok(relative) = path.strip_prefix(home)
+    {
+        return if relative.as_os_str().is_empty() {
+            "~".to_owned()
+        } else {
+            format!("~/{}", relative.display())
+        };
+    }
+    path.display().to_string()
+}
+
+fn path_depth(path: &Path) -> usize {
+    path.components().count()
 }
 
 fn fetch_interval(settings: &Settings) -> Duration {
@@ -1672,6 +2063,46 @@ mod tests {
         let rows = build_worktree(&changes, &collapsed);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].directory_expanded, Some(false));
+    }
+
+    #[test]
+    fn fuzzy_repository_paths_resolve_and_complete() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let code = root.join("code");
+        let gitui = code.join("gitui");
+        let gitlab = code.join("gitlab-runner");
+        fs::create_dir_all(gitui.join(".git")).unwrap();
+        fs::create_dir_all(&gitlab).unwrap();
+
+        assert_eq!(resolve_fuzzy_path("cod/gitu", root), Some(gitui.clone()));
+
+        let mut picker = RepositoryPicker::new(root.to_path_buf());
+        picker.directory_index = vec![gitlab, gitui.clone()];
+        picker.begin_search(Some("gtu"));
+        assert_eq!(picker.matches[0].path, gitui);
+        assert!(picker.matches[0].is_repo);
+        assert!(fuzzy_text_score("gitui", "go-genai-streamed-function-args").is_none());
+
+        picker.accept_completion();
+        assert_eq!(PathBuf::from(&picker.path_input), picker.matches[0].path);
+    }
+
+    #[test]
+    fn directory_index_skips_build_trees() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join("projects/gitui")).unwrap();
+        fs::create_dir_all(root.join("target/debug/deps")).unwrap();
+        fs::create_dir_all(root.join("archive.git/objects/pack")).unwrap();
+        fs::create_dir_all(root.join("archive.git/refs")).unwrap();
+        fs::write(root.join("archive.git/HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        let index = index_directories(&[root.to_path_buf()]);
+        assert!(index.contains(&root.join("projects/gitui")));
+        assert!(!index.contains(&root.join("target")));
+        assert!(index.contains(&root.join("archive.git")));
+        assert!(!index.contains(&root.join("archive.git/objects")));
     }
 
     #[test]
