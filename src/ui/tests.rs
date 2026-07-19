@@ -636,6 +636,31 @@ fn renders_every_primary_surface() {
     assert!(app.regions.diff.is_none());
     click(&mut app, graph.x + 1, graph.y + 1);
     assert_eq!(app.graph_state.selected(), Some(1));
+    assert!(app.graph_commit_open);
+    wait_for_preview(&mut app);
+    assert!(app.changes.diff.contains("tracked.txt"));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let commit_diff_screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(commit_diff_screen.contains("DIFF"));
+    assert!(commit_diff_screen.contains("initial commit"));
+    assert!(app.regions.graph_table.is_none());
+
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(!app.graph_commit_open);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(app.graph_state.selected(), Some(0));
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.graph_commit_open);
+    wait_for_preview(&mut app);
+    assert!(app.changes.diff.contains("second.txt"));
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
     app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
     assert_eq!(app.picker.directory, root);

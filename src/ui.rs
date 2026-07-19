@@ -54,7 +54,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     draw_header(frame, app, layout[0]);
     let content = layout[1];
     changes::draw(frame, app, content);
-    if app.view == View::Graph {
+    if app.view == View::Graph && !app.graph_commit_open {
         let graph_area = app.regions.diff.unwrap_or(content);
         frame.render_widget(Clear, graph_area);
         app.regions.diff = None;

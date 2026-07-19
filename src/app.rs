@@ -128,6 +128,7 @@ pub struct Regions {
 pub struct App {
     pub(crate) session: RepositorySession,
     pub view: View,
+    pub(crate) graph_commit_open: bool,
     pub mode: Mode,
     pub changes: ChangesState,
     pub graph_state: TableState,
@@ -198,6 +199,7 @@ impl App {
         Self {
             session,
             view: View::Changes,
+            graph_commit_open: false,
             mode,
             changes,
             graph_state,
@@ -555,8 +557,10 @@ impl App {
             .is_some_and(|rect| rect.contains(point))
         {
             self.view = View::Changes;
+            self.graph_commit_open = false;
         } else if self.regions.graph.is_some_and(|rect| rect.contains(point)) {
             self.view = View::Graph;
+            self.graph_commit_open = false;
         } else if self
             .regions
             .refresh
@@ -606,7 +610,7 @@ impl App {
             self.changes.refresh_diff(self.session.data());
         } else if self.select_history_row(point) {
         } else if self.select_graph_row(point) {
-            self.view = View::Graph;
+            self.open_selected_graph_commit();
         } else if self.regions.commit.is_some_and(|rect| rect.contains(point)) {
             self.focus_commit();
         }
@@ -1067,17 +1071,27 @@ impl App {
             return;
         }
         match key.code {
+            KeyCode::Esc if self.view == View::Graph && self.graph_commit_open => {
+                self.graph_commit_open = false;
+            }
             KeyCode::Char('q') if self.commit_running() || self.session.command_running() => {
                 self.notice = Some("A Git operation is still running".to_owned())
             }
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Char('1') => self.view = View::Changes,
-            KeyCode::Char('2') => self.view = View::Graph,
+            KeyCode::Char('1') => {
+                self.view = View::Changes;
+                self.graph_commit_open = false;
+            }
+            KeyCode::Char('2') => {
+                self.view = View::Graph;
+                self.graph_commit_open = false;
+            }
             KeyCode::Tab => {
                 self.view = match self.view {
                     View::Changes => View::Graph,
                     View::Graph => View::Changes,
-                }
+                };
+                self.graph_commit_open = false;
             }
             KeyCode::Char('r') => self.reload(),
             KeyCode::Char('o') => self.open_picker(),
@@ -1085,7 +1099,7 @@ impl App {
             KeyCode::Char('x') => self.open_actions(),
             KeyCode::Char('g') => self.open_git_command(),
             KeyCode::Char('?') => self.mode = Mode::Help,
-            KeyCode::Char('w') if self.view == View::Changes => {
+            KeyCode::Char('w') if self.view == View::Changes || self.graph_commit_open => {
                 let wrapped = self.changes.toggle_wrap();
                 self.notice = Some(
                     if wrapped {
@@ -1119,6 +1133,9 @@ impl App {
                     && !self.changes.history_focused =>
             {
                 self.toggle_stage()
+            }
+            KeyCode::Enter if self.view == View::Graph && !self.graph_commit_open => {
+                self.open_selected_graph_commit();
             }
             KeyCode::Enter
                 if self.view == View::Changes && self.changes.pane == LeftPane::Files =>
@@ -1164,8 +1181,14 @@ impl App {
                 let repo = self.session.data();
                 self.changes.collapse_or_ascend_worktree(repo);
             }
-            KeyCode::PageDown if self.view == View::Changes => self.scroll_diff_by(10),
-            KeyCode::PageUp if self.view == View::Changes => self.scroll_diff_by(-10),
+            KeyCode::PageDown if self.view == View::Changes || self.graph_commit_open => {
+                self.scroll_diff_by(10)
+            }
+            KeyCode::PageUp if self.view == View::Changes || self.graph_commit_open => {
+                self.scroll_diff_by(-10)
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.graph_commit_open => self.scroll_diff_by(1),
+            KeyCode::Up | KeyCode::Char('k') if self.graph_commit_open => self.scroll_diff_by(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Home => self.select_first(),
@@ -1411,6 +1434,22 @@ impl App {
             return;
         }
         self.prepare_editor_request(configured.expect("checked above"), repository, file);
+    }
+
+    fn open_selected_graph_commit(&mut self) {
+        let Some(commit) = self
+            .graph_state
+            .selected()
+            .and_then(|index| self.session.data()?.commits.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(repo) = self.session.data() else {
+            return;
+        };
+        self.changes.preview_commit(repo, &commit);
+        self.graph_commit_open = true;
     }
 
     fn queue_editor(&mut self) {

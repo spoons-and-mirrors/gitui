@@ -8,7 +8,7 @@ use std::{
 use ratatui::widgets::ListState;
 
 use crate::{
-    git::{self, Change, RepositoryData},
+    git::{self, Change, Commit, RepositoryData},
     tree::{ExplorerRow, WorktreeRow, WorktreeSection, build_file_tree, build_worktree},
 };
 
@@ -454,6 +454,15 @@ impl ChangesState {
     pub(super) fn toggle_wrap(&mut self) -> bool {
         self.diff_wrap = !self.diff_wrap;
         self.diff_wrap
+    }
+
+    pub(super) fn preview_commit(&mut self, repo: &RepositoryData, commit: &Commit) {
+        self.diff_scroll = 0;
+        self.hunk_selection = None;
+        self.hunk_pin_pending = false;
+        self.pending_hunk_selection = None;
+        self.preview_generation = self.preview_generation.wrapping_add(1);
+        self.request_preview(repo, PreviewTask::Commit(commit.oid.clone()));
     }
 
     pub(super) fn enter_hunk_selection(&mut self, repo: &RepositoryData) -> bool {

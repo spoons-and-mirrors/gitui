@@ -8,7 +8,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    app::{App, DiffHunkRegion, LeftPane, Mode, TextInput},
+    app::{App, DiffHunkRegion, LeftPane, Mode, TextInput, View},
     git::Change,
     tree::{ExplorerRow, WorktreeRow, WorktreeSection},
 };
@@ -260,7 +260,15 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     } else {
         None
     };
-    let selected_change = if selected_history.is_none() {
+    let selected_graph_commit = (app.view == View::Graph && app.graph_commit_open)
+        .then(|| {
+            app.graph_state
+                .selected()
+                .and_then(|index| repo.commits.get(index))
+        })
+        .flatten();
+    let selected_commit = selected_graph_commit.or(selected_history);
+    let selected_change = if selected_commit.is_none() {
         app.changes
             .worktree_state
             .selected()
@@ -270,7 +278,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     } else {
         None
     };
-    let selected_label = selected_history.map_or_else(
+    let selected_label = selected_commit.map_or_else(
         || {
             selected_change
                 .map_or("No file selected", |change| change.path.as_str())
@@ -293,7 +301,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             .bottom()
             .saturating_sub(diff_header.y.saturating_add(3)),
     );
-    let state = selected_history.map_or_else(
+    let state = selected_commit.map_or_else(
         || {
             selected_change.map_or(
                 "",
@@ -348,7 +356,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         diff_header,
     );
     let show_hunk_actions =
-        selected_history.is_none() && selected_change.is_some_and(|change| !change.staged);
+        selected_commit.is_none() && selected_change.is_some_and(|change| !change.staged);
     let (mut diff_lines, unwrapped_height) =
         prepare_preview_lines(app, diff_body, &syntax_path, true);
     let (hunk_rows, rendered_height) = if show_hunk_actions {
