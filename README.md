@@ -1,6 +1,4 @@
-# Git Panel
-
-A focused Rust/Ratatui interface for the two Git views that matter most during everyday work:
+# hunkle
 
 - A collapsible worktree tree with per-file added/deleted line counts for inspecting, staging, unstaging, and committing changes.
 - A switchable repository file tree, including Git-ignored files, with read-only, syntax-colored previews.
@@ -8,7 +6,7 @@ A focused Rust/Ratatui interface for the two Git views that matter most during e
 - A repository Actions menu for committing, pushing, fetching, pulling with rebase, and running non-interactive Git commands with captured output.
 - An all-refs commit graph showing branches, remotes, tags, authors, dates, and hashes.
 - Source-aware diffs with line numbers, syntax color, and tinted additions, deletions, and hunk headers.
-- Nonblocking worktree refresh when files, the index, branches, or HEAD change outside GitUI.
+- Nonblocking worktree refresh when files, the index, branches, or HEAD change outside hunkle.
 - Automatic OpenCode theme matching, with Catppuccin Macchiato as the fallback.
 
 ## Run
@@ -16,8 +14,8 @@ A focused Rust/Ratatui interface for the two Git views that matter most during e
 Git and a recent Rust toolchain are required.
 
 ```sh
-cargo run -p gitui
-cargo run -p gitui -- /path/to/repository
+cargo run -p hunkle
+cargo run -p hunkle -- /path/to/repository
 ```
 
 Starting outside a repository opens the directory navigator automatically.
@@ -51,7 +49,7 @@ Starting outside a repository opens the directory navigator automatically.
 | `?` | Help |
 | `q` | Quit |
 
-In the repository explorer, start typing a folder name, press `p` to search from an empty field, or `/` to start an absolute path. Search accepts fuzzy directory names, relative paths, absolute paths, and `~/...`; `Tab` accepts the best completion and `Enter` opens a repository or navigates into a directory. GitUI indexes directories under your home folder and common workspace mounts in the background.
+In the repository explorer, start typing a folder name, press `p` to search from an empty field, or `/` to start an absolute path. Search accepts fuzzy directory names, relative paths, absolute paths, and `~/...`; `Tab` accepts the best completion and `Enter` opens a repository or navigates into a directory. hunkle indexes directories under your home folder and common workspace mounts in the background.
 
 ## Mouse
 
@@ -72,11 +70,11 @@ In the repository explorer, start typing a folder name, press `p` to search from
 
 ## Settings
 
-Settings are saved to `$XDG_CONFIG_HOME/gitui/config`, or `~/.config/gitui/config` when `XDG_CONFIG_HOME` is unset. On Windows, GitUI uses `%APPDATA%\gitui\config`. The first `e` press asks for an editor command such as `nvim`, `micro`, or `code --wait`; GitUI saves it, suspends the TUI, and runs the editor interactively. Press `E` to change it later. Auto-fetch can periodically run `git fetch --all --prune` for the active repository without blocking the interface; its interval is configurable from 1 to 1440 minutes. The last manually selected Worktree width and History height are stored as exact terminal-cell counts.
+Settings are saved to `$XDG_CONFIG_HOME/hunkle/config`, or `~/.config/hunkle/config` when `XDG_CONFIG_HOME` is unset. On Windows, hunkle uses `%APPDATA%\hunkle\config`. Existing settings are loaded from the old `gitui` location when no hunkle config exists. The first `e` press asks for an editor command such as `nvim`, `micro`, or `code --wait`; hunkle saves it, suspends the TUI, and runs the editor interactively. Press `E` to change it later. Auto-fetch can periodically run `git fetch --all --prune` for the active repository without blocking the interface; its interval is configurable from 1 to 1440 minutes. The last manually selected Worktree width and History height are stored as exact terminal-cell counts.
 
 ## Theme
 
-GitUI uses the active OpenCode TUI theme when OpenCode is installed. It follows OpenCode's `tui.json`/`tui.jsonc` selection first, then `~/.local/state/opencode/kv.json`, and supports all bundled OpenCode themes plus user and project themes under `opencode/themes/*.json`. If no usable theme is found, GitUI uses Catppuccin Macchiato.
+hunkle uses the active OpenCode TUI theme when OpenCode is installed. It follows OpenCode's `tui.json`/`tui.jsonc` selection first, then `~/.local/state/opencode/kv.json`, and supports all bundled OpenCode themes plus user and project themes under `opencode/themes/*.json`. If no usable theme is found, hunkle uses Catppuccin Macchiato.
 
 ## Architecture
 

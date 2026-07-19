@@ -1,12 +1,11 @@
 [package]
-name = "gitui"
+name = "hunkle"
 version = "0.1.0"
 edition = "2024"
-description = "A focused Ratatui worktree and Git graph"
 license = "MIT"
 
 [[bin]]
-name = "gitui"
+name = "hunkle"
 path = "src/main.rs"
 
 [dependencies]

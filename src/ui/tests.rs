@@ -33,7 +33,7 @@ fn renders_every_primary_surface() {
 
     let mut app = App::new(root.to_path_buf());
     assert_eq!(app.changes.history_state.selected(), None);
-    let settings_path = root.join(".git/gitui-test-config");
+    let settings_path = root.join(".git/hunkle-test-config");
     app.settings_path = Some(settings_path.clone());
     let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();

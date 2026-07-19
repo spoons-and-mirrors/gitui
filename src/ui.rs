@@ -33,7 +33,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
 
     if frame.area().width < 60 || frame.area().height < 16 {
         frame.render_widget(
-            Paragraph::new("Git Panel needs at least 60 columns and 16 rows\n\nq  quit")
+            Paragraph::new("hunkle needs at least 60 columns and 16 rows\n\nq  quit")
                 .alignment(Alignment::Center)
                 .style(Style::default().fg(palette().ink)),
             frame.area(),
@@ -149,7 +149,7 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let repository = std::path::Path::new(&path)
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("gitui");
+        .unwrap_or("hunkle");
     let branch_label = format!(" {branch} ");
     let branch_width = UnicodeWidthStr::width(branch_label.as_str())
         .min(usize::from(area.width.saturating_sub(12)));

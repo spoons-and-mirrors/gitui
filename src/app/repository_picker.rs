@@ -632,19 +632,19 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let code = root.join("code");
-        let gitui = code.join("gitui");
+        let hunkle = code.join("hunkle");
         let gitlab = code.join("gitlab-runner");
-        fs::create_dir_all(gitui.join(".git")).unwrap();
+        fs::create_dir_all(hunkle.join(".git")).unwrap();
         fs::create_dir_all(&gitlab).unwrap();
 
-        assert_eq!(resolve_fuzzy_path("cod/gitu", root), Some(gitui.clone()));
+        assert_eq!(resolve_fuzzy_path("cod/hunk", root), Some(hunkle.clone()));
 
         let mut picker = RepositoryPicker::new(root.to_path_buf());
         picker.directory_index = index_directories(&[root.to_path_buf()]);
-        picker.begin_search(Some("gtu"));
-        assert_eq!(picker.matches[0].path, gitui);
+        picker.begin_search(Some("hnk"));
+        assert_eq!(picker.matches[0].path, hunkle);
         assert!(picker.matches[0].is_repo);
-        assert!(fuzzy_text_score("gitui", "go-genai-streamed-function-args").is_none());
+        assert!(fuzzy_text_score("hunkle", "go-genai-streamed-function-args").is_none());
 
         picker.accept_completion();
         assert_eq!(PathBuf::from(&picker.path_input), picker.matches[0].path);
@@ -654,7 +654,7 @@ mod tests {
     fn directory_index_skips_build_trees() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        fs::create_dir_all(root.join("projects/gitui")).unwrap();
+        fs::create_dir_all(root.join("projects/hunkle")).unwrap();
         fs::create_dir_all(root.join("target/debug/deps")).unwrap();
         fs::create_dir_all(root.join("archive.git/objects/pack")).unwrap();
         fs::create_dir_all(root.join("archive.git/refs")).unwrap();
@@ -662,7 +662,7 @@ mod tests {
 
         let index = index_directories(&[root.to_path_buf()]);
         let paths: Vec<_> = index.iter().map(|entry| &entry.path).collect();
-        assert!(paths.contains(&&root.join("projects/gitui")));
+        assert!(paths.contains(&&root.join("projects/hunkle")));
         assert!(!paths.contains(&&root.join("target")));
         assert!(paths.contains(&&root.join("archive.git")));
         assert!(!paths.contains(&&root.join("archive.git/objects")));

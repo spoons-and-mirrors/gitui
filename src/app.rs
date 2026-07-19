@@ -165,7 +165,16 @@ impl App {
         let settings_path = settings_path();
         let settings = settings_path
             .as_deref()
-            .map(load_settings)
+            .map(|path| {
+                if path.exists() {
+                    load_settings(path)
+                } else {
+                    legacy_settings_path()
+                        .as_deref()
+                        .map(load_settings)
+                        .unwrap_or_default()
+                }
+            })
             .unwrap_or_default();
         let session = RepositorySession::new(&path, fetch_interval(&settings));
         let mode = if session.data().is_some() {
@@ -1794,13 +1803,21 @@ fn fetch_interval(settings: &Settings) -> Duration {
 }
 
 fn settings_path() -> Option<PathBuf> {
+    config_path("hunkle")
+}
+
+fn legacy_settings_path() -> Option<PathBuf> {
+    config_path("gitui")
+}
+
+fn config_path(app_name: &str) -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("XDG_CONFIG_HOME") {
-        return Some(PathBuf::from(path).join("gitui/config"));
+        return Some(PathBuf::from(path).join(app_name).join("config"));
     }
     if let Some(path) = std::env::var_os("APPDATA") {
-        return Some(PathBuf::from(path).join("gitui/config"));
+        return Some(PathBuf::from(path).join(app_name).join("config"));
     }
-    home_directory().map(|home| home.join(".config/gitui/config"))
+    home_directory().map(|home| home.join(".config").join(app_name).join("config"))
 }
 
 fn load_settings(path: &Path) -> Settings {
@@ -2131,7 +2148,7 @@ mod tests {
         let root = directory.path();
         initialize_repository(root);
         fs::write(root.join("tracked.txt"), "edited\n").unwrap();
-        let settings_path = root.join(".git/gitui-editor-test-config");
+        let settings_path = root.join(".git/hunkle-editor-test-config");
         let mut app = App::new(root.to_path_buf());
         app.settings.editor_command = None;
         app.settings_path = Some(settings_path.clone());
