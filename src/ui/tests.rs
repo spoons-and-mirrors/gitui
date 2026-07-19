@@ -628,7 +628,12 @@ fn renders_every_primary_surface() {
     assert!(screen.contains("AUTHOR"));
     assert!(screen.contains("HEAD"));
     assert!(screen.contains("Render Test"));
+    assert!(screen.contains("WORKTREE"));
+    assert!(!screen.contains("scrollbar line"));
+    let worktree = app.regions.worktree.unwrap();
     let graph = app.regions.graph_table.unwrap();
+    assert!(graph.x >= worktree.right());
+    assert!(app.regions.diff.is_none());
     click(&mut app, graph.x + 1, graph.y + 1);
     assert_eq!(app.graph_state.selected(), Some(1));
 

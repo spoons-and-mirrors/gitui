@@ -11,7 +11,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Paragraph},
+    widgets::{Block, Clear, Paragraph},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -53,12 +53,17 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     app.regions.screen = Some(frame.area());
     draw_header(frame, app, layout[0]);
     let content = layout[1];
-    match app.view {
-        View::Changes => changes::draw(frame, app, content),
-        View::Graph => {
-            app.regions.graph_table =
-                history::draw_graph(frame, app.session.data(), &mut app.graph_state, content);
-        }
+    changes::draw(frame, app, content);
+    if app.view == View::Graph {
+        let graph_area = app.regions.diff.unwrap_or(content);
+        frame.render_widget(Clear, graph_area);
+        app.regions.diff = None;
+        app.regions.diff_scrollbar = None;
+        app.regions.diff_scroll_thumb = None;
+        app.regions.diff_scroll_max = 0;
+        app.regions.diff_hunks.clear();
+        app.regions.graph_table =
+            history::draw_graph(frame, app.session.data(), &mut app.graph_state, graph_area);
     }
     draw_navigation(frame, app, layout[2]);
     match app.mode {
