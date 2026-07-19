@@ -556,7 +556,12 @@ fn branch_history(root: &Path) -> Result<Vec<Commit>> {
 
 fn read_log(root: &Path, revisions: &[&str]) -> Result<Vec<Commit>> {
     let format = "--format=%H%x1f%P%x1f%D%x1f%an%x1f%ad%x1f%s%x1e";
-    let mut args = vec!["log", format, "--date=short", "--decorate=short"];
+    let mut args = vec![
+        "log",
+        format,
+        "--date=format:%Y-%m-%d %H:%M",
+        "--decorate=short",
+    ];
     args.extend_from_slice(revisions);
     let output = run(root, &args)?;
 
@@ -920,6 +925,9 @@ mod tests {
         assert_eq!(repo.branch, "main");
         assert_eq!(repo.commits.len(), 4);
         assert_eq!(repo.history.len(), 4);
+        assert_eq!(repo.commits[0].date.len(), 16);
+        assert_eq!(repo.commits[0].date.as_bytes().get(10), Some(&b' '));
+        assert_eq!(repo.commits[0].date.as_bytes().get(13), Some(&b':'));
         assert!(
             repo.history[0]
                 .refs

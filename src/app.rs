@@ -69,7 +69,12 @@ impl Default for Settings {
 #[derive(Debug, Clone, Copy)]
 pub struct DiffHunkRegion {
     pub rect: Rect,
+    pub action: Option<Rect>,
     pub index: usize,
+    pub continues_above: bool,
+    pub continues_below: bool,
+    pub scroll_start: u16,
+    pub scroll_end: u16,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -355,6 +360,18 @@ impl App {
             return;
         }
 
+        if mouse.kind == MouseEventKind::Moved && self.changes.hunk_selection.is_some() {
+            if let Some(hunk) = self
+                .regions
+                .diff_hunks
+                .iter()
+                .find(|hunk| hunk.rect.contains(point))
+            {
+                self.changes.select_hunk(hunk.index);
+            }
+            return;
+        }
+
         if self.mode == Mode::Commit
             && mouse.kind == MouseEventKind::Down(MouseButton::Right)
             && !self.regions.commit.is_some_and(|rect| rect.contains(point))
@@ -474,10 +491,10 @@ impl App {
             .regions
             .diff_hunks
             .iter()
-            .find(|hunk| hunk.rect.contains(point))
+            .find(|hunk| hunk.action.is_some_and(|rect| rect.contains(point)))
             .copied()
         {
-            self.stage_hunk(hunk.index);
+            self.stage_hunk(hunk.index, false);
             return;
         }
         if self
@@ -935,7 +952,10 @@ impl App {
                 },
                 WorkerCompletion::Mutation(result) => match result {
                     Ok(()) => self.reload(),
-                    Err(error) => self.notice = Some(error),
+                    Err(error) => {
+                        self.changes.cancel_pending_hunk_stage();
+                        self.notice = Some(error);
+                    }
                 },
             }
         }
@@ -999,10 +1019,15 @@ impl App {
 
     pub fn requires_render_before_next_event(&self) -> bool {
         self.editor_request.is_some()
+            || self.changes.hunk_selection.is_some()
             || self
                 .regions
                 .screen
                 .is_some_and(|area| self.selection.needs_capture(area))
+    }
+
+    pub fn hunk_selection_active(&self) -> bool {
+        self.changes.hunk_selection.is_some()
     }
 
     pub fn change_counts(&self) -> (usize, usize) {
@@ -1015,6 +1040,20 @@ impl App {
     }
 
     fn handle_normal(&mut self, key: KeyEvent) {
+        if let Some(index) = self.changes.hunk_selection {
+            match key.code {
+                KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc => {
+                    self.changes.leave_hunk_selection();
+                }
+                KeyCode::Down | KeyCode::Char('j') => self.scroll_or_move_hunk(1),
+                KeyCode::Up | KeyCode::Char('k') => self.scroll_or_move_hunk(-1),
+                KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(' ') => {
+                    self.stage_hunk(index, true);
+                }
+                _ => {}
+            }
+            return;
+        }
         match key.code {
             KeyCode::Char('q') if self.commit_running() || self.session.command_running() => {
                 self.notice = Some("A Git operation is still running".to_owned())
@@ -1095,7 +1134,9 @@ impl App {
                     && !self.changes.history_focused =>
             {
                 let repo = self.session.data();
-                self.changes.expand_or_descend_worktree(repo);
+                if !repo.is_some_and(|repo| self.changes.enter_hunk_selection(repo)) {
+                    self.changes.expand_or_descend_worktree(repo);
+                }
             }
             KeyCode::Left | KeyCode::Char('h')
                 if self.view == View::Changes && self.changes.pane == LeftPane::Files =>
@@ -1118,6 +1159,43 @@ impl App {
             KeyCode::Home => self.select_first(),
             KeyCode::End | KeyCode::Char('G') => self.select_last(),
             _ => {}
+        }
+    }
+
+    fn scroll_or_move_hunk(&mut self, delta: isize) {
+        let Some(selected) = self.changes.hunk_selection else {
+            return;
+        };
+        let Some(region) = self
+            .regions
+            .diff_hunks
+            .iter()
+            .find(|region| region.index == selected)
+        else {
+            self.changes.move_hunk_selection(delta);
+            return;
+        };
+        let can_scroll = if delta > 0 {
+            region.continues_below
+        } else {
+            region.continues_above
+        };
+        if can_scroll {
+            if delta > 0 {
+                self.changes.diff_scroll = self
+                    .changes
+                    .diff_scroll
+                    .saturating_add(10)
+                    .min(region.scroll_end);
+            } else {
+                self.changes.diff_scroll = self
+                    .changes
+                    .diff_scroll
+                    .saturating_sub(10)
+                    .max(region.scroll_start);
+            }
+        } else {
+            self.changes.move_hunk_selection(delta);
         }
     }
 
@@ -1584,11 +1662,22 @@ impl App {
         let _ = self.session.start_mutation(mutation);
     }
 
-    fn stage_hunk(&mut self, index: usize) {
+    fn stage_hunk(&mut self, index: usize, preserve_selection: bool) {
         let patch = self.changes.diff.clone();
-        let _ = self
+        let path = preserve_selection
+            .then(|| {
+                let repo = self.repository()?;
+                let index = self.changes.selected_change_index(repo)?;
+                Some(repo.changes.get(index)?.path.clone())
+            })
+            .flatten();
+        let started = self
             .session
             .start_mutation(Mutation::StageHunk { patch, index });
+        if started && let Some(path) = path {
+            self.changes
+                .preserve_hunk_selection_after_stage(path, index);
+        }
     }
 
     fn stage_all(&mut self) {
@@ -1948,6 +2037,66 @@ mod tests {
         assert!(!app.commit_running());
         assert!(app.commit_message.is_empty());
         assert_eq!(app.repository().unwrap().commits.len(), 2);
+    }
+
+    #[test]
+    fn keeps_hunk_mode_on_the_next_hunk_after_staging() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        initialize_repository(root);
+        let baseline = (1..=20)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>();
+        fs::write(
+            root.join("tracked.txt"),
+            format!("{}\n", baseline.join("\n")),
+        )
+        .unwrap();
+        run_git(root, &["add", "tracked.txt"]);
+        run_git(root, &["commit", "-m", "expand fixture"]);
+
+        let mut edited = baseline;
+        edited[1] = "changed first".to_owned();
+        edited[18] = "changed second".to_owned();
+        fs::write(root.join("tracked.txt"), format!("{}\n", edited.join("\n"))).unwrap();
+        let mut app = App::new(root.to_path_buf());
+        for _ in 0..100 {
+            let _ = app.poll_worker();
+            if app.changes.diff.matches("@@").count() == 2 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.changes.hunk_selection, Some(0));
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert_eq!(app.changes.hunk_selection, Some(0));
+
+        for _ in 0..200 {
+            let _ = app.poll_worker();
+            let repo = app.repository().unwrap();
+            let split_change = repo
+                .changes
+                .iter()
+                .any(|change| change.path == "tracked.txt" && change.staged)
+                && repo
+                    .changes
+                    .iter()
+                    .any(|change| change.path == "tracked.txt" && !change.staged);
+            if split_change
+                && app.changes.hunk_selection == Some(0)
+                && app.changes.diff.contains("changed second")
+                && !app.changes.diff.contains("changed first")
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        assert_eq!(app.changes.hunk_selection, Some(0));
+        assert!(app.changes.diff.contains("changed second"));
+        assert!(!app.changes.diff.contains("changed first"));
     }
 
     #[test]

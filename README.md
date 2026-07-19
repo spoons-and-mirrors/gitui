@@ -27,15 +27,16 @@ Starting outside a repository opens the directory navigator automatically.
 | Key | Action |
 |---|---|
 | `1`, `2`, `Tab` | Changes, Graph, or switch view |
-| `j`, `k` | Move selection |
+| `j`, `k` | Move selection; scroll oversized hunks by 10 rows |
 | `Home`, `G` | First or last row |
 | `PageUp`, `PageDown` | Scroll the selected file's diff |
 | `w` | Toggle line wrapping in the Diff panel |
 | `e`, `E` | Open the selected file in your editor, or configure the editor |
 | `f` | Switch the left pane between Worktree and Files |
-| `h`, `l`, `Left`, `Right` | Collapse, expand, or navigate the active file tree |
+| `h`, `l`, `Left`, `Right` | Navigate the tree; Right enters/stages in hunk mode and Left exits it |
 | `Enter` | Toggle the selected directory |
-| `Space` | Stage or unstage selected entry |
+| `Space` | Stage or unstage the selected entry, or stage the selected hunk |
+| `Right`, `l` in hunk mode | Stage the selected hunk |
 | `a`, `u` | Stage all or unstage all |
 | `c` | Focus the commit message editor |
 | `Enter`, `Ctrl+Enter` | New commit-message line, create commit |

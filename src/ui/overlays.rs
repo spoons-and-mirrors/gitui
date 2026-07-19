@@ -891,7 +891,7 @@ pub(super) fn draw_editor(
 }
 
 pub(super) fn draw_help(frame: &mut Frame<'_>) {
-    let area = centered_min(frame.area(), 72, 0, 58, 16);
+    let area = centered_min(frame.area(), 72, 0, 58, 17);
     frame.render_widget(Clear, area);
     fill(frame, area, palette().panel);
     fill(
@@ -941,7 +941,7 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
                 .add_modifier(Modifier::BOLD),
         ),
         help_line("1 / 2 / Tab", "Switch view"),
-        help_line("j / k", "Move"),
+        help_line("j / k", "Move / scroll hunk ×10"),
         help_line("Home / G", "First / last"),
         help_line("r", "Refresh"),
         help_line("o", "Repository"),
@@ -959,9 +959,10 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
                 .fg(palette().muted)
                 .add_modifier(Modifier::BOLD),
         ),
-        help_line("h / l", "Collapse / expand"),
+        help_line("← / h", "Tree / exit hunk"),
+        help_line("→ / l", "Enter / stage hunk"),
         help_line("Enter", "Toggle folder"),
-        help_line("Space", "Stage file"),
+        help_line("Space", "Stage file / hunk"),
         help_line("a / u", "Stage / unstage all"),
         help_line("c", "Commit editor"),
         help_line("Ctrl+Enter", "Commit"),

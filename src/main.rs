@@ -49,7 +49,8 @@ fn main() -> Result<()> {
                 }
                 Event::Mouse(mouse) => {
                     let changed = !matches!(mouse.kind, event::MouseEventKind::Moved)
-                        || app.mode == Mode::ActionMenu;
+                        || app.mode == Mode::ActionMenu
+                        || app.hunk_selection_active();
                     app.handle_mouse(mouse);
                     (changed, false)
                 }

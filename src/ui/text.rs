@@ -43,7 +43,21 @@ pub(super) fn styled_diff(diff: &str, path: &str, width: usize) -> Vec<Line<'sta
 }
 
 pub(super) fn diff_display_line_count(diff: &str) -> usize {
-    diff.lines().count() + diff.lines().filter(|line| line.starts_with("@@")).count()
+    let has_hunks = diff.lines().any(|line| line.starts_with("@@"));
+    let mut in_hunk = false;
+    let mut count = 0;
+    for line in diff.lines() {
+        let hunk_header = line.starts_with("@@");
+        if has_hunks && !in_hunk && !hunk_header {
+            continue;
+        }
+        if hunk_header {
+            count += usize::from(in_hunk);
+            in_hunk = true;
+        }
+        count += 1;
+    }
+    count
 }
 
 pub(super) fn styled_diff_window(
@@ -59,13 +73,22 @@ pub(super) fn styled_diff_window(
     let end = start.saturating_add(count);
     let mut display_index = 0;
     let mut lines = Vec::new();
+    let has_hunks = diff.lines().any(|line| line.starts_with("@@"));
+    let mut in_hunk = false;
 
     for line in diff.lines() {
-        if line.starts_with("@@") {
-            if display_index >= start && display_index < end {
-                lines.push(finish_line(Vec::new(), width, palette().panel));
+        let hunk_header = line.starts_with("@@");
+        if has_hunks && !in_hunk && !hunk_header {
+            continue;
+        }
+        if hunk_header {
+            if in_hunk {
+                if display_index >= start && display_index < end {
+                    lines.push(finish_line(Vec::new(), width, palette().panel));
+                }
+                display_index += 1;
             }
-            display_index += 1;
+            in_hunk = true;
         }
         if display_index >= end {
             break;
@@ -400,25 +423,27 @@ mod tests {
     #[test]
     fn styles_source_diff_with_numbers_and_tinted_changes() {
         let lines = styled_diff(
-            "@@ -1 +1 @@\n-let old_value = 1;\n+let new_value = 2;",
+            concat!(
+                "diff --git a/src/main.rs b/src/main.rs\n",
+                "index 1234567..abcdef0 100644\n",
+                "--- a/src/main.rs\n",
+                "+++ b/src/main.rs\n",
+                "@@ -1 +1 @@\n",
+                "-let old_value = 1;\n",
+                "+let new_value = 2;",
+            ),
             "src/main.rs",
             100,
         );
 
-        assert_eq!(lines.len(), 4);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].style.bg, Some(palette().surface_alt));
+        assert_eq!(lines[1].style.bg, Some(palette().remove_bg));
+        assert_eq!(lines[2].style.bg, Some(palette().add_bg));
+        assert!(lines[1].spans[0].content.trim().is_empty());
+        assert_eq!(lines[2].spans[0].content.trim(), "1");
         assert!(
-            lines[0]
-                .spans
-                .iter()
-                .all(|span| span.content.trim().is_empty())
-        );
-        assert_eq!(lines[1].style.bg, Some(palette().surface_alt));
-        assert_eq!(lines[2].style.bg, Some(palette().remove_bg));
-        assert_eq!(lines[3].style.bg, Some(palette().add_bg));
-        assert!(lines[2].spans[0].content.trim().is_empty());
-        assert_eq!(lines[3].spans[0].content.trim(), "1");
-        assert!(
-            lines[3]
+            lines[2]
                 .spans
                 .iter()
                 .any(|span| span.content == "let" && span.style.fg == Some(palette().purple))

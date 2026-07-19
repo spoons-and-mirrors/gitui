@@ -349,18 +349,35 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     );
     let show_hunk_actions =
         selected_history.is_none() && selected_change.is_some_and(|change| !change.staged);
-    let (diff_lines, unwrapped_height) = prepare_preview_lines(app, diff_body, &syntax_path, true);
-    let hunk_rows = if show_hunk_actions {
-        visible_hunk_rows(
+    let (mut diff_lines, unwrapped_height) =
+        prepare_preview_lines(app, diff_body, &syntax_path, true);
+    let (hunk_rows, rendered_height) = if show_hunk_actions {
+        rendered_hunk_rows(
             &app.changes.diff,
             &diff_lines,
-            diff_body,
-            app.changes.diff_scroll,
+            diff_body.width,
             unwrapped_height.is_none(),
         )
     } else {
-        Vec::new()
+        (Vec::new(), 0)
     };
+    let pin_hunk = app.changes.take_hunk_pin_request();
+    if pin_hunk
+        && let Some(selected) = app.changes.hunk_selection
+        && let Some((_, row)) = hunk_rows.iter().find(|(index, _)| *index == selected)
+    {
+        let old_scroll = app.changes.diff_scroll;
+        app.changes.diff_scroll = scroll_to_row(*row, rendered_height);
+        if app.changes.diff_scroll != old_scroll && unwrapped_height.is_some() {
+            diff_lines = prepare_preview_lines(app, diff_body, &syntax_path, true).0;
+        }
+    }
+    let visible_hunks = visible_hunks(
+        &hunk_rows,
+        rendered_height,
+        diff_body,
+        app.changes.diff_scroll,
+    );
     render_scrollable_content(
         frame,
         app,
@@ -369,7 +386,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         diff_lines,
         unwrapped_height,
     );
-    draw_hunk_actions(frame, app, diff_body, hunk_rows);
+    draw_hunk_actions(frame, app, diff_body, visible_hunks);
 
     let commit_active = app.mode == Mode::Commit;
     fill(frame, commit_area, palette().canvas);
@@ -632,7 +649,11 @@ fn prepare_preview_lines(
     } else {
         app.changes.diff.lines().count()
     };
-    let max_scroll = height.saturating_sub(usize::from(body.height));
+    let max_scroll = if is_diff && app.changes.hunk_selection.is_some() {
+        height.saturating_sub(1)
+    } else {
+        height.saturating_sub(usize::from(body.height))
+    };
     app.changes.diff_scroll = app
         .changes
         .diff_scroll
@@ -666,8 +687,13 @@ fn render_scrollable_content(
     let max_scroll = rendered_height
         .saturating_sub(viewport_height)
         .min(usize::from(u16::MAX)) as u16;
+    let scroll_limit = if app.changes.hunk_selection.is_some() {
+        rendered_height.saturating_sub(1).min(usize::from(u16::MAX)) as u16
+    } else {
+        max_scroll
+    };
     app.regions.diff_scroll_max = max_scroll;
-    app.changes.diff_scroll = app.changes.diff_scroll.min(max_scroll);
+    app.changes.diff_scroll = app.changes.diff_scroll.min(scroll_limit);
     let scrollbar = Rect::new(panel.right().saturating_sub(1), body.y, 1, body.height);
     app.regions.diff_scrollbar = Some(scrollbar);
     app.regions.diff_scroll_thumb = (max_scroll > 0).then(|| {
@@ -675,7 +701,7 @@ fn render_scrollable_content(
             scrollbar,
             rendered_height,
             viewport_height,
-            app.changes.diff_scroll,
+            app.changes.diff_scroll.min(max_scroll),
             max_scroll,
         )
     });
@@ -715,39 +741,42 @@ fn render_scrollable_content(
     }
 }
 
-fn visible_hunk_rows(
+fn rendered_hunk_rows(
     diff: &str,
     styled: &[Line<'_>],
-    body: Rect,
-    scroll: u16,
+    width: u16,
     wrapped: bool,
-) -> Vec<(usize, u16)> {
-    let top = usize::from(scroll);
-    let bottom = top.saturating_add(usize::from(body.height));
+) -> (Vec<(usize, usize)>, usize) {
     let mut rendered_row: usize = 0;
     let mut styled_index = 0;
     let mut hunk_index = 0;
     let mut rows = Vec::new();
+    let has_hunks = diff.lines().any(|line| line.starts_with("@@"));
+    let mut in_hunk = false;
 
     for line in diff.lines() {
-        if line.starts_with("@@") {
-            if wrapped {
-                let Some(blank) = styled.get(styled_index) else {
-                    break;
-                };
-                rendered_row = rendered_row.saturating_add(rendered_text_height(
-                    std::slice::from_ref(blank),
-                    usize::from(body.width),
-                    true,
-                ));
-                styled_index += 1;
-            } else {
-                rendered_row += 1;
+        let hunk_header = line.starts_with("@@");
+        if has_hunks && !in_hunk && !hunk_header {
+            continue;
+        }
+        if hunk_header {
+            if hunk_index > 0 {
+                if wrapped {
+                    let Some(blank) = styled.get(styled_index) else {
+                        break;
+                    };
+                    rendered_row = rendered_row.saturating_add(rendered_text_height(
+                        std::slice::from_ref(blank),
+                        usize::from(width),
+                        true,
+                    ));
+                    styled_index += 1;
+                } else {
+                    rendered_row += 1;
+                }
             }
-            let row = rendered_row;
-            if row >= top && row < bottom {
-                rows.push((hunk_index, body.y.saturating_add((row - top) as u16)));
-            }
+            in_hunk = true;
+            rows.push((hunk_index, rendered_row));
             hunk_index += 1;
         }
         if wrapped {
@@ -756,7 +785,7 @@ fn visible_hunk_rows(
             };
             rendered_row = rendered_row.saturating_add(rendered_text_height(
                 std::slice::from_ref(line),
-                usize::from(body.width),
+                usize::from(width),
                 true,
             ));
             styled_index += 1;
@@ -764,41 +793,154 @@ fn visible_hunk_rows(
             rendered_row += 1;
         }
     }
-    rows
+    (rows, rendered_row)
 }
 
-fn draw_hunk_actions(frame: &mut Frame<'_>, app: &mut App, body: Rect, rows: Vec<(usize, u16)>) {
+struct VisibleHunk {
+    index: usize,
+    area: Rect,
+    header_y: Option<u16>,
+    continues_above: bool,
+    continues_below: bool,
+    scroll_start: u16,
+    scroll_end: u16,
+}
+
+fn visible_hunks(
+    rows: &[(usize, usize)],
+    rendered_height: usize,
+    body: Rect,
+    scroll: u16,
+) -> Vec<VisibleHunk> {
+    let top = usize::from(scroll);
+    let bottom = top.saturating_add(usize::from(body.height));
+    rows.iter()
+        .enumerate()
+        .filter_map(|(position, (index, header))| {
+            let end = rows
+                .get(position + 1)
+                .map_or(rendered_height, |(_, next)| next.saturating_sub(1));
+            let visible_start = (*header).max(top);
+            let visible_end = end.min(bottom);
+            let scroll_start = (*header).min(usize::from(u16::MAX)) as u16;
+            let scroll_end = end
+                .saturating_sub(usize::from(body.height))
+                .max(*header)
+                .min(usize::from(u16::MAX)) as u16;
+            (visible_start < visible_end).then(|| VisibleHunk {
+                index: *index,
+                area: Rect::new(
+                    body.x,
+                    body.y.saturating_add((visible_start - top) as u16),
+                    body.width,
+                    (visible_end - visible_start) as u16,
+                ),
+                header_y: (*header >= top && *header < bottom)
+                    .then(|| body.y.saturating_add((*header - top) as u16)),
+                continues_above: *header < top,
+                continues_below: end > bottom,
+                scroll_start,
+                scroll_end,
+            })
+        })
+        .collect()
+}
+
+fn scroll_to_row(row: usize, rendered_height: usize) -> u16 {
+    row.min(rendered_height.saturating_sub(1))
+        .min(usize::from(u16::MAX)) as u16
+}
+
+fn draw_hunk_actions(frame: &mut Frame<'_>, app: &mut App, body: Rect, hunks: Vec<VisibleHunk>) {
     if body.width < 3 {
         return;
     }
-    for (index, y) in rows {
-        let rect = Rect::new(body.right().saturating_sub(3), y, 3, 1);
-        frame.render_widget(
-            Paragraph::new("[+]").style(
-                Style::default()
-                    .fg(palette().green)
-                    .bg(palette().raised)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            rect,
-        );
-        app.regions.diff_hunks.push(DiffHunkRegion { rect, index });
+    for hunk in hunks {
+        let selected = app.changes.hunk_selection == Some(hunk.index);
+        if selected && let Some(y) = hunk.header_y {
+            frame.buffer_mut().set_style(
+                Rect::new(body.x, y, body.width, 1),
+                Style::default().bg(palette().selected),
+            );
+        }
+        let action = hunk.header_y.map(|y| {
+            let rect = Rect::new(body.right().saturating_sub(3), y, 3, 1);
+            frame.render_widget(
+                Paragraph::new("[+]").style(
+                    Style::default()
+                        .fg(if selected {
+                            palette().ink
+                        } else {
+                            palette().green
+                        })
+                        .bg(if selected {
+                            palette().accent
+                        } else {
+                            palette().raised
+                        })
+                        .add_modifier(Modifier::BOLD),
+                ),
+                rect,
+            );
+            rect
+        });
+        app.regions.diff_hunks.push(DiffHunkRegion {
+            rect: hunk.area,
+            action,
+            index: hunk.index,
+            continues_above: hunk.continues_above,
+            continues_below: hunk.continues_below,
+            scroll_start: hunk.scroll_start,
+            scroll_end: hunk.scroll_end,
+        });
     }
 }
 
 fn worktree_item<'a>(row: &'a WorktreeRow, changes: &'a [Change], width: usize) -> ListItem<'a> {
     if let Some(section) = row.section {
+        let Some((additions, deletions)) = row.section_stats else {
+            return ListItem::new("");
+        };
         let color = match section {
             WorktreeSection::Staged => palette().green,
             WorktreeSection::Unstaged => palette().yellow,
         };
-        return ListItem::new(Line::styled(
-            truncate_width(&format!(" {}", row.label), width),
-            Style::default()
-                .fg(color)
-                .bg(palette().surface_alt)
-                .add_modifier(Modifier::BOLD),
-        ));
+        let additions = format!("+{additions}");
+        let deletions = format!("-{deletions}");
+        let stats_width = additions.len() + 1 + deletions.len();
+        let show_stats = width >= stats_width + 4;
+        let available_label = width.saturating_sub(usize::from(show_stats) * stats_width);
+        let label = truncate_width(&format!(" {}", row.label), available_label);
+        let padding = available_label.saturating_sub(UnicodeWidthStr::width(label.as_str()));
+        let mut spans = vec![
+            Span::styled(
+                label,
+                Style::default()
+                    .fg(color)
+                    .bg(palette().surface_alt)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " ".repeat(padding),
+                Style::default().bg(palette().surface_alt),
+            ),
+        ];
+        if show_stats {
+            spans.extend([
+                Span::styled(
+                    additions,
+                    Style::default()
+                        .fg(palette().green)
+                        .bg(palette().surface_alt),
+                ),
+                Span::styled(" ", Style::default().bg(palette().surface_alt)),
+                Span::styled(
+                    deletions,
+                    Style::default().fg(palette().red).bg(palette().surface_alt),
+                ),
+            ]);
+        }
+        return ListItem::new(Line::from(spans));
     }
     let Some(change_index) = row.change_index else {
         let marker = if row.directory_expanded == Some(false) {
