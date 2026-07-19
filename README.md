@@ -27,17 +27,22 @@ Starting outside a repository opens the directory navigator automatically.
 | Key | Action |
 |---|---|
 | `1`, `2`, `Tab` | Changes, Graph, or switch view |
-| `j`, `k` | Move selection |
+| `j`, `k` | Move selection; scroll oversized hunks by 10 rows |
 | `Home`, `G` | First or last row |
 | `PageUp`, `PageDown` | Scroll the selected file's diff |
 | `w` | Toggle line wrapping in the Diff panel |
-| `e` | Switch the left pane between Worktree and Files |
-| `h`, `l`, `Left`, `Right` | Collapse, expand, or navigate the active file tree |
+| `e`, `E` | Open the selected file in your editor, or configure the editor |
+| `f` | Switch the left pane between Worktree and Files |
+| `h`, `l`, `Left`, `Right` | Navigate the tree; Right enters/stages in hunk mode and Left exits it |
 | `Enter` | Toggle the selected directory |
-| `Space` | Stage or unstage selected entry |
+| `Space` | Stage or unstage the selected entry, or stage the selected hunk |
+| `Right`, `l` in hunk mode | Stage the selected hunk |
 | `a`, `u` | Stage all or unstage all |
 | `c` | Focus the commit message editor |
 | `Enter`, `Ctrl+Enter` | New commit-message line, create commit |
+| `Left`, `Right`, `Home`, `End` | Move within the commit message |
+| `Ctrl+A` | Select the complete commit message |
+| `Ctrl+Backspace`, `Alt+Backspace` | Delete the previous commit-message word |
 | `r` | Refresh |
 | `o` | Choose another repository |
 | `s` | Open settings |
@@ -67,7 +72,7 @@ In the repository explorer, start typing a folder name, press `p` to search from
 
 ## Settings
 
-Settings are saved to `$XDG_CONFIG_HOME/gitui/config`, or `~/.config/gitui/config` when `XDG_CONFIG_HOME` is unset. On Windows, GitUI uses `%APPDATA%\gitui\config`. Auto-fetch can periodically run `git fetch --all --prune` for the active repository without blocking the interface; its interval is configurable from 1 to 1440 minutes. The last manually selected Worktree width and History height are stored as exact terminal-cell counts.
+Settings are saved to `$XDG_CONFIG_HOME/gitui/config`, or `~/.config/gitui/config` when `XDG_CONFIG_HOME` is unset. On Windows, GitUI uses `%APPDATA%\gitui\config`. The first `e` press asks for an editor command such as `nvim`, `micro`, or `code --wait`; GitUI saves it, suspends the TUI, and runs the editor interactively. Press `E` to change it later. Auto-fetch can periodically run `git fetch --all --prune` for the active repository without blocking the interface; its interval is configurable from 1 to 1440 minutes. The last manually selected Worktree width and History height are stored as exact terminal-cell counts.
 
 ## Theme
 

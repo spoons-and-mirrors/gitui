@@ -81,7 +81,7 @@ pub(super) fn draw_graph(
         vec![
             Constraint::Length(graph_width),
             Constraint::Min(30),
-            Constraint::Length(12),
+            Constraint::Length(16),
             Constraint::Length(16),
             Constraint::Length(9),
         ]

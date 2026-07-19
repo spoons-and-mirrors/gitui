@@ -28,6 +28,9 @@ pub struct ChangesState {
     pub(crate) diff: String,
     pub(crate) diff_scroll: u16,
     pub(crate) diff_wrap: bool,
+    pub(crate) hunk_selection: Option<usize>,
+    hunk_pin_pending: bool,
+    pending_hunk_selection: Option<PendingHunkSelection>,
     pub(crate) history_focused: bool,
     pub(crate) collapsed_directories: HashSet<String>,
     pub(crate) collapsed_explorer_directories: HashSet<String>,
@@ -56,6 +59,11 @@ struct PreviewResult {
     content: String,
 }
 
+struct PendingHunkSelection {
+    path: String,
+    index: usize,
+}
+
 pub(super) struct ChangesSelection {
     change: Option<(String, bool)>,
     directory: Option<(String, WorktreeSection)>,
@@ -78,6 +86,9 @@ impl ChangesState {
             diff: String::new(),
             diff_scroll: 0,
             diff_wrap: false,
+            hunk_selection: None,
+            hunk_pin_pending: false,
+            pending_hunk_selection: None,
             history_focused: false,
             collapsed_directories: HashSet::new(),
             collapsed_explorer_directories,
@@ -102,6 +113,9 @@ impl ChangesState {
         self.history_state = ListState::default();
         self.diff.clear();
         self.diff_scroll = 0;
+        self.hunk_selection = None;
+        self.hunk_pin_pending = false;
+        self.pending_hunk_selection = None;
         self.history_focused = false;
         self.collapsed_directories.clear();
         self.collapsed_explorer_directories = default_explorer_collapsed_directories(repo);
@@ -442,6 +456,67 @@ impl ChangesState {
         self.diff_wrap
     }
 
+    pub(super) fn enter_hunk_selection(&mut self, repo: &RepositoryData) -> bool {
+        let Some(change) = self
+            .selected_change_index(repo)
+            .and_then(|index| repo.changes.get(index))
+        else {
+            return false;
+        };
+        if change.staged || hunk_count(&self.diff) == 0 {
+            return false;
+        }
+        self.hunk_selection = Some(0);
+        self.hunk_pin_pending = true;
+        self.diff_scroll = 0;
+        true
+    }
+
+    pub(super) fn move_hunk_selection(&mut self, delta: isize) {
+        let count = hunk_count(&self.diff);
+        let Some(selected) = self.hunk_selection else {
+            return;
+        };
+        let next = if delta > 0 {
+            selected.saturating_add(1).min(count.saturating_sub(1))
+        } else {
+            selected.saturating_sub(delta.unsigned_abs())
+        };
+        if next != selected {
+            self.hunk_selection = Some(next);
+            self.hunk_pin_pending = true;
+        }
+    }
+
+    pub(super) fn select_hunk(&mut self, index: usize) {
+        if self.hunk_selection.is_some()
+            && index < hunk_count(&self.diff)
+            && self.hunk_selection != Some(index)
+        {
+            self.hunk_selection = Some(index);
+            self.hunk_pin_pending = true;
+        }
+    }
+
+    pub(super) fn leave_hunk_selection(&mut self) {
+        self.hunk_selection = None;
+        self.hunk_pin_pending = false;
+        self.pending_hunk_selection = None;
+    }
+
+    pub(super) fn preserve_hunk_selection_after_stage(&mut self, path: String, index: usize) {
+        self.hunk_selection = Some(index);
+        self.pending_hunk_selection = Some(PendingHunkSelection { path, index });
+    }
+
+    pub(super) fn cancel_pending_hunk_stage(&mut self) {
+        self.pending_hunk_selection = None;
+    }
+
+    pub(crate) fn take_hunk_pin_request(&mut self) -> bool {
+        std::mem::take(&mut self.hunk_pin_pending)
+    }
+
     pub(super) fn clear_history_selection(&mut self) {
         self.history_focused = false;
         self.history_state.select(None);
@@ -595,7 +670,19 @@ impl ChangesState {
     }
 
     pub(super) fn refresh_diff(&mut self, repo: Option<&RepositoryData>) {
-        self.diff_scroll = 0;
+        let preserve_hunk = self.pending_hunk_selection.as_ref().is_some_and(|pending| {
+            repo.and_then(|repo| {
+                self.selected_change_index(repo)
+                    .and_then(|index| repo.changes.get(index))
+            })
+            .is_some_and(|change| !change.staged && change.path == pending.path)
+        });
+        if !preserve_hunk {
+            self.diff_scroll = 0;
+            self.hunk_selection = None;
+            self.hunk_pin_pending = false;
+            self.pending_hunk_selection = None;
+        }
         self.preview_generation = self.preview_generation.wrapping_add(1);
         let Some(repo) = repo else {
             self.diff.clear();
@@ -659,6 +746,11 @@ impl ChangesState {
                 && active_root.is_some_and(|root| root == result.root)
             {
                 self.diff = result.content;
+                if let Some(pending) = self.pending_hunk_selection.take() {
+                    let count = hunk_count(&self.diff);
+                    self.hunk_selection = (count > 0).then(|| pending.index.min(count - 1));
+                    self.hunk_pin_pending = self.hunk_selection.is_some();
+                }
                 changed = true;
             }
         }
@@ -747,6 +839,10 @@ impl ChangesState {
             .iter()
             .rposition(|row| row.change_index.is_some())
     }
+}
+
+fn hunk_count(diff: &str) -> usize {
+    diff.lines().filter(|line| line.starts_with("@@")).count()
 }
 
 fn preview_worker() -> (Sender<PreviewRequest>, Receiver<PreviewResult>) {

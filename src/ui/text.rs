@@ -6,6 +6,9 @@ use unicode_width::UnicodeWidthStr;
 
 use super::palette;
 
+mod syntax;
+use syntax::syntax_spans;
+
 pub(super) fn styled_source(source: &str, path: &str, width: usize) -> Vec<Line<'static>> {
     styled_source_window(source, path, width, 0, usize::MAX)
 }
@@ -43,7 +46,21 @@ pub(super) fn styled_diff(diff: &str, path: &str, width: usize) -> Vec<Line<'sta
 }
 
 pub(super) fn diff_display_line_count(diff: &str) -> usize {
-    diff.lines().count() + diff.lines().filter(|line| line.starts_with("@@")).count()
+    let has_hunks = diff.lines().any(|line| line.starts_with("@@"));
+    let mut in_hunk = false;
+    let mut count = 0;
+    for line in diff.lines() {
+        let hunk_header = line.starts_with("@@");
+        if has_hunks && !in_hunk && !hunk_header {
+            continue;
+        }
+        if hunk_header {
+            count += usize::from(in_hunk);
+            in_hunk = true;
+        }
+        count += 1;
+    }
+    count
 }
 
 pub(super) fn styled_diff_window(
@@ -59,13 +76,22 @@ pub(super) fn styled_diff_window(
     let end = start.saturating_add(count);
     let mut display_index = 0;
     let mut lines = Vec::new();
+    let has_hunks = diff.lines().any(|line| line.starts_with("@@"));
+    let mut in_hunk = false;
 
     for line in diff.lines() {
-        if line.starts_with("@@") {
-            if display_index >= start && display_index < end {
-                lines.push(finish_line(Vec::new(), width, palette().panel));
+        let hunk_header = line.starts_with("@@");
+        if has_hunks && !in_hunk && !hunk_header {
+            continue;
+        }
+        if hunk_header {
+            if in_hunk {
+                if display_index >= start && display_index < end {
+                    lines.push(finish_line(Vec::new(), width, palette().panel));
+                }
+                display_index += 1;
             }
-            display_index += 1;
+            in_hunk = true;
         }
         if display_index >= end {
             break;
@@ -265,134 +291,6 @@ fn finish_line(mut spans: Vec<Span<'static>>, width: usize, background: Color) -
     Line::from(spans).style(Style::default().bg(background))
 }
 
-fn syntax_spans(code: &str, path: &str) -> Vec<Span<'static>> {
-    let hash_comments = matches!(
-        path.rsplit('.').next().unwrap_or_default(),
-        "py" | "rb" | "sh" | "bash" | "zsh" | "toml" | "yaml" | "yml"
-    );
-    let mut spans = Vec::new();
-    let mut cursor = 0;
-    while cursor < code.len() {
-        let rest = &code[cursor..];
-        if rest.starts_with("//") || (hash_comments && rest.starts_with('#')) {
-            spans.push(Span::styled(
-                rest.to_owned(),
-                Style::default().fg(palette().faint),
-            ));
-            break;
-        }
-        let character = rest.chars().next().expect("nonempty remainder");
-        if character == '"' || character == '\'' {
-            let mut escaped = false;
-            let mut end = character.len_utf8();
-            for next in rest[character.len_utf8()..].chars() {
-                end += next.len_utf8();
-                if next == character && !escaped {
-                    break;
-                }
-                escaped = next == '\\' && !escaped;
-                if next != '\\' {
-                    escaped = false;
-                }
-            }
-            spans.push(Span::styled(
-                rest[..end].to_owned(),
-                Style::default().fg(palette().yellow),
-            ));
-            cursor += end;
-            continue;
-        }
-        if character.is_alphanumeric() || character == '_' {
-            let end = rest
-                .char_indices()
-                .find_map(|(index, next)| {
-                    (!(next.is_alphanumeric() || next == '_')).then_some(index)
-                })
-                .unwrap_or(rest.len());
-            let token = &rest[..end];
-            let following = rest[end..].trim_start();
-            let color = if is_keyword(token) {
-                palette().purple
-            } else if token.chars().all(|next| next.is_ascii_digit()) {
-                palette().orange
-            } else if token.chars().next().is_some_and(char::is_uppercase)
-                || following.starts_with('(')
-            {
-                palette().cyan
-            } else {
-                palette().ink
-            };
-            spans.push(Span::styled(token.to_owned(), Style::default().fg(color)));
-            cursor += end;
-            continue;
-        }
-        let (token, color) =
-            if rest.starts_with("::") || rest.starts_with("->") || rest.starts_with("=>") {
-                (&rest[..2], palette().cyan)
-            } else {
-                (&rest[..character.len_utf8()], palette().ink)
-            };
-        spans.push(Span::styled(token.to_owned(), Style::default().fg(color)));
-        cursor += token.len();
-    }
-    spans
-}
-
-fn is_keyword(token: &str) -> bool {
-    matches!(
-        token,
-        "as" | "async"
-            | "await"
-            | "break"
-            | "class"
-            | "const"
-            | "continue"
-            | "crate"
-            | "def"
-            | "do"
-            | "else"
-            | "enum"
-            | "export"
-            | "extern"
-            | "false"
-            | "fn"
-            | "for"
-            | "from"
-            | "function"
-            | "if"
-            | "impl"
-            | "import"
-            | "in"
-            | "interface"
-            | "let"
-            | "loop"
-            | "match"
-            | "mod"
-            | "move"
-            | "mut"
-            | "new"
-            | "none"
-            | "null"
-            | "pub"
-            | "ref"
-            | "return"
-            | "self"
-            | "static"
-            | "struct"
-            | "super"
-            | "throw"
-            | "trait"
-            | "true"
-            | "try"
-            | "type"
-            | "use"
-            | "var"
-            | "where"
-            | "while"
-            | "yield"
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,25 +298,27 @@ mod tests {
     #[test]
     fn styles_source_diff_with_numbers_and_tinted_changes() {
         let lines = styled_diff(
-            "@@ -1 +1 @@\n-let old_value = 1;\n+let new_value = 2;",
+            concat!(
+                "diff --git a/src/main.rs b/src/main.rs\n",
+                "index 1234567..abcdef0 100644\n",
+                "--- a/src/main.rs\n",
+                "+++ b/src/main.rs\n",
+                "@@ -1 +1 @@\n",
+                "-let old_value = 1;\n",
+                "+let new_value = 2;",
+            ),
             "src/main.rs",
             100,
         );
 
-        assert_eq!(lines.len(), 4);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].style.bg, Some(palette().surface_alt));
+        assert_eq!(lines[1].style.bg, Some(palette().remove_bg));
+        assert_eq!(lines[2].style.bg, Some(palette().add_bg));
+        assert!(lines[1].spans[0].content.trim().is_empty());
+        assert_eq!(lines[2].spans[0].content.trim(), "1");
         assert!(
-            lines[0]
-                .spans
-                .iter()
-                .all(|span| span.content.trim().is_empty())
-        );
-        assert_eq!(lines[1].style.bg, Some(palette().surface_alt));
-        assert_eq!(lines[2].style.bg, Some(palette().remove_bg));
-        assert_eq!(lines[3].style.bg, Some(palette().add_bg));
-        assert!(lines[2].spans[0].content.trim().is_empty());
-        assert_eq!(lines[3].spans[0].content.trim(), "1");
-        assert!(
-            lines[3]
+            lines[2]
                 .spans
                 .iter()
                 .any(|span| span.content == "let" && span.style.fg == Some(palette().purple))

@@ -6,10 +6,10 @@ mod theme;
 mod tree;
 mod ui;
 
-use std::{io, path::PathBuf, time::Duration};
+use std::{io, path::PathBuf, process::Command, time::Duration};
 
 use anyhow::Result;
-use app::{App, Mode};
+use app::{App, EditorRequest, Mode};
 use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -49,7 +49,8 @@ fn main() -> Result<()> {
                 }
                 Event::Mouse(mouse) => {
                     let changed = !matches!(mouse.kind, event::MouseEventKind::Moved)
-                        || app.mode == Mode::ActionMenu;
+                        || app.mode == Mode::ActionMenu
+                        || app.hunk_selection_active();
                     app.handle_mouse(mouse);
                     (changed, false)
                 }
@@ -75,9 +76,38 @@ fn main() -> Result<()> {
             });
             dirty = true;
         }
+        if let Some(request) = app.take_editor_request() {
+            restore_terminal();
+            let result = run_editor(request);
+            terminal = start_terminal()?;
+            app.editor_finished(result);
+            dirty = true;
+        }
     }
 
     Ok(())
+}
+
+fn run_editor(request: EditorRequest) -> Result<(), String> {
+    let Some((program, args)) = request.command.split_first() else {
+        return Err("Editor command is empty".to_owned());
+    };
+    let status = Command::new(program)
+        .args(args)
+        .arg(&request.file)
+        .current_dir(&request.repository)
+        .status()
+        .map_err(|error| format!("Could not start {program}: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Editor exited with status {}",
+            status
+                .code()
+                .map_or_else(|| "unknown".to_owned(), |code| code.to_string())
+        ))
+    }
 }
 
 fn start_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
@@ -102,14 +132,15 @@ fn start_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
 }
 
 fn restore_terminal() {
-    let _ = disable_raw_mode();
+    // Keyboard enhancement was pushed inside the alternate screen, so unwind it first.
     let _ = execute!(
         io::stdout(),
-        LeaveAlternateScreen,
-        DisableMouseCapture,
+        PopKeyboardEnhancementFlags,
         DisableBracketedPaste,
-        PopKeyboardEnhancementFlags
+        DisableMouseCapture,
+        LeaveAlternateScreen
     );
+    let _ = disable_raw_mode();
 }
 
 fn install_panic_hook() {

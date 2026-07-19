@@ -42,6 +42,20 @@ fn renders_every_primary_surface() {
     assert_eq!(app.regions.diff.unwrap().right(), 120);
     assert_eq!(app.regions.changes.unwrap().y, 35);
     assert_eq!(app.regions.help.unwrap().y, 35);
+    assert!(app.regions.changes.unwrap().x > 0);
+    assert_eq!(app.regions.help.unwrap().right(), 120);
+    let buffer = terminal.backend().buffer();
+    let history = app.regions.history_splitter.unwrap();
+    let history_offset = usize::from(history.y) * 120 + usize::from(history.x);
+    assert_eq!(buffer.content[0].bg, super::palette().surface_alt);
+    assert_eq!(
+        buffer.content[36 * 120 - 1].bg,
+        super::palette().surface_alt
+    );
+    assert_eq!(
+        buffer.content[history_offset].bg,
+        super::palette().surface_alt
+    );
     let header: String = terminal.backend().buffer().content[..120]
         .iter()
         .map(|cell| cell.symbol())
@@ -217,8 +231,8 @@ fn renders_every_primary_surface() {
     );
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let rows = app.changes.worktree_rows(app.repository().unwrap());
-    assert_eq!(rows[0].label, "STAGED  1");
-    assert!(rows.iter().any(|row| row.label.starts_with("UNSTAGED  ")));
+    assert!(rows.iter().any(|row| row.label == "STAGED"));
+    assert!(rows.iter().any(|row| row.label == "UNSTAGED"));
     let status = app.regions.worktree_status.unwrap();
     let selected = app.changes.worktree_state.selected().unwrap();
     let selected_y = status.y + (selected - app.changes.worktree_scroll) as u16;
@@ -240,8 +254,15 @@ fn renders_every_primary_surface() {
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let worktree = app.regions.worktree_list.unwrap();
-    click(&mut app, worktree.x + 10, worktree.y + 1);
-    assert_eq!(app.changes.worktree_state.selected(), Some(1));
+    let tracked_row = app
+        .changes
+        .worktree_rows(app.repository().unwrap())
+        .iter()
+        .position(|row| row.label == "tracked.txt")
+        .unwrap();
+    let tracked_y = worktree.y + (tracked_row - app.changes.worktree_scroll) as u16;
+    click(&mut app, worktree.x + 10, tracked_y);
+    assert_eq!(app.changes.worktree_state.selected(), Some(tracked_row));
 
     let splitter = app.regions.splitter.unwrap();
     let bounds = app.regions.split_bounds.unwrap();
@@ -313,14 +334,85 @@ fn renders_every_primary_surface() {
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let worktree = app.regions.worktree_list.unwrap();
-    click(&mut app, worktree.x + 2, worktree.y + 1);
+    let tracked_row = app
+        .changes
+        .worktree_rows(app.repository().unwrap())
+        .iter()
+        .position(|row| row.label == "tracked.txt")
+        .unwrap();
+    let tracked_y = worktree.y + (tracked_row - app.changes.worktree_scroll) as u16;
+    click(&mut app, worktree.x + 2, tracked_y);
     wait_for_preview(&mut app);
     assert_eq!(app.changes.history_state.selected(), None);
     assert!(!app.changes.history_focused);
     assert!(app.changes.diff.contains("tracked.txt"));
+    let tracked_diff = app.changes.diff.clone();
+    app.changes.diff = concat!(
+        "diff --git a/tracked.txt b/tracked.txt\n",
+        "--- a/tracked.txt\n",
+        "+++ b/tracked.txt\n",
+        "@@ -1 +1 @@\n-old one\n+new one\n",
+        "@@ -3 +3 @@\n-old two\n+new two\n",
+    )
+    .to_owned();
+    app.changes.diff_scroll = 0;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let normal_hunk_y = app.regions.diff_hunks[0].action.unwrap().y;
+    let normal_scroll_max = app.regions.diff_scroll_max;
+    let normal_scroll_thumb = app.regions.diff_scroll_thumb;
+    app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(app.changes.hunk_selection, Some(0));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(app.regions.diff_hunks[0].action.unwrap().y, normal_hunk_y);
+    assert_eq!(app.regions.diff_scroll_max, normal_scroll_max);
+    assert_eq!(app.regions.diff_scroll_thumb, normal_scroll_thumb);
+    assert_eq!(app.regions.diff_hunks.len(), 2);
+    let pinned_hunk_y = app.regions.diff_hunks[0].action.unwrap().y;
+    let second_hunk = app.regions.diff_hunks[1].rect;
+    app.handle_mouse(mouse(
+        MouseEventKind::Moved,
+        second_hunk.x + 1,
+        second_hunk.y,
+    ));
+    assert_eq!(app.changes.hunk_selection, Some(1));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let selected_hunk = app
+        .regions
+        .diff_hunks
+        .iter()
+        .find(|hunk| hunk.index == 1)
+        .unwrap();
+    assert_eq!(selected_hunk.action.unwrap().y, pinned_hunk_y);
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(app.changes.hunk_selection, Some(0));
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(app.changes.hunk_selection, Some(1));
+    app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    assert_eq!(app.changes.hunk_selection, None);
+    app.changes.diff = format!(
+        "@@ -1,80 +1,80 @@\n{}",
+        (0..80)
+            .map(|line| format!(" line {line}\n"))
+            .collect::<String>()
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.diff_hunks[0].continues_below);
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(app.changes.hunk_selection, Some(0));
+    assert_eq!(app.changes.diff_scroll, 10);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(app.changes.diff_scroll, 10);
+    assert!(app.regions.diff_hunks[0].continues_above);
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(app.changes.diff_scroll, 0);
+    app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    app.changes.diff = tracked_diff;
+    app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(app.changes.hunk_selection, Some(0));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(app.regions.diff_hunks.len(), 1);
-    let rect = app.regions.diff_hunks[0].rect;
+    let rect = app.regions.diff_hunks[0].action.unwrap();
     let buffer = terminal.backend().buffer();
     let offset = usize::from(rect.y) * usize::from(buffer.area.width) + usize::from(rect.x);
     let button: String = buffer.content[offset..offset + 3]
@@ -328,7 +420,8 @@ fn renders_every_primary_surface() {
         .map(|cell| cell.symbol())
         .collect();
     assert_eq!(button, "[+]");
-    click(&mut app, rect.x + 1, rect.y);
+    app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(app.changes.hunk_selection, Some(0));
     wait_for(&mut app, |app| {
         app.repository()
             .unwrap()
@@ -337,8 +430,8 @@ fn renders_every_primary_surface() {
             .any(|change| change.path == "tracked.txt" && change.staged)
     });
     let rows = app.changes.worktree_rows(app.repository().unwrap());
-    assert!(rows.iter().any(|row| row.label.starts_with("STAGED  ")));
-    assert!(rows.iter().any(|row| row.label.starts_with("UNSTAGED  ")));
+    assert!(rows.iter().any(|row| row.label == "STAGED"));
+    assert!(rows.iter().any(|row| row.label == "UNSTAGED"));
 
     app.changes.diff = (0..100)
         .map(|line| format!("+scrollbar line {line}"))
@@ -453,10 +546,32 @@ fn renders_every_primary_surface() {
     let commit = app.regions.commit.unwrap();
     click(&mut app, commit.x + 2, commit.y + 1);
     assert_eq!(app.mode, Mode::Commit);
-    app.commit_message = "Subject".to_owned();
+    app.commit_input.set("ac");
+    app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+    assert_eq!(app.commit_input.text(), "abc");
+    app.commit_input.set("alpha beta");
+    app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL));
+    assert_eq!(app.commit_input.text(), "alpha ");
+    app.commit_input.set("alpha beta");
+    app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT));
+    assert_eq!(app.commit_input.text(), "alpha ");
+    app.commit_input.set("replace me");
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let width = usize::from(buffer.area.width);
+    let input_cell =
+        &buffer.content[usize::from(commit.y) * width + usize::from(commit.x.saturating_add(1))];
+    let focus_edge = &buffer.content[usize::from(commit.y) * width + usize::from(commit.x)];
+    assert_eq!(input_cell.bg, super::palette().selected);
+    assert_eq!(focus_edge.bg, super::palette().canvas);
+    app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    assert_eq!(app.commit_input.text(), "x");
+    app.commit_input.set("Subject");
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(app.commit_message, "Subject\n");
-    app.commit_message.push_str("Body");
+    assert_eq!(app.commit_input.text(), "Subject\n");
+    app.commit_input.insert("Body");
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.mode, Mode::Normal);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -470,7 +585,8 @@ fn renders_every_primary_surface() {
     assert!(unfocused_screen.contains("Subject"));
     assert!(unfocused_screen.contains("Body"));
 
-    app.commit_message = format!("wrap-start {} wrap-end", "x".repeat(90));
+    app.commit_input
+        .set(format!("wrap-start {} wrap-end", "x".repeat(90)));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let wrapped_screen: String = terminal
         .backend()
@@ -481,17 +597,17 @@ fn renders_every_primary_surface() {
         .collect();
     assert!(wrapped_screen.contains("wrap-start"));
     assert!(wrapped_screen.contains("wrap-end"));
-    app.commit_message = "Subject\nBody".to_owned();
+    app.commit_input.set("Subject\nBody");
 
     app.mode = Mode::Commit;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let diff = app.regions.diff.unwrap();
     click(&mut app, diff.x + 1, diff.y + 1);
     assert_eq!(app.mode, Mode::Normal);
-    assert_eq!(app.commit_message, "Subject\nBody");
+    assert_eq!(app.commit_input.text(), "Subject\nBody");
 
     app.mode = Mode::Commit;
-    app.commit_message.clear();
+    app.commit_input.clear();
     app.notice = None;
     app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
     assert_eq!(
@@ -548,9 +664,26 @@ fn renders_every_primary_surface() {
         .collect();
     assert!(settings_screen.contains("Auto-fetch remotes"));
     assert!(settings_screen.contains("Fetch interval"));
+    assert!(settings_screen.contains("Editor command"));
+    assert!(app.regions.editor_setting.is_some());
     assert!(!settings_screen.contains('┌'));
     assert!(app.regions.auto_fetch.is_some());
     assert!(app.regions.fetch_interval_up.is_some());
+
+    app.mode = Mode::Editor;
+    app.editor_input = "nvim".to_owned();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let editor_screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(editor_screen.contains("EDITOR COMMAND"));
+    assert!(editor_screen.contains("nvim"));
+    assert!(editor_screen.contains("Saved for next time"));
+    assert!(app.regions.editor_overlay.is_some());
 
     app.mode = Mode::Help;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -578,25 +711,40 @@ fn toggles_worktree_directories_with_the_mouse() {
     fs::write(root.join("src/app.rs"), "fn main() {}\n").unwrap();
 
     let mut app = App::new(root.to_path_buf());
-    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(
         app.changes.worktree_rows(app.repository().unwrap()).len(),
-        3
+        4
     );
 
     let worktree = app.regions.worktree_list.unwrap();
-    click(&mut app, worktree.x + 1, worktree.y + 1);
+    let directory_row = app
+        .changes
+        .worktree_rows(app.repository().unwrap())
+        .iter()
+        .position(|row| row.directory_path.is_some())
+        .unwrap();
+    let directory_y = worktree.y + (directory_row - app.changes.worktree_scroll) as u16;
+    click(&mut app, worktree.x + 1, directory_y);
+    assert_eq!(app.changes.worktree_state.selected(), Some(directory_row));
     let rows = app.changes.worktree_rows(app.repository().unwrap());
-    assert_eq!(rows.len(), 2);
-    assert_eq!(rows[1].directory_expanded, Some(false));
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[2].directory_expanded, Some(false));
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let worktree = app.regions.worktree_list.unwrap();
-    click(&mut app, worktree.x + 1, worktree.y + 1);
+    let directory_row = app
+        .changes
+        .worktree_rows(app.repository().unwrap())
+        .iter()
+        .position(|row| row.directory_path.is_some())
+        .unwrap();
+    let directory_y = worktree.y + (directory_row - app.changes.worktree_scroll) as u16;
+    click(&mut app, worktree.x + 1, directory_y);
     assert_eq!(
         app.changes.worktree_rows(app.repository().unwrap()).len(),
-        3
+        4
     );
 }
 

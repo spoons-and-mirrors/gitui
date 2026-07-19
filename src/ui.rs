@@ -80,6 +80,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             app.regions.fetch_interval = Some(regions.fetch_interval);
             app.regions.fetch_interval_down = Some(regions.fetch_interval_down);
             app.regions.fetch_interval_up = Some(regions.fetch_interval_up);
+            app.regions.editor_setting = Some(regions.editor);
         }
         Mode::ActionMenu => {
             let anchor = app.regions.actions.unwrap_or(Rect::new(
@@ -97,6 +98,15 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             let regions = overlays::draw_command(frame, &mut app.actions);
             app.regions.command_overlay = Some(regions.overlay);
             app.regions.command_output = Some(regions.output);
+        }
+        Mode::Editor => {
+            dim(frame);
+            app.regions.editor_overlay = Some(overlays::draw_editor(
+                frame,
+                &app.editor_input,
+                app.editor_error.as_deref(),
+                app.editor_configure_only,
+            ));
         }
         Mode::Help => overlays::draw_help(frame),
         _ => {}
@@ -128,7 +138,7 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         |repo| (repo.root.display().to_string(), repo.branch.clone()),
     );
     frame.render_widget(
-        Block::default().style(Style::default().bg(palette().panel)),
+        Block::default().style(Style::default().bg(palette().surface_alt)),
         Rect::new(area.x, area.y, area.width, 1),
     );
     let repository = std::path::Path::new(&path)
@@ -193,7 +203,7 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let commits = app.repository().map_or(0, |repo| repo.commits.len());
 
     frame.render_widget(
-        Block::default().style(Style::default().bg(palette().panel)),
+        Block::default().style(Style::default().bg(palette().surface_alt)),
         area,
     );
 
@@ -213,8 +223,12 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         help_label,
     ];
 
+    let total_width = labels.iter().fold(0_u16, |width, label| {
+        width.saturating_add(UnicodeWidthStr::width(*label) as u16)
+    });
     let mut spans = Vec::new();
-    let mut x = area.x;
+    let start_x = area.right().saturating_sub(total_width).max(area.x);
+    let mut x = start_x;
     let mut rects = Vec::new();
     for (index, label) in labels.iter().enumerate() {
         let active =
@@ -242,7 +256,10 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     app.regions.settings = rects.get(4).copied();
     app.regions.help = rects.get(5).copied();
 
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)),
+        Rect::new(start_x, area.y, area.right().saturating_sub(start_x), 1),
+    );
 }
 
 fn truncate_width(value: &str, width: usize) -> String {

@@ -184,6 +184,17 @@ pub(crate) fn action_command(action: ActionId) -> Option<(&'static str, Vec<Stri
 }
 
 pub(crate) fn parse_git_args(input: &str) -> Result<Vec<String>, String> {
+    let mut args = parse_command_args(input)?;
+    if args.first().is_some_and(|argument| argument == "git") {
+        args.remove(0);
+    }
+    if args.is_empty() {
+        return Err("Enter a Git command".to_owned());
+    }
+    Ok(args)
+}
+
+pub(crate) fn parse_command_args(input: &str) -> Result<Vec<String>, String> {
     let mut args = Vec::new();
     let mut current = String::new();
     let mut started = false;
@@ -239,11 +250,8 @@ pub(crate) fn parse_git_args(input: &str) -> Result<Vec<String>, String> {
     if started {
         args.push(current);
     }
-    if args.first().is_some_and(|argument| argument == "git") {
-        args.remove(0);
-    }
     if args.is_empty() {
-        return Err("Enter a Git command".to_owned());
+        return Err("Enter a command".to_owned());
     }
     Ok(args)
 }
@@ -282,5 +290,9 @@ mod tests {
         );
         assert!(parse_git_args("commit -m 'unfinished").is_err());
         assert!(parse_git_args("git").is_err());
+        assert_eq!(
+            parse_command_args("code --wait").unwrap(),
+            ["code", "--wait"]
+        );
     }
 }

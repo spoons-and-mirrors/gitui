@@ -1,6 +1,7 @@
 mod actions;
 mod changes;
 mod repository_picker;
+mod text_input;
 
 pub(crate) use actions::{ACTION_ITEMS, ActionsState, CommandStatus};
 pub use changes::{ChangesState, LeftPane};
@@ -24,8 +25,9 @@ use crate::{
     selection::{SelectionOutcome, SelectionState},
 };
 
-use actions::{ActionId, action_command, display_git_command, parse_git_args};
+use actions::{ActionId, action_command, display_git_command, parse_command_args, parse_git_args};
 use repository_picker::PickerCommand;
+pub(crate) use text_input::TextInput;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -42,6 +44,7 @@ pub enum Mode {
     Help,
     ActionMenu,
     Command,
+    Editor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +53,7 @@ pub struct Settings {
     pub fetch_interval_minutes: u16,
     pub worktree_width: u16,
     pub history_height: u16,
+    pub editor_command: Option<String>,
 }
 
 impl Default for Settings {
@@ -59,6 +63,7 @@ impl Default for Settings {
             fetch_interval_minutes: 5,
             worktree_width: 38,
             history_height: 7,
+            editor_command: None,
         }
     }
 }
@@ -66,7 +71,12 @@ impl Default for Settings {
 #[derive(Debug, Clone, Copy)]
 pub struct DiffHunkRegion {
     pub rect: Rect,
+    pub action: Option<Rect>,
     pub index: usize,
+    pub continues_above: bool,
+    pub continues_below: bool,
+    pub scroll_start: u16,
+    pub scroll_end: u16,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -104,6 +114,8 @@ pub struct Regions {
     pub action_list: Option<Rect>,
     pub command_overlay: Option<Rect>,
     pub command_output: Option<Rect>,
+    pub editor_overlay: Option<Rect>,
+    pub editor_setting: Option<Rect>,
     pub auto_fetch: Option<Rect>,
     pub fetch_interval: Option<Rect>,
     pub fetch_interval_down: Option<Rect>,
@@ -119,7 +131,7 @@ pub struct App {
     pub mode: Mode,
     pub changes: ChangesState,
     pub graph_state: TableState,
-    pub commit_message: String,
+    pub(crate) commit_input: TextInput,
     pub dragging_splitter: bool,
     pub dragging_history: bool,
     pub dragging_diff_scrollbar: bool,
@@ -136,6 +148,16 @@ pub struct App {
     pub(crate) settings_path: Option<PathBuf>,
     pending_reload: Option<(changes::ChangesSelection, Option<String>)>,
     reload_queued: bool,
+    pub(crate) editor_input: String,
+    pub(crate) editor_error: Option<String>,
+    pub(crate) editor_configure_only: bool,
+    editor_request: Option<EditorRequest>,
+}
+
+pub(crate) struct EditorRequest {
+    pub(crate) command: Vec<String>,
+    pub(crate) file: PathBuf,
+    pub(crate) repository: PathBuf,
 }
 
 impl App {
@@ -170,7 +192,7 @@ impl App {
             mode,
             changes,
             graph_state,
-            commit_message: String::new(),
+            commit_input: TextInput::default(),
             dragging_splitter: false,
             dragging_history: false,
             dragging_diff_scrollbar: false,
@@ -187,6 +209,10 @@ impl App {
             settings_path,
             pending_reload: None,
             reload_queued: false,
+            editor_input: String::new(),
+            editor_error: None,
+            editor_configure_only: false,
+            editor_request: None,
         }
     }
 
@@ -220,6 +246,7 @@ impl App {
             Mode::Settings => self.handle_settings(key),
             Mode::ActionMenu => self.handle_action_menu(key),
             Mode::Command => self.handle_command(key),
+            Mode::Editor => self.handle_editor(key),
             Mode::Help => {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
                     self.mode = Mode::Normal;
@@ -230,13 +257,17 @@ impl App {
 
     pub fn handle_paste(&mut self, text: &str) {
         match self.mode {
-            Mode::Commit => self.commit_message.push_str(text),
+            Mode::Commit => self.commit_input.insert(text),
             Mode::Picker => self.picker.paste(text),
             Mode::Command if self.actions.status != CommandStatus::Running => {
                 self.actions.input.push_str(text);
                 if self.actions.status == CommandStatus::Input {
                     self.actions.stderr.clear();
                 }
+            }
+            Mode::Editor => {
+                self.editor_input.push_str(text);
+                self.editor_error = None;
             }
             _ => {}
         }
@@ -313,6 +344,9 @@ impl App {
             self.handle_command_mouse(mouse);
             return;
         }
+        if self.mode == Mode::Editor {
+            return;
+        }
         if self.mode == Mode::Picker {
             self.handle_picker_mouse(mouse);
             return;
@@ -324,6 +358,18 @@ impl App {
         if self.mode == Mode::Help {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                 self.mode = Mode::Normal;
+            }
+            return;
+        }
+
+        if mouse.kind == MouseEventKind::Moved && self.changes.hunk_selection.is_some() {
+            if let Some(hunk) = self
+                .regions
+                .diff_hunks
+                .iter()
+                .find(|hunk| hunk.rect.contains(point))
+            {
+                self.changes.select_hunk(hunk.index);
             }
             return;
         }
@@ -403,6 +449,7 @@ impl App {
     fn selection_region(&self, point: Position) -> Rect {
         [
             self.regions.command_overlay,
+            self.regions.editor_overlay,
             self.regions.picker_overlay,
             self.regions.settings_overlay,
             self.regions.action_menu,
@@ -431,6 +478,7 @@ impl App {
             Mode::Picker => self.handle_picker_mouse(mouse),
             Mode::Settings => self.handle_settings_mouse(mouse),
             Mode::Help => self.mode = Mode::Normal,
+            Mode::Editor => {}
             Mode::Normal | Mode::Commit => self.handle_primary_left_click(point),
         }
     }
@@ -445,10 +493,10 @@ impl App {
             .regions
             .diff_hunks
             .iter()
-            .find(|hunk| hunk.rect.contains(point))
+            .find(|hunk| hunk.action.is_some_and(|rect| rect.contains(point)))
             .copied()
         {
-            self.stage_hunk(hunk.index);
+            self.stage_hunk(hunk.index, false);
             return;
         }
         if self
@@ -551,7 +599,7 @@ impl App {
         } else if self.select_graph_row(point) {
             self.view = View::Graph;
         } else if self.regions.commit.is_some_and(|rect| rect.contains(point)) {
-            self.mode = Mode::Commit;
+            self.focus_commit();
         }
     }
 
@@ -685,6 +733,13 @@ impl App {
             .is_some_and(|rect| rect.contains(point))
         {
             self.settings_selection = 1;
+        } else if self
+            .regions
+            .editor_setting
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.settings_selection = 2;
+            self.open_editor_setting();
         }
     }
 
@@ -850,6 +905,7 @@ impl App {
 
     pub fn poll_worker(&mut self) -> bool {
         let mut changed = self.mode == Mode::Picker && self.picker.poll_index();
+        changed |= self.commit_input.poll_blink(self.mode == Mode::Commit);
         let interval = fetch_interval(&self.settings);
         self.session
             .maybe_start_fetch(self.settings.auto_fetch, interval);
@@ -859,7 +915,7 @@ impl App {
             match done {
                 WorkerCompletion::Commit(result) => match result {
                     Ok(output) if output.success => {
-                        self.commit_message.clear();
+                        self.commit_input.clear();
                         self.reload();
                         self.notice = Some("Commit created".to_owned());
                     }
@@ -899,7 +955,10 @@ impl App {
                 },
                 WorkerCompletion::Mutation(result) => match result {
                     Ok(()) => self.reload(),
-                    Err(error) => self.notice = Some(error),
+                    Err(error) => {
+                        self.changes.cancel_pending_hunk_stage();
+                        self.notice = Some(error);
+                    }
                 },
             }
         }
@@ -962,9 +1021,16 @@ impl App {
     }
 
     pub fn requires_render_before_next_event(&self) -> bool {
-        self.regions
-            .screen
-            .is_some_and(|area| self.selection.needs_capture(area))
+        self.editor_request.is_some()
+            || self.changes.hunk_selection.is_some()
+            || self
+                .regions
+                .screen
+                .is_some_and(|area| self.selection.needs_capture(area))
+    }
+
+    pub fn hunk_selection_active(&self) -> bool {
+        self.changes.hunk_selection.is_some()
     }
 
     pub fn change_counts(&self) -> (usize, usize) {
@@ -977,6 +1043,20 @@ impl App {
     }
 
     fn handle_normal(&mut self, key: KeyEvent) {
+        if let Some(index) = self.changes.hunk_selection {
+            match key.code {
+                KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc => {
+                    self.changes.leave_hunk_selection();
+                }
+                KeyCode::Down | KeyCode::Char('j') => self.scroll_or_move_hunk(1),
+                KeyCode::Up | KeyCode::Char('k') => self.scroll_or_move_hunk(-1),
+                KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(' ') => {
+                    self.stage_hunk(index, true);
+                }
+                _ => {}
+            }
+            return;
+        }
         match key.code {
             KeyCode::Char('q') if self.commit_running() || self.session.command_running() => {
                 self.notice = Some("A Git operation is still running".to_owned())
@@ -1007,10 +1087,12 @@ impl App {
                     .to_owned(),
                 );
             }
-            KeyCode::Char('e') if self.view == View::Changes => self.toggle_left_pane(),
+            KeyCode::Char('e') if self.view == View::Changes => self.open_selected_file(false),
+            KeyCode::Char('E') if self.view == View::Changes => self.open_selected_file(true),
+            KeyCode::Char('f') if self.view == View::Changes => self.toggle_left_pane(),
             KeyCode::Char('c') if self.view == View::Changes => {
                 self.set_left_pane(LeftPane::Worktree);
-                self.mode = Mode::Commit;
+                self.focus_commit();
             }
             KeyCode::Char('a')
                 if self.view == View::Changes && self.changes.pane == LeftPane::Worktree =>
@@ -1055,7 +1137,9 @@ impl App {
                     && !self.changes.history_focused =>
             {
                 let repo = self.session.data();
-                self.changes.expand_or_descend_worktree(repo);
+                if !repo.is_some_and(|repo| self.changes.enter_hunk_selection(repo)) {
+                    self.changes.expand_or_descend_worktree(repo);
+                }
             }
             KeyCode::Left | KeyCode::Char('h')
                 if self.view == View::Changes && self.changes.pane == LeftPane::Files =>
@@ -1081,7 +1165,45 @@ impl App {
         }
     }
 
+    fn scroll_or_move_hunk(&mut self, delta: isize) {
+        let Some(selected) = self.changes.hunk_selection else {
+            return;
+        };
+        let Some(region) = self
+            .regions
+            .diff_hunks
+            .iter()
+            .find(|region| region.index == selected)
+        else {
+            self.changes.move_hunk_selection(delta);
+            return;
+        };
+        let can_scroll = if delta > 0 {
+            region.continues_below
+        } else {
+            region.continues_above
+        };
+        if can_scroll {
+            if delta > 0 {
+                self.changes.diff_scroll = self
+                    .changes
+                    .diff_scroll
+                    .saturating_add(10)
+                    .min(region.scroll_end);
+            } else {
+                self.changes.diff_scroll = self
+                    .changes
+                    .diff_scroll
+                    .saturating_sub(10)
+                    .max(region.scroll_start);
+            }
+        } else {
+            self.changes.move_hunk_selection(delta);
+        }
+    }
+
     fn handle_commit_input(&mut self, key: KeyEvent) {
+        self.commit_input.focus();
         match key.code {
             KeyCode::Esc => self.mode = Mode::Normal,
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1090,12 +1212,29 @@ impl App {
             KeyCode::Char('j' | 'm') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.start_commit();
             }
-            KeyCode::Enter => self.commit_message.push('\n'),
-            KeyCode::Backspace => {
-                self.commit_message.pop();
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.commit_input.select_all();
             }
-            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.commit_message.push(character);
+            KeyCode::Backspace
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.commit_input.delete_word();
+            }
+            KeyCode::Left => self.commit_input.move_left(),
+            KeyCode::Right => self.commit_input.move_right(),
+            KeyCode::Home => self.commit_input.move_home(),
+            KeyCode::End => self.commit_input.move_end(),
+            KeyCode::Delete => self.commit_input.delete(),
+            KeyCode::Enter => self.commit_input.insert_char('\n'),
+            KeyCode::Backspace => self.commit_input.backspace(),
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.commit_input.insert_char(character);
             }
             _ => {}
         }
@@ -1110,10 +1249,10 @@ impl App {
         match key.code {
             KeyCode::Esc | KeyCode::Char('s') => self.mode = Mode::Normal,
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
-                self.settings_selection = (self.settings_selection + 1) % 2;
+                self.settings_selection = (self.settings_selection + 1) % 3;
             }
             KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
-                self.settings_selection = (self.settings_selection + 1) % 2;
+                self.settings_selection = (self.settings_selection + 2) % 3;
             }
             KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 0 => {
                 self.toggle_auto_fetch();
@@ -1125,6 +1264,9 @@ impl App {
                 if self.settings_selection == 1 =>
             {
                 self.change_fetch_interval(1);
+            }
+            KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 2 => {
+                self.open_editor_setting();
             }
             _ => {}
         }
@@ -1216,6 +1358,134 @@ impl App {
         }
     }
 
+    fn handle_editor(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.editor_error = None;
+                self.mode = if self.editor_configure_only {
+                    Mode::Settings
+                } else {
+                    Mode::Normal
+                };
+            }
+            KeyCode::Enter => self.queue_editor(),
+            KeyCode::Backspace => {
+                self.editor_input.pop();
+                self.editor_error = None;
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.editor_input.clear();
+                self.editor_error = None;
+            }
+            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.editor_input.push(character);
+                self.editor_error = None;
+            }
+            _ => {}
+        }
+    }
+
+    fn open_selected_file(&mut self, configure: bool) {
+        let Some((repository, file)) = self.selected_file_to_edit() else {
+            self.notice = Some("Select a file to edit".to_owned());
+            return;
+        };
+        let configured = self.settings.editor_command.clone();
+        if configure || configured.is_none() {
+            self.editor_configure_only = false;
+            self.editor_input = configured
+                .or_else(|| std::env::var("VISUAL").ok())
+                .or_else(|| std::env::var("EDITOR").ok())
+                .unwrap_or_default();
+            self.editor_error = None;
+            self.mode = Mode::Editor;
+            return;
+        }
+        self.prepare_editor_request(configured.expect("checked above"), repository, file);
+    }
+
+    fn queue_editor(&mut self) {
+        if self.editor_configure_only {
+            let command = self.editor_input.trim().to_owned();
+            match parse_command_args(&command) {
+                Ok(_) => {
+                    self.settings.editor_command = Some(command);
+                    self.persist_settings();
+                    self.editor_error = None;
+                    self.mode = Mode::Settings;
+                }
+                Err(error) => self.editor_error = Some(error),
+            }
+            return;
+        }
+        let Some((repository, file)) = self.selected_file_to_edit() else {
+            self.mode = Mode::Normal;
+            self.notice = Some("Select a file to edit".to_owned());
+            return;
+        };
+        self.prepare_editor_request(self.editor_input.trim().to_owned(), repository, file);
+    }
+
+    fn open_editor_setting(&mut self) {
+        self.editor_input = self
+            .settings
+            .editor_command
+            .clone()
+            .or_else(|| std::env::var("VISUAL").ok())
+            .or_else(|| std::env::var("EDITOR").ok())
+            .unwrap_or_default();
+        self.editor_error = None;
+        self.editor_configure_only = true;
+        self.mode = Mode::Editor;
+    }
+
+    fn prepare_editor_request(&mut self, command: String, repository: PathBuf, file: PathBuf) {
+        match parse_command_args(&command) {
+            Ok(command_args) => {
+                self.settings.editor_command = Some(command);
+                self.persist_settings();
+                self.editor_error = None;
+                self.editor_request = Some(EditorRequest {
+                    command: command_args,
+                    file: repository.join(file),
+                    repository,
+                });
+                self.mode = Mode::Normal;
+            }
+            Err(error) => {
+                self.editor_error = Some(error);
+                self.mode = Mode::Editor;
+            }
+        }
+    }
+
+    fn selected_file_to_edit(&self) -> Option<(PathBuf, PathBuf)> {
+        if self.view != View::Changes || self.changes.history_focused {
+            return None;
+        }
+        let repo = self.repository()?;
+        let path = match self.changes.pane {
+            LeftPane::Worktree => {
+                let index = self.changes.selected_change_index(repo)?;
+                repo.changes.get(index)?.path.as_str()
+            }
+            LeftPane::Files => self.changes.selected_explorer_file_path(repo)?,
+        };
+        Some((repo.root.clone(), PathBuf::from(path)))
+    }
+
+    pub(crate) fn take_editor_request(&mut self) -> Option<EditorRequest> {
+        self.editor_request.take()
+    }
+
+    pub(crate) fn editor_finished(&mut self, result: Result<(), String>) {
+        let error = result.err();
+        self.reload();
+        if let Some(error) = error {
+            self.notice = Some(error);
+        }
+    }
+
     fn open_actions(&mut self) {
         if self.repository().is_none() {
             self.notice = Some("Open a repository first".to_owned());
@@ -1238,8 +1508,8 @@ impl App {
         if action == ActionId::Commit {
             self.view = View::Changes;
             self.set_left_pane(LeftPane::Worktree);
-            if self.commit_message.trim().is_empty() {
-                self.mode = Mode::Commit;
+            if self.commit_input.text().trim().is_empty() {
+                self.focus_commit();
             } else {
                 self.start_commit();
             }
@@ -1413,11 +1683,22 @@ impl App {
         let _ = self.session.start_mutation(mutation);
     }
 
-    fn stage_hunk(&mut self, index: usize) {
+    fn stage_hunk(&mut self, index: usize, preserve_selection: bool) {
         let patch = self.changes.diff.clone();
-        let _ = self
+        let path = preserve_selection
+            .then(|| {
+                let repo = self.repository()?;
+                let index = self.changes.selected_change_index(repo)?;
+                Some(repo.changes.get(index)?.path.clone())
+            })
+            .flatten();
+        let started = self
             .session
             .start_mutation(Mutation::StageHunk { patch, index });
+        if started && let Some(path) = path {
+            self.changes
+                .preserve_hunk_selection_after_stage(path, index);
+        }
     }
 
     fn stage_all(&mut self) {
@@ -1492,7 +1773,7 @@ impl App {
             self.notice = Some("Another Git operation is already running".to_owned());
             return;
         }
-        let message = self.commit_message.trim().to_owned();
+        let message = self.commit_input.text().trim().to_owned();
         if message.is_empty() {
             self.notice = Some("Commit message cannot be empty".to_owned());
             return;
@@ -1500,6 +1781,11 @@ impl App {
         if self.session.start_commit(message) {
             self.mode = Mode::Normal;
         }
+    }
+
+    fn focus_commit(&mut self) {
+        self.mode = Mode::Commit;
+        self.commit_input.focus();
     }
 }
 
@@ -1543,6 +1829,10 @@ fn load_settings(path: &Path) -> Settings {
                     settings.history_height = height.clamp(3, 256);
                 }
             }
+            "editor_command" => {
+                let command = value.trim();
+                settings.editor_command = (!command.is_empty()).then(|| command.to_owned());
+            }
             _ => {}
         }
     }
@@ -1556,11 +1846,12 @@ fn save_settings(path: &Path, settings: &Settings) -> std::io::Result<()> {
     fs::write(
         path,
         format!(
-            "auto_fetch={}\nfetch_interval_minutes={}\nworktree_width={}\nhistory_height={}\n",
+            "auto_fetch={}\nfetch_interval_minutes={}\nworktree_width={}\nhistory_height={}\neditor_command={}\n",
             settings.auto_fetch,
             settings.fetch_interval_minutes,
             settings.worktree_width,
-            settings.history_height
+            settings.history_height,
+            settings.editor_command.as_deref().unwrap_or_default()
         ),
     )
 }
@@ -1604,6 +1895,7 @@ mod tests {
             fetch_interval_minutes: 17,
             worktree_width: 61,
             history_height: 9,
+            editor_command: Some("code --wait".to_owned()),
         };
 
         save_settings(&path, &settings).unwrap();
@@ -1633,6 +1925,10 @@ mod tests {
         assert_eq!(app.view, View::Graph);
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.view, View::Changes);
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert_eq!(app.changes.pane, LeftPane::Files);
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert_eq!(app.changes.pane, LeftPane::Worktree);
 
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
         assert_eq!(app.mode, Mode::Settings);
@@ -1646,8 +1942,19 @@ mod tests {
                 fetch_interval_minutes: 6,
                 worktree_width: 38,
                 history_height: 7,
+                editor_command: None,
             }
         );
+        assert_eq!(load_settings(&path), app.settings);
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Editor);
+        assert!(app.editor_configure_only);
+        app.editor_input.clear();
+        app.handle_paste("nvim");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Settings);
+        assert_eq!(app.settings.editor_command.as_deref(), Some("nvim"));
         assert_eq!(load_settings(&path), app.settings);
 
         app.mode = Mode::Normal;
@@ -1715,10 +2022,10 @@ mod tests {
 
         let mut app = App::new(root.to_path_buf());
         app.mode = Mode::Commit;
-        app.commit_message = "commit from control enter".to_owned();
+        app.commit_input.set("commit from control enter");
         app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
         assert!(app.commit_running());
-        assert_eq!(app.commit_message, "commit from control enter");
+        assert_eq!(app.commit_input.text(), "commit from control enter");
 
         for _ in 0..100 {
             thread::sleep(Duration::from_millis(10));
@@ -1728,7 +2035,7 @@ mod tests {
             }
         }
         assert!(!app.commit_running());
-        assert!(app.commit_message.is_empty());
+        assert!(app.commit_input.is_empty());
         assert_eq!(app.repository().unwrap().commits.len(), 2);
     }
 
@@ -1741,7 +2048,7 @@ mod tests {
         run_git(root, &["add", "next.txt"]);
 
         let mut app = App::new(root.to_path_buf());
-        app.commit_message = "commit from actions".to_owned();
+        app.commit_input.set("commit from actions");
         app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -1754,8 +2061,101 @@ mod tests {
             }
         }
         assert!(!app.commit_running());
-        assert!(app.commit_message.is_empty());
+        assert!(app.commit_input.is_empty());
         assert_eq!(app.repository().unwrap().commits.len(), 2);
+    }
+
+    #[test]
+    fn keeps_hunk_mode_on_the_next_hunk_after_staging() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        initialize_repository(root);
+        let baseline = (1..=20)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>();
+        fs::write(
+            root.join("tracked.txt"),
+            format!("{}\n", baseline.join("\n")),
+        )
+        .unwrap();
+        run_git(root, &["add", "tracked.txt"]);
+        run_git(root, &["commit", "-m", "expand fixture"]);
+
+        let mut edited = baseline;
+        edited[1] = "changed first".to_owned();
+        edited[18] = "changed second".to_owned();
+        fs::write(root.join("tracked.txt"), format!("{}\n", edited.join("\n"))).unwrap();
+        let mut app = App::new(root.to_path_buf());
+        for _ in 0..100 {
+            let _ = app.poll_worker();
+            if app.changes.diff.matches("@@").count() == 2 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.changes.hunk_selection, Some(0));
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert_eq!(app.changes.hunk_selection, Some(0));
+
+        for _ in 0..200 {
+            let _ = app.poll_worker();
+            let repo = app.repository().unwrap();
+            let split_change = repo
+                .changes
+                .iter()
+                .any(|change| change.path == "tracked.txt" && change.staged)
+                && repo
+                    .changes
+                    .iter()
+                    .any(|change| change.path == "tracked.txt" && !change.staged);
+            if split_change
+                && app.changes.hunk_selection == Some(0)
+                && app.changes.diff.contains("changed second")
+                && !app.changes.diff.contains("changed first")
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        assert_eq!(app.changes.hunk_selection, Some(0));
+        assert!(app.changes.diff.contains("changed second"));
+        assert!(!app.changes.diff.contains("changed first"));
+    }
+
+    #[test]
+    fn configures_and_requests_an_interactive_editor() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        initialize_repository(root);
+        fs::write(root.join("tracked.txt"), "edited\n").unwrap();
+        let settings_path = root.join(".git/gitui-editor-test-config");
+        let mut app = App::new(root.to_path_buf());
+        app.settings.editor_command = None;
+        app.settings_path = Some(settings_path.clone());
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Editor);
+        app.editor_input.clear();
+        app.handle_paste("code --wait");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let request = app.take_editor_request().unwrap();
+        assert_eq!(request.command, ["code", "--wait"]);
+        assert_eq!(request.file, root.join("tracked.txt"));
+        assert_eq!(request.repository, root);
+        assert_eq!(app.settings.editor_command.as_deref(), Some("code --wait"));
+        assert!(
+            fs::read_to_string(settings_path)
+                .unwrap()
+                .contains("editor_command=code --wait")
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('E'), KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Editor);
+        assert_eq!(app.editor_input, "code --wait");
     }
 
     #[test]
