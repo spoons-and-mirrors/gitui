@@ -6,6 +6,9 @@ use unicode_width::UnicodeWidthStr;
 
 use super::palette;
 
+mod syntax;
+use syntax::syntax_spans;
+
 pub(super) fn styled_source(source: &str, path: &str, width: usize) -> Vec<Line<'static>> {
     styled_source_window(source, path, width, 0, usize::MAX)
 }
@@ -286,134 +289,6 @@ fn finish_line(mut spans: Vec<Span<'static>>, width: usize, background: Color) -
         spans.push(Span::raw(" ".repeat(width - used)));
     }
     Line::from(spans).style(Style::default().bg(background))
-}
-
-fn syntax_spans(code: &str, path: &str) -> Vec<Span<'static>> {
-    let hash_comments = matches!(
-        path.rsplit('.').next().unwrap_or_default(),
-        "py" | "rb" | "sh" | "bash" | "zsh" | "toml" | "yaml" | "yml"
-    );
-    let mut spans = Vec::new();
-    let mut cursor = 0;
-    while cursor < code.len() {
-        let rest = &code[cursor..];
-        if rest.starts_with("//") || (hash_comments && rest.starts_with('#')) {
-            spans.push(Span::styled(
-                rest.to_owned(),
-                Style::default().fg(palette().faint),
-            ));
-            break;
-        }
-        let character = rest.chars().next().expect("nonempty remainder");
-        if character == '"' || character == '\'' {
-            let mut escaped = false;
-            let mut end = character.len_utf8();
-            for next in rest[character.len_utf8()..].chars() {
-                end += next.len_utf8();
-                if next == character && !escaped {
-                    break;
-                }
-                escaped = next == '\\' && !escaped;
-                if next != '\\' {
-                    escaped = false;
-                }
-            }
-            spans.push(Span::styled(
-                rest[..end].to_owned(),
-                Style::default().fg(palette().yellow),
-            ));
-            cursor += end;
-            continue;
-        }
-        if character.is_alphanumeric() || character == '_' {
-            let end = rest
-                .char_indices()
-                .find_map(|(index, next)| {
-                    (!(next.is_alphanumeric() || next == '_')).then_some(index)
-                })
-                .unwrap_or(rest.len());
-            let token = &rest[..end];
-            let following = rest[end..].trim_start();
-            let color = if is_keyword(token) {
-                palette().purple
-            } else if token.chars().all(|next| next.is_ascii_digit()) {
-                palette().orange
-            } else if token.chars().next().is_some_and(char::is_uppercase)
-                || following.starts_with('(')
-            {
-                palette().cyan
-            } else {
-                palette().ink
-            };
-            spans.push(Span::styled(token.to_owned(), Style::default().fg(color)));
-            cursor += end;
-            continue;
-        }
-        let (token, color) =
-            if rest.starts_with("::") || rest.starts_with("->") || rest.starts_with("=>") {
-                (&rest[..2], palette().cyan)
-            } else {
-                (&rest[..character.len_utf8()], palette().ink)
-            };
-        spans.push(Span::styled(token.to_owned(), Style::default().fg(color)));
-        cursor += token.len();
-    }
-    spans
-}
-
-fn is_keyword(token: &str) -> bool {
-    matches!(
-        token,
-        "as" | "async"
-            | "await"
-            | "break"
-            | "class"
-            | "const"
-            | "continue"
-            | "crate"
-            | "def"
-            | "do"
-            | "else"
-            | "enum"
-            | "export"
-            | "extern"
-            | "false"
-            | "fn"
-            | "for"
-            | "from"
-            | "function"
-            | "if"
-            | "impl"
-            | "import"
-            | "in"
-            | "interface"
-            | "let"
-            | "loop"
-            | "match"
-            | "mod"
-            | "move"
-            | "mut"
-            | "new"
-            | "none"
-            | "null"
-            | "pub"
-            | "ref"
-            | "return"
-            | "self"
-            | "static"
-            | "struct"
-            | "super"
-            | "throw"
-            | "trait"
-            | "true"
-            | "try"
-            | "type"
-            | "use"
-            | "var"
-            | "where"
-            | "while"
-            | "yield"
-    )
 }
 
 #[cfg(test)]
