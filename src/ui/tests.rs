@@ -749,6 +749,54 @@ fn toggles_worktree_directories_with_the_mouse() {
 }
 
 #[test]
+fn colors_changed_files_in_the_files_view() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    run_git(root, &["config", "user.name", "Render Test"]);
+    run_git(root, &["config", "user.email", "render@example.com"]);
+    fs::write(root.join("modified.txt"), "original\n").unwrap();
+    fs::write(root.join("deleted.txt"), "deleted\n").unwrap();
+    run_git(root, &["add", "."]);
+    run_git(root, &["commit", "-m", "initial commit"]);
+
+    fs::write(root.join("modified.txt"), "changed\n").unwrap();
+    fs::write(root.join("added.txt"), "added\n").unwrap();
+    run_git(root, &["add", "added.txt"]);
+    fs::write(root.join("new.txt"), "new\n").unwrap();
+    run_git(root, &["rm", "deleted.txt"]);
+    fs::write(root.join("deleted.txt"), "replacement\n").unwrap();
+
+    let mut app = App::new(root.to_path_buf());
+    app.changes.pane = LeftPane::Files;
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let list = app.regions.explorer_list.unwrap();
+    let rows = app.changes.explorer_rows();
+    let repo = app.repository().unwrap();
+    for (path, expected) in [
+        ("added.txt", super::palette().accent),
+        ("deleted.txt", super::palette().red),
+        ("modified.txt", super::palette().yellow),
+        ("new.txt", super::palette().green),
+    ] {
+        let row_index = rows
+            .iter()
+            .position(|row| {
+                row.file_index
+                    .and_then(|index| repo.files.get(index))
+                    .is_some_and(|file| file == path)
+            })
+            .unwrap();
+        let row = &rows[row_index];
+        let x = list.x + row.prefix.chars().count() as u16;
+        let y = list.y + row_index.saturating_sub(app.changes.explorer_scroll) as u16;
+        assert_eq!(terminal.backend().buffer()[(x, y)].fg, expected, "{path}");
+    }
+}
+
+#[test]
 fn selects_visible_text_and_suppresses_clicks_after_dragging() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();

@@ -585,7 +585,13 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
             .skip(app.changes.explorer_scroll)
             .take(viewport)
             .map(|(index, row)| {
-                let item = explorer_item(row, usize::from(list_area.width));
+                let repo = app.repository().expect("checked above");
+                let item = explorer_item(
+                    row,
+                    &repo.files,
+                    &repo.changes,
+                    usize::from(list_area.width),
+                );
                 if app.changes.explorer_state.selected() == Some(index) {
                     item.style(Style::default().bg(palette().selected))
                 } else {
@@ -1028,7 +1034,12 @@ fn worktree_item<'a>(row: &'a WorktreeRow, changes: &'a [Change], width: usize) 
     ListItem::new(Line::from(spans))
 }
 
-fn explorer_item(row: &ExplorerRow, width: usize) -> ListItem<'static> {
+fn explorer_item(
+    row: &ExplorerRow,
+    files: &[String],
+    changes: &[Change],
+    width: usize,
+) -> ListItem<'static> {
     if row.file_index.is_none() {
         let marker = if row.directory_expanded == Some(false) {
             "▸ "
@@ -1040,10 +1051,44 @@ fn explorer_item(row: &ExplorerRow, width: usize) -> ListItem<'static> {
             folder_style(),
         ));
     }
-    ListItem::new(Line::styled(
-        truncate_width(&format!("{}{}", row.prefix, row.label), width),
-        Style::default().fg(palette().ink),
-    ))
+    let prefix = truncate_width(&row.prefix, width);
+    let label_width = width.saturating_sub(UnicodeWidthStr::width(prefix.as_str()));
+    let label = truncate_width(&row.label, label_width);
+    let color = row
+        .file_index
+        .and_then(|index| files.get(index))
+        .and_then(|path| explorer_file_color(path, changes))
+        .unwrap_or(palette().ink);
+    ListItem::new(Line::from(vec![
+        Span::styled(prefix, Style::default().fg(palette().ink)),
+        Span::styled(label, Style::default().fg(color)),
+    ]))
+}
+
+fn explorer_file_color(path: &str, changes: &[Change]) -> Option<ratatui::style::Color> {
+    let code = changes
+        .iter()
+        .filter(|change| change.path == path)
+        .map(|change| change.code)
+        .min_by_key(|code| match code {
+            'D' | 'U' => 0,
+            '?' => 1,
+            'A' => 2,
+            'R' => 3,
+            'C' => 4,
+            'M' => 5,
+            'T' => 6,
+            _ => 7,
+        })?;
+    Some(match code {
+        'D' | 'U' => palette().red,
+        '?' => palette().green,
+        'A' => palette().accent,
+        'R' => palette().purple,
+        'C' => palette().cyan,
+        'M' => palette().yellow,
+        _ => palette().orange,
+    })
 }
 
 fn folder_style() -> Style {
