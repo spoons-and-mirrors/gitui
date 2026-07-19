@@ -1010,6 +1010,17 @@ mod tests {
         assert!(!staged.contains("changed second"));
         assert!(!unstaged.contains("changed first"));
         assert!(unstaged.contains("changed second"));
+        let changes = load(root).unwrap().changes;
+        assert!(
+            changes
+                .iter()
+                .any(|change| change.path == "split.txt" && change.staged)
+        );
+        assert!(
+            changes
+                .iter()
+                .any(|change| change.path == "split.txt" && !change.staged)
+        );
     }
 
     #[cfg(test)]

@@ -194,7 +194,9 @@ fn renders_every_primary_surface() {
     assert!(!unstaged_screen.contains("[ ]"));
     let status = app.regions.worktree_status.unwrap();
     assert_eq!(status.width, 2);
-    click(&mut app, status.x, status.y);
+    let selected = app.changes.worktree_state.selected().unwrap();
+    let selected_y = status.y + (selected - app.changes.worktree_scroll) as u16;
+    click(&mut app, status.x, selected_y);
     wait_for(&mut app, |app| {
         app.repository()
             .unwrap()
@@ -214,8 +216,13 @@ fn renders_every_primary_surface() {
         1
     );
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let rows = app.changes.worktree_rows(app.repository().unwrap());
+    assert_eq!(rows[0].label, "STAGED  1");
+    assert!(rows.iter().any(|row| row.label.starts_with("UNSTAGED  ")));
     let status = app.regions.worktree_status.unwrap();
-    click(&mut app, status.x, status.y);
+    let selected = app.changes.worktree_state.selected().unwrap();
+    let selected_y = status.y + (selected - app.changes.worktree_scroll) as u16;
+    click(&mut app, status.x, selected_y);
     wait_for(&mut app, |app| {
         app.repository()
             .unwrap()
@@ -306,7 +313,7 @@ fn renders_every_primary_surface() {
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let worktree = app.regions.worktree_list.unwrap();
-    click(&mut app, worktree.x + 2, worktree.y);
+    click(&mut app, worktree.x + 2, worktree.y + 1);
     wait_for_preview(&mut app);
     assert_eq!(app.changes.history_state.selected(), None);
     assert!(!app.changes.history_focused);
@@ -329,6 +336,9 @@ fn renders_every_primary_surface() {
             .iter()
             .any(|change| change.path == "tracked.txt" && change.staged)
     });
+    let rows = app.changes.worktree_rows(app.repository().unwrap());
+    assert!(rows.iter().any(|row| row.label.starts_with("STAGED  ")));
+    assert!(rows.iter().any(|row| row.label.starts_with("UNSTAGED  ")));
 
     app.changes.diff = (0..100)
         .map(|line| format!("+scrollbar line {line}"))
@@ -572,21 +582,21 @@ fn toggles_worktree_directories_with_the_mouse() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(
         app.changes.worktree_rows(app.repository().unwrap()).len(),
-        2
+        3
     );
 
     let worktree = app.regions.worktree_list.unwrap();
-    click(&mut app, worktree.x + 1, worktree.y);
+    click(&mut app, worktree.x + 1, worktree.y + 1);
     let rows = app.changes.worktree_rows(app.repository().unwrap());
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].directory_expanded, Some(false));
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[1].directory_expanded, Some(false));
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let worktree = app.regions.worktree_list.unwrap();
-    click(&mut app, worktree.x + 1, worktree.y);
+    click(&mut app, worktree.x + 1, worktree.y + 1);
     assert_eq!(
         app.changes.worktree_rows(app.repository().unwrap()).len(),
-        2
+        3
     );
 }
 

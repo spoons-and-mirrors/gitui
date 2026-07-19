@@ -10,6 +10,13 @@ pub(crate) struct WorktreeRow {
     pub(crate) change_index: Option<usize>,
     pub(crate) directory_path: Option<String>,
     pub(crate) directory_expanded: Option<bool>,
+    pub(crate) section: Option<WorktreeSection>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorktreeSection {
+    Staged,
+    Unstaged,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,14 +36,46 @@ struct Node {
 }
 
 pub(crate) fn build_worktree(changes: &[Change], collapsed: &HashSet<String>) -> Vec<WorktreeRow> {
-    let mut root = Node::default();
-    for (index, change) in changes.iter().enumerate() {
-        insert_path(&mut root, &change.path, index);
-    }
-
     let mut rows = Vec::new();
-    flatten_worktree(&root, "", &[], true, collapsed, &mut rows);
+    append_worktree_section(changes, collapsed, WorktreeSection::Staged, &mut rows);
+    append_worktree_section(changes, collapsed, WorktreeSection::Unstaged, &mut rows);
     rows
+}
+
+fn append_worktree_section(
+    changes: &[Change],
+    collapsed: &HashSet<String>,
+    section: WorktreeSection,
+    rows: &mut Vec<WorktreeRow>,
+) {
+    let mut root = Node::default();
+    let mut count = 0;
+    for (index, change) in changes.iter().enumerate() {
+        let belongs = match section {
+            WorktreeSection::Staged => change.staged,
+            WorktreeSection::Unstaged => !change.staged,
+        };
+        if belongs {
+            insert_path(&mut root, &change.path, index);
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return;
+    }
+    rows.push(WorktreeRow {
+        prefix: String::new(),
+        label: match section {
+            WorktreeSection::Staged => format!("STAGED  {count}"),
+            WorktreeSection::Unstaged => format!("UNSTAGED  {count}"),
+        },
+        depth: 0,
+        change_index: None,
+        directory_path: None,
+        directory_expanded: None,
+        section: Some(section),
+    });
+    flatten_worktree(&root, "", &[], true, collapsed, rows);
 }
 
 pub(crate) fn build_file_tree(files: &[String], collapsed: &HashSet<String>) -> Vec<ExplorerRow> {
@@ -146,6 +185,7 @@ fn flatten_worktree(
                     change_index: Some(*change_index),
                     directory_path: None,
                     directory_expanded: None,
+                    section: None,
                 });
             }
         } else {
@@ -169,6 +209,7 @@ fn flatten_worktree(
                 change_index: None,
                 directory_path: Some(path.clone()),
                 directory_expanded: Some(expanded),
+                section: None,
             });
             if expanded {
                 let mut child_lineage = lineage.to_vec();
@@ -212,6 +253,7 @@ mod tests {
         assert_eq!(
             labels,
             [
+                "UNSTAGED  3",
                 "cli/crates/sleev-tui",
                 "src",
                 "views",
@@ -221,17 +263,30 @@ mod tests {
                 "app.rs"
             ]
         );
-        assert_eq!(rows[0].prefix, " ");
-        assert_eq!(rows[1].prefix, " │ ");
-        assert_eq!(rows[2].label, "views");
-        assert_eq!(rows[4].change_index, Some(0));
-        assert_eq!(rows[3].change_index, Some(1));
-        assert_eq!(rows[6].change_index, Some(2));
+        assert_eq!(rows[0].section, Some(WorktreeSection::Unstaged));
+        assert_eq!(rows[1].prefix, " ");
+        assert_eq!(rows[2].prefix, " │ ");
+        assert_eq!(rows[3].label, "views");
+        assert_eq!(rows[5].change_index, Some(0));
+        assert_eq!(rows[4].change_index, Some(1));
+        assert_eq!(rows[7].change_index, Some(2));
 
         let collapsed = HashSet::from(["cli/crates/sleev-tui".to_owned()]);
         let rows = build_worktree(&changes, &collapsed);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].directory_expanded, Some(false));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].directory_expanded, Some(false));
+    }
+
+    #[test]
+    fn places_staged_changes_before_unstaged_changes() {
+        let mut staged = change("src/app.rs");
+        staged.staged = true;
+        let rows = build_worktree(&[change("src/app.rs"), staged], &HashSet::new());
+
+        assert_eq!(rows[0].section, Some(WorktreeSection::Staged));
+        assert_eq!(rows[2].change_index, Some(1));
+        assert_eq!(rows[3].section, Some(WorktreeSection::Unstaged));
+        assert_eq!(rows[5].change_index, Some(0));
     }
 
     #[test]

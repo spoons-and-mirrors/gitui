@@ -9,7 +9,7 @@ use ratatui::widgets::ListState;
 
 use crate::{
     git::{self, Change, RepositoryData},
-    tree::{ExplorerRow, WorktreeRow, build_file_tree, build_worktree},
+    tree::{ExplorerRow, WorktreeRow, WorktreeSection, build_file_tree, build_worktree},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,7 +58,7 @@ struct PreviewResult {
 
 pub(super) struct ChangesSelection {
     change: Option<(String, bool)>,
-    directory: Option<String>,
+    directory: Option<(String, WorktreeSection)>,
     explorer_file: Option<String>,
     explorer_directory: Option<String>,
     history_oid: Option<String>,
@@ -117,7 +117,10 @@ impl ChangesState {
                 .selected_change_index(repo)
                 .and_then(|index| repo.changes.get(index))
                 .map(|change| (change.path.clone(), change.staged)),
-            directory: self.selected_directory_path(repo),
+            directory: self.selected_directory_path(repo).and_then(|path| {
+                let section = self.selected_worktree_section()?;
+                Some((path, section))
+            }),
             explorer_file: self.selected_explorer_file_path(repo).map(str::to_owned),
             explorer_directory: self.selected_explorer_directory_path(),
             history_oid: self
@@ -141,10 +144,14 @@ impl ChangesState {
         let change_row = change_index
             .and_then(|index| self.row_for_change(repo, index))
             .or_else(|| {
-                let directory = selection.directory.as_ref()?;
+                let (directory, section) = selection.directory.as_ref()?;
                 self.worktree_rows(repo)
                     .iter()
-                    .position(|row| row.directory_path.as_ref() == Some(directory))
+                    .enumerate()
+                    .position(|(index, row)| {
+                        row.directory_path.as_ref() == Some(directory)
+                            && self.worktree_section(index) == Some(*section)
+                    })
             })
             .or_else(|| self.first_change_row(repo));
         self.worktree_state.select(change_row);
@@ -201,6 +208,19 @@ impl ChangesState {
             .clone()
     }
 
+    fn selected_worktree_section(&self) -> Option<WorktreeSection> {
+        self.worktree_state
+            .selected()
+            .and_then(|index| self.worktree_section(index))
+    }
+
+    fn worktree_section(&self, index: usize) -> Option<WorktreeSection> {
+        self.worktree_rows_cache[..=index]
+            .iter()
+            .rev()
+            .find_map(|row| row.section)
+    }
+
     pub(super) fn selected_explorer_directory_path(&self) -> Option<String> {
         let selected = self.explorer_state.selected()?;
         self.explorer_rows().get(selected)?.directory_path.clone()
@@ -220,7 +240,11 @@ impl ChangesState {
     }
 
     pub(super) fn select_worktree_row(&mut self, repo: &RepositoryData, index: usize) -> bool {
-        if index >= self.worktree_rows(repo).len() {
+        if self
+            .worktree_rows(repo)
+            .get(index)
+            .is_none_or(|row| row.section.is_some())
+        {
             return false;
         }
         self.worktree_state.select(Some(index));
@@ -287,8 +311,7 @@ impl ChangesState {
         } else if self.history_focused {
             move_list(&mut self.history_state, repo.history.len(), delta);
         } else {
-            let len = self.worktree_rows(repo).len();
-            move_list(&mut self.worktree_state, len, delta);
+            move_worktree_selection(&mut self.worktree_state, &self.worktree_rows_cache, delta);
             ensure_selection_visible(
                 &mut self.worktree_scroll,
                 self.worktree_state.selected(),
@@ -496,11 +519,14 @@ impl ChangesState {
         let Some(path) = self.selected_directory_path(repo) else {
             return;
         };
+        let Some(section) = self.selected_worktree_section() else {
+            return;
+        };
         if !self.collapsed_directories.remove(&path) {
             self.collapsed_directories.insert(path.clone());
         }
         self.rebuild_worktree_rows(Some(repo));
-        self.select_directory(repo, &path);
+        self.select_directory(repo, &path, section);
         self.refresh_diff(Some(repo));
     }
 
@@ -522,10 +548,13 @@ impl ChangesState {
             .worktree_rows(repo)
             .get(index + 1)
             .is_some_and(|child| child.depth > row.depth);
+        let section = self.worktree_section(index);
         if expanded == Some(false) {
             self.collapsed_directories.remove(&path);
             self.rebuild_worktree_rows(Some(repo));
-            self.select_directory(repo, &path);
+            if let Some(section) = section {
+                self.select_directory(repo, &path, section);
+            }
         } else if descend {
             self.worktree_state.select(Some(index + 1));
         }
@@ -544,18 +573,21 @@ impl ChangesState {
         };
         let row_depth = row.depth;
         let directory = row.directory_path.clone();
+        let section = self.worktree_section(index);
         if let Some(path) = directory
             && row.directory_expanded == Some(true)
         {
             self.collapsed_directories.insert(path.clone());
             self.rebuild_worktree_rows(Some(repo));
-            self.select_directory(repo, &path);
+            if let Some(section) = section {
+                self.select_directory(repo, &path, section);
+            }
             self.refresh_diff(Some(repo));
             return;
         }
         if let Some(parent) = self.worktree_rows(repo)[..index]
             .iter()
-            .rposition(|candidate| candidate.depth < row_depth)
+            .rposition(|candidate| candidate.section.is_none() && candidate.depth < row_depth)
         {
             self.worktree_state.select(Some(parent));
             self.refresh_diff(Some(repo));
@@ -686,11 +718,15 @@ impl ChangesState {
             .or_else(|| (!self.explorer_rows().is_empty()).then_some(0))
     }
 
-    fn select_directory(&mut self, repo: &RepositoryData, path: &str) {
+    fn select_directory(&mut self, repo: &RepositoryData, path: &str, section: WorktreeSection) {
         let row = self
             .worktree_rows(repo)
             .iter()
-            .position(|row| row.directory_path.as_deref() == Some(path));
+            .enumerate()
+            .position(|(index, row)| {
+                row.directory_path.as_deref() == Some(path)
+                    && self.worktree_section(index) == Some(section)
+            });
         self.worktree_state.select(row);
     }
 
@@ -759,6 +795,38 @@ fn move_list(state: &mut ListState, len: usize, delta: isize) {
     let current = state.selected().unwrap_or(0);
     let next = (current as isize + delta).clamp(0, len.saturating_sub(1) as isize) as usize;
     state.select(Some(next));
+}
+
+fn move_worktree_selection(state: &mut ListState, rows: &[WorktreeRow], delta: isize) {
+    if rows.is_empty() || delta == 0 {
+        return;
+    }
+    let direction = delta.signum();
+    let mut remaining = delta.unsigned_abs();
+    let mut index = state.selected().unwrap_or_else(|| {
+        if direction > 0 {
+            0
+        } else {
+            rows.len().saturating_sub(1)
+        }
+    });
+    while remaining > 0 {
+        let next = if direction > 0 {
+            (index + 1..rows.len()).find(|candidate| rows[*candidate].section.is_none())
+        } else {
+            (0..index)
+                .rev()
+                .find(|candidate| rows[*candidate].section.is_none())
+        };
+        let Some(next) = next else {
+            break;
+        };
+        index = next;
+        remaining -= 1;
+    }
+    if rows.get(index).is_some_and(|row| row.section.is_none()) {
+        state.select(Some(index));
+    }
 }
 
 fn scroll_viewport(scroll: &mut usize, len: usize, viewport: usize, delta: isize) {

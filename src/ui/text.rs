@@ -42,6 +42,10 @@ pub(super) fn styled_diff(diff: &str, path: &str, width: usize) -> Vec<Line<'sta
     styled_diff_window(diff, path, width, 0, usize::MAX)
 }
 
+pub(super) fn diff_display_line_count(diff: &str) -> usize {
+    diff.lines().count() + diff.lines().filter(|line| line.starts_with("@@")).count()
+}
+
 pub(super) fn styled_diff_window(
     diff: &str,
     path: &str,
@@ -52,128 +56,155 @@ pub(super) fn styled_diff_window(
     let numbered = width >= 72;
     let mut old_line = None;
     let mut new_line = None;
+    let end = start.saturating_add(count);
+    let mut display_index = 0;
+    let mut lines = Vec::new();
 
-    for line in diff.lines().take(start) {
-        advance_diff_line(line, &mut old_line, &mut new_line);
+    for line in diff.lines() {
+        if line.starts_with("@@") {
+            if display_index >= start && display_index < end {
+                lines.push(finish_line(Vec::new(), width, palette().panel));
+            }
+            display_index += 1;
+        }
+        if display_index >= end {
+            break;
+        }
+        if display_index >= start {
+            lines.push(styled_diff_line(
+                line,
+                path,
+                width,
+                numbered,
+                &mut old_line,
+                &mut new_line,
+            ));
+        } else {
+            advance_diff_line(line, &mut old_line, &mut new_line);
+        }
+        display_index += 1;
+    }
+    lines
+}
+
+fn styled_diff_line(
+    line: &str,
+    path: &str,
+    width: usize,
+    numbered: bool,
+    old_line: &mut Option<u32>,
+    new_line: &mut Option<u32>,
+) -> Line<'static> {
+    if line.starts_with("@@") {
+        if let Some((old, new)) = parse_hunk_lines(line) {
+            *old_line = Some(old);
+            *new_line = Some(new);
+        }
+        return finish_line(
+            vec![Span::styled(
+                line.to_owned(),
+                Style::default()
+                    .fg(palette().cyan)
+                    .add_modifier(Modifier::BOLD),
+            )],
+            width,
+            palette().surface_alt,
+        );
+    }
+    if line.starts_with("diff --git") {
+        return finish_line(
+            vec![Span::styled(
+                line.to_owned(),
+                Style::default()
+                    .fg(palette().accent)
+                    .add_modifier(Modifier::BOLD),
+            )],
+            width,
+            palette().panel,
+        );
+    }
+    if line.starts_with("index ") {
+        return finish_line(
+            vec![Span::styled(
+                line.to_owned(),
+                Style::default().fg(palette().faint),
+            )],
+            width,
+            palette().panel,
+        );
+    }
+    if line.starts_with("---") || line.starts_with("+++") {
+        let color = if line.starts_with("---") {
+            palette().red
+        } else {
+            palette().green
+        };
+        return finish_line(
+            vec![Span::styled(line.to_owned(), Style::default().fg(color))],
+            width,
+            palette().panel,
+        );
+    }
+    if line.starts_with("\\ No newline") {
+        return finish_line(
+            vec![Span::styled(
+                line.to_owned(),
+                Style::default().fg(palette().yellow),
+            )],
+            width,
+            palette().panel,
+        );
+    }
+    if line.starts_with("Untracked file:") || line.starts_with("Binary untracked file") {
+        return finish_line(
+            vec![Span::styled(
+                line.to_owned(),
+                Style::default()
+                    .fg(palette().yellow)
+                    .add_modifier(Modifier::BOLD),
+            )],
+            width,
+            palette().panel,
+        );
     }
 
-    diff.lines()
-        .skip(start)
-        .take(count)
-        .map(|line| {
-            if line.starts_with("@@") {
-                if let Some((old, new)) = parse_hunk_lines(line) {
-                    old_line = Some(old);
-                    new_line = Some(new);
-                }
-                return finish_line(
-                    vec![Span::styled(
-                        line.to_owned(),
-                        Style::default()
-                            .fg(palette().cyan)
-                            .add_modifier(Modifier::BOLD),
-                    )],
-                    width,
-                    palette().surface_alt,
-                );
-            }
-            if line.starts_with("diff --git") {
-                return finish_line(
-                    vec![Span::styled(
-                        line.to_owned(),
-                        Style::default()
-                            .fg(palette().accent)
-                            .add_modifier(Modifier::BOLD),
-                    )],
-                    width,
-                    palette().panel,
-                );
-            }
-            if line.starts_with("index ") {
-                return finish_line(
-                    vec![Span::styled(
-                        line.to_owned(),
-                        Style::default().fg(palette().faint),
-                    )],
-                    width,
-                    palette().panel,
-                );
-            }
-            if line.starts_with("---") || line.starts_with("+++") {
-                let color = if line.starts_with("---") {
-                    palette().red
-                } else {
-                    palette().green
-                };
-                return finish_line(
-                    vec![Span::styled(line.to_owned(), Style::default().fg(color))],
-                    width,
-                    palette().panel,
-                );
-            }
-            if line.starts_with("\\ No newline") {
-                return finish_line(
-                    vec![Span::styled(
-                        line.to_owned(),
-                        Style::default().fg(palette().yellow),
-                    )],
-                    width,
-                    palette().panel,
-                );
-            }
-            if line.starts_with("Untracked file:") || line.starts_with("Binary untracked file") {
-                return finish_line(
-                    vec![Span::styled(
-                        line.to_owned(),
-                        Style::default()
-                            .fg(palette().yellow)
-                            .add_modifier(Modifier::BOLD),
-                    )],
-                    width,
-                    palette().panel,
-                );
-            }
+    let (marker, payload, background, new_number) = if let Some(payload) = line.strip_prefix('+') {
+        let number = *new_line;
+        *new_line = new_line.map(|value| value + 1);
+        ("+", payload, palette().add_bg, number)
+    } else if let Some(payload) = line.strip_prefix('-') {
+        *old_line = old_line.map(|value| value + 1);
+        ("-", payload, palette().remove_bg, None)
+    } else if let Some(payload) = line.strip_prefix(' ')
+        && old_line.is_some()
+    {
+        let new = *new_line;
+        *old_line = old_line.map(|value| value + 1);
+        *new_line = new_line.map(|value| value + 1);
+        (" ", payload, palette().panel, new)
+    } else {
+        return finish_line(syntax_spans(line, path), width, palette().panel);
+    };
 
-            let (marker, payload, background, new_number) =
-                if let Some(payload) = line.strip_prefix('+') {
-                    let number = new_line;
-                    new_line = new_line.map(|value| value + 1);
-                    ("+", payload, palette().add_bg, number)
-                } else if let Some(payload) = line.strip_prefix('-') {
-                    old_line = old_line.map(|value| value + 1);
-                    ("-", payload, palette().remove_bg, None)
-                } else if let Some(payload) = line.strip_prefix(' ')
-                    && old_line.is_some()
-                {
-                    let new = new_line;
-                    old_line = old_line.map(|value| value + 1);
-                    new_line = new_line.map(|value| value + 1);
-                    (" ", payload, palette().panel, new)
-                } else {
-                    return finish_line(syntax_spans(line, path), width, palette().panel);
-                };
-
-            let mut spans = if numbered {
-                line_number(new_number)
+    let mut spans = if numbered {
+        line_number(new_number)
+    } else {
+        Vec::new()
+    };
+    spans.push(Span::styled(
+        marker.to_owned(),
+        Style::default()
+            .fg(if marker == "+" {
+                palette().green
+            } else if marker == "-" {
+                palette().red
             } else {
-                Vec::new()
-            };
-            spans.push(Span::styled(
-                marker.to_owned(),
-                Style::default()
-                    .fg(if marker == "+" {
-                        palette().green
-                    } else if marker == "-" {
-                        palette().red
-                    } else {
-                        palette().faint
-                    })
-                    .add_modifier(Modifier::BOLD),
-            ));
-            spans.extend(syntax_spans(payload, path));
-            finish_line(spans, width, background)
-        })
-        .collect()
+                palette().faint
+            })
+            .add_modifier(Modifier::BOLD),
+    ));
+    spans.extend(syntax_spans(payload, path));
+    finish_line(spans, width, background)
 }
 
 fn advance_diff_line(line: &str, old_line: &mut Option<u32>, new_line: &mut Option<u32>) {
@@ -374,13 +405,20 @@ mod tests {
             100,
         );
 
-        assert_eq!(lines[0].style.bg, Some(palette().surface_alt));
-        assert_eq!(lines[1].style.bg, Some(palette().remove_bg));
-        assert_eq!(lines[2].style.bg, Some(palette().add_bg));
-        assert!(lines[1].spans[0].content.trim().is_empty());
-        assert_eq!(lines[2].spans[0].content.trim(), "1");
+        assert_eq!(lines.len(), 4);
         assert!(
-            lines[2]
+            lines[0]
+                .spans
+                .iter()
+                .all(|span| span.content.trim().is_empty())
+        );
+        assert_eq!(lines[1].style.bg, Some(palette().surface_alt));
+        assert_eq!(lines[2].style.bg, Some(palette().remove_bg));
+        assert_eq!(lines[3].style.bg, Some(palette().add_bg));
+        assert!(lines[2].spans[0].content.trim().is_empty());
+        assert_eq!(lines[3].spans[0].content.trim(), "1");
+        assert!(
+            lines[3]
                 .spans
                 .iter()
                 .any(|span| span.content == "let" && span.style.fg == Some(palette().purple))

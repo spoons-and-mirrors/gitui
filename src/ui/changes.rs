@@ -10,12 +10,15 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     app::{App, DiffHunkRegion, LeftPane, Mode},
     git::Change,
-    tree::{ExplorerRow, WorktreeRow},
+    tree::{ExplorerRow, WorktreeRow, WorktreeSection},
 };
 
 use super::{
     fill, history, palette,
-    text::{styled_diff, styled_diff_window, styled_source, styled_source_window},
+    text::{
+        diff_display_line_count, styled_diff, styled_diff_window, styled_source,
+        styled_source_window,
+    },
     truncate_width,
 };
 
@@ -624,7 +627,11 @@ fn prepare_preview_lines(
         return (lines, None);
     }
 
-    let height = app.changes.diff.lines().count();
+    let height = if is_diff {
+        diff_display_line_count(&app.changes.diff)
+    } else {
+        app.changes.diff.lines().count()
+    };
     let max_scroll = height.saturating_sub(usize::from(body.height));
     app.changes.diff_scroll = app
         .changes
@@ -717,20 +724,34 @@ fn visible_hunk_rows(
 ) -> Vec<(usize, u16)> {
     let top = usize::from(scroll);
     let bottom = top.saturating_add(usize::from(body.height));
-    let mut rendered_row = if wrapped { 0 } else { top };
+    let mut rendered_row: usize = 0;
+    let mut styled_index = 0;
     let mut hunk_index = 0;
     let mut rows = Vec::new();
 
-    for (line_index, line) in diff.lines().enumerate() {
-        let row = if wrapped { rendered_row } else { line_index };
+    for line in diff.lines() {
         if line.starts_with("@@") {
+            if wrapped {
+                let Some(blank) = styled.get(styled_index) else {
+                    break;
+                };
+                rendered_row = rendered_row.saturating_add(rendered_text_height(
+                    std::slice::from_ref(blank),
+                    usize::from(body.width),
+                    true,
+                ));
+                styled_index += 1;
+            } else {
+                rendered_row += 1;
+            }
+            let row = rendered_row;
             if row >= top && row < bottom {
                 rows.push((hunk_index, body.y.saturating_add((row - top) as u16)));
             }
             hunk_index += 1;
         }
         if wrapped {
-            let Some(line) = styled.get(line_index) else {
+            let Some(line) = styled.get(styled_index) else {
                 break;
             };
             rendered_row = rendered_row.saturating_add(rendered_text_height(
@@ -738,6 +759,9 @@ fn visible_hunk_rows(
                 usize::from(body.width),
                 true,
             ));
+            styled_index += 1;
+        } else {
+            rendered_row += 1;
         }
     }
     rows
@@ -763,6 +787,19 @@ fn draw_hunk_actions(frame: &mut Frame<'_>, app: &mut App, body: Rect, rows: Vec
 }
 
 fn worktree_item<'a>(row: &'a WorktreeRow, changes: &'a [Change], width: usize) -> ListItem<'a> {
+    if let Some(section) = row.section {
+        let color = match section {
+            WorktreeSection::Staged => palette().green,
+            WorktreeSection::Unstaged => palette().yellow,
+        };
+        return ListItem::new(Line::styled(
+            truncate_width(&format!(" {}", row.label), width),
+            Style::default()
+                .fg(color)
+                .bg(palette().surface_alt)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     let Some(change_index) = row.change_index else {
         let marker = if row.directory_expanded == Some(false) {
             "▸ "
