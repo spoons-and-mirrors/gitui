@@ -139,6 +139,7 @@ pub struct App {
     pub mode: Mode,
     pub changes: ChangesState,
     pub graph_state: TableState,
+    pub(crate) graph_scroll_to_selection: bool,
     pub(crate) commit_input: TextInput,
     pub dragging_splitter: bool,
     pub dragging_history: bool,
@@ -215,6 +216,7 @@ impl App {
             mode,
             changes,
             graph_state,
+            graph_scroll_to_selection: true,
             commit_input: TextInput::default(),
             dragging_splitter: false,
             dragging_history: false,
@@ -420,16 +422,21 @@ impl App {
             return;
         }
 
-        if mouse.kind == MouseEventKind::Moved && self.changes.hunk_selection.is_some() {
-            if let Some(hunk) = self
-                .regions
-                .diff_hunks
-                .iter()
-                .find(|hunk| hunk.rect.contains(point))
-            {
-                self.changes.select_hunk(hunk.index);
+        if mouse.kind == MouseEventKind::Moved {
+            if self.select_graph_row(point) {
+                return;
             }
-            return;
+            if self.changes.hunk_selection.is_some() {
+                if let Some(hunk) = self
+                    .regions
+                    .diff_hunks
+                    .iter()
+                    .find(|hunk| hunk.rect.contains(point))
+                {
+                    self.changes.select_hunk(hunk.index);
+                }
+                return;
+            }
         }
 
         if self.mode == Mode::Commit
@@ -902,6 +909,7 @@ impl App {
             return false;
         }
         self.graph_state.select(Some(index));
+        self.graph_scroll_to_selection = false;
         true
     }
 
@@ -934,8 +942,18 @@ impl App {
             .graph_table
             .is_some_and(|rect| rect.contains(point))
         {
-            self.move_selection(delta);
+            self.scroll_graph(delta.saturating_mul(3));
         }
+    }
+
+    fn scroll_graph(&mut self, delta: isize) {
+        let viewport = self
+            .regions
+            .graph_table
+            .map_or(0, |rect| usize::from(rect.height));
+        let len = self.repository().map_or(0, |repo| repo.commits.len());
+        scroll_table(&mut self.graph_state, len, viewport, delta);
+        self.graph_scroll_to_selection = false;
     }
 
     fn scroll_worktree(&mut self, delta: isize) {
@@ -1076,6 +1094,7 @@ impl App {
                         .to_owned(),
                     );
                     self.graph_state = TableState::default();
+                    self.graph_scroll_to_selection = true;
                     self.changes.reset_repository(self.session.data());
                     self.file_search.reindex(
                         self.session
@@ -1102,6 +1121,7 @@ impl App {
                         });
                         self.graph_state
                             .select(commit_index.or_else(|| repo.commits.first().map(|_| 0)));
+                        self.graph_scroll_to_selection = true;
                         self.changes.restore_selection(repo, selection);
                     }
                     if let Some(repo) = self.session.data() {
@@ -1143,6 +1163,19 @@ impl App {
     }
 
     fn handle_normal(&mut self, key: KeyEvent) {
+        if matches!(key.code, KeyCode::Esc | KeyCode::Tab)
+            && self.view == View::Graph
+            && self.graph_commit_open
+        {
+            self.graph_commit_open = false;
+            return;
+        }
+        if key.code == KeyCode::Char('f') && self.view == View::Graph {
+            self.view = View::Changes;
+            self.graph_commit_open = false;
+            self.set_left_pane(LeftPane::Files);
+            return;
+        }
         if let Some(index) = self.changes.hunk_selection {
             match key.code {
                 KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc => {
@@ -1158,9 +1191,6 @@ impl App {
             return;
         }
         match key.code {
-            KeyCode::Esc if self.view == View::Graph && self.graph_commit_open => {
-                self.graph_commit_open = false;
-            }
             KeyCode::Char('q') if self.commit_running() || self.session.command_running() => {
                 self.notice = Some("A Git operation is still running".to_owned())
             }
@@ -1809,6 +1839,7 @@ impl App {
             View::Graph => {
                 let len = self.repository().map_or(0, |repo| repo.commits.len());
                 move_table(&mut self.graph_state, len, delta);
+                self.graph_scroll_to_selection = true;
             }
         }
     }
@@ -1830,11 +1861,14 @@ impl App {
                     explorer_viewport,
                 );
             }
-            View::Graph => self.graph_state.select(
-                self.repository()
-                    .is_some_and(|repo| !repo.commits.is_empty())
-                    .then_some(0),
-            ),
+            View::Graph => {
+                self.graph_state.select(
+                    self.repository()
+                        .is_some_and(|repo| !repo.commits.is_empty())
+                        .then_some(0),
+                );
+                self.graph_scroll_to_selection = true;
+            }
         }
     }
 
@@ -1852,10 +1886,13 @@ impl App {
                 self.changes
                     .select_last(self.session.data(), worktree_viewport, explorer_viewport);
             }
-            View::Graph => self.graph_state.select(
-                self.repository()
-                    .and_then(|repo| repo.commits.len().checked_sub(1)),
-            ),
+            View::Graph => {
+                self.graph_state.select(
+                    self.repository()
+                        .and_then(|repo| repo.commits.len().checked_sub(1)),
+                );
+                self.graph_scroll_to_selection = true;
+            }
         }
     }
 
@@ -2087,11 +2124,29 @@ fn move_table(state: &mut TableState, len: usize, delta: isize) {
     state.select(Some(next));
 }
 
+fn scroll_table(state: &mut TableState, len: usize, viewport: usize, delta: isize) {
+    let maximum = len.saturating_sub(viewport);
+    *state.offset_mut() = state.offset().saturating_add_signed(delta).min(maximum);
+}
+
 #[cfg(test)]
 mod tests {
     use std::{process::Command, thread};
 
     use super::*;
+
+    #[test]
+    fn graph_scrolling_moves_the_viewport_without_moving_selection() {
+        let mut state = TableState::default().with_selected(4);
+
+        scroll_table(&mut state, 20, 5, 3);
+        assert_eq!(state.selected(), Some(4));
+        assert_eq!(state.offset(), 3);
+
+        scroll_table(&mut state, 20, 5, 30);
+        assert_eq!(state.selected(), Some(4));
+        assert_eq!(state.offset(), 15);
+    }
 
     #[test]
     fn opens_a_nested_directory_as_a_local_workspace() {
@@ -2180,10 +2235,16 @@ mod tests {
         assert_eq!(app.view, View::Graph);
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.view, View::Changes);
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.graph_commit_open = true;
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert_eq!(app.view, View::Changes);
         assert_eq!(app.changes.pane, LeftPane::Files);
+        assert!(!app.graph_commit_open);
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
         assert_eq!(app.changes.pane, LeftPane::Worktree);
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert_eq!(app.changes.pane, LeftPane::Files);
 
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
         assert_eq!(app.mode, Mode::Settings);

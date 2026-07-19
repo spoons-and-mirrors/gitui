@@ -18,6 +18,7 @@ pub(super) fn draw_graph(
     frame: &mut Frame<'_>,
     repo: Option<&RepositoryData>,
     state: &mut TableState,
+    scroll_to_selection: &mut bool,
     area: Rect,
 ) -> Option<Rect> {
     let Some(repo) = repo else {
@@ -90,13 +91,14 @@ pub(super) fn draw_graph(
     let mut offset = state
         .offset()
         .min(repo.commits.len().saturating_sub(viewport));
-    if let Some(selected) = selected {
+    if *scroll_to_selection && let Some(selected) = selected {
         if selected < offset {
             offset = selected;
         } else if selected >= offset.saturating_add(viewport) {
             offset = selected.saturating_add(1).saturating_sub(viewport);
         }
     }
+    *scroll_to_selection = false;
     *state.offset_mut() = offset;
     let rows = repo
         .commits

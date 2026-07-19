@@ -3,6 +3,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 mod syntax;
@@ -95,9 +96,13 @@ pub(super) fn wrapped_preview_line_starts(
         } else {
             0
         };
-        let payload = if prefix > 0 { &line[1..] } else { line };
-        let display_width = prefix.saturating_add(UnicodeWidthStr::width(payload));
-        let line_height = display_width.max(1).div_ceil(width);
+        let payload = if is_diff && prefix > 0 {
+            &line[1..]
+        } else {
+            line
+        };
+        let content_width_available = width.saturating_sub(prefix).max(1);
+        let line_height = word_wrapped_height(payload, content_width_available);
         starts.push(
             starts
                 .last()
@@ -107,6 +112,64 @@ pub(super) fn wrapped_preview_line_starts(
         );
     }
     starts
+}
+
+fn word_wrapped_height(content: &str, width: usize) -> usize {
+    let width = width.max(1);
+    let mut tokens: Vec<(bool, Vec<usize>)> = Vec::new();
+    for grapheme in content.graphemes(true) {
+        let whitespace = grapheme.chars().all(char::is_whitespace);
+        if tokens.last().is_none_or(|token| token.0 != whitespace) {
+            tokens.push((whitespace, Vec::new()));
+        }
+        tokens
+            .last_mut()
+            .expect("token was inserted")
+            .1
+            .push(UnicodeWidthStr::width(grapheme));
+    }
+
+    let mut rows = 1_usize;
+    let mut row_width = 0_usize;
+    let mut has_word = false;
+    let mut pending_whitespace: Option<Vec<usize>> = None;
+    for (whitespace, token) in tokens {
+        if whitespace && has_word {
+            pending_whitespace = Some(token);
+            continue;
+        }
+        let token_width = token.iter().sum::<usize>();
+        let whitespace_width = pending_whitespace
+            .as_ref()
+            .map_or(0, |spaces| spaces.iter().sum());
+        if !whitespace
+            && has_word
+            && token_width <= width
+            && row_width
+                .saturating_add(whitespace_width)
+                .saturating_add(token_width)
+                > width
+        {
+            rows = rows.saturating_add(1);
+            row_width = 0;
+            pending_whitespace = None;
+        } else if let Some(spaces) = pending_whitespace.take() {
+            add_wrapped_widths(&spaces, width, &mut rows, &mut row_width);
+        }
+        add_wrapped_widths(&token, width, &mut rows, &mut row_width);
+        has_word |= !whitespace;
+    }
+    rows
+}
+
+fn add_wrapped_widths(widths: &[usize], width: usize, rows: &mut usize, row_width: &mut usize) {
+    for grapheme_width in widths {
+        if *row_width > 0 && row_width.saturating_add(*grapheme_width) > width {
+            *rows = rows.saturating_add(1);
+            *row_width = 0;
+        }
+        *row_width = row_width.saturating_add(*grapheme_width);
+    }
 }
 
 pub(super) fn styled_diff_window(
@@ -389,10 +452,23 @@ mod tests {
                 .iter()
                 .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
                 .sum::<usize>();
+            let gutter = usize::from(
+                line.spans
+                    .first()
+                    .is_some_and(|span| matches!(span.content.as_ref(), "+" | "-" | " ")),
+            );
+            let content = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            let payload = if gutter > 0 { &content[1..] } else { &content };
             assert_eq!(
                 starts[index + 1] - starts[index],
-                display_width.max(1).div_ceil(width)
+                word_wrapped_height(payload, width.saturating_sub(gutter).max(1)),
+                "styled width was {display_width}",
             );
         }
+        assert_eq!(word_wrapped_height("word committing", 11), 2);
     }
 }

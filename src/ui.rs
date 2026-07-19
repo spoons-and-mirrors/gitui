@@ -62,8 +62,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         app.regions.diff_scroll_thumb = None;
         app.regions.diff_scroll_max = 0;
         app.regions.diff_hunks.clear();
-        app.regions.graph_table =
-            history::draw_graph(frame, app.session.data(), &mut app.graph_state, graph_area);
+        app.regions.graph_table = history::draw_graph(
+            frame,
+            app.session.data(),
+            &mut app.graph_state,
+            &mut app.graph_scroll_to_selection,
+            graph_area,
+        );
     }
     draw_navigation(frame, app, layout[2]);
     match app.mode {

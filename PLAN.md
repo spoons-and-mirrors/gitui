@@ -6,7 +6,7 @@ independently testable. Numbers in parentheses are measured costs before the fix
 
 ## Implementation status
 
-W1-W8 are implemented. Verification completed with all 68 tests passing and
+W1-W8 are implemented. Verification completed with all 70 tests passing and
 Clippy clean with warnings denied. A release-mode benchmark against the implemented
 tree measured a 50.1 ms one-time construction and 16.1 us average cached flatten
 for a default-collapsed 100k-file tree, down from the 45-90 ms full rebuild on
@@ -101,7 +101,7 @@ every toggle.
   that sample, cap displayed lines, and clearly note truncation.
 
 ### W9 — Verification
-- [x] `cargo test`: 68 tests pass, including large wrapped-preview, sparse-checkout,
+- [x] `cargo test`: 70 tests pass, including wrapped-gutter, large wrapped-preview, sparse-checkout,
   ignore-rule, graph-layout, polling, and row tests.
 - [x] `cargo clippy --all-targets -- -D warnings`: clean.
 - [x] Release-mode 100k-file benchmark: one 50.1 ms tree construction per files

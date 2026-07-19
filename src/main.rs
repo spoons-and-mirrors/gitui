@@ -48,10 +48,19 @@ fn main() -> Result<()> {
                     (true, false)
                 }
                 Event::Mouse(mouse) => {
-                    let hover_before = (app.changes.hunk_selection, app.actions.selection);
+                    let hover_before = (
+                        app.changes.hunk_selection,
+                        app.actions.selection,
+                        app.graph_state.selected(),
+                    );
                     app.handle_mouse(mouse);
                     let changed = !matches!(mouse.kind, event::MouseEventKind::Moved)
-                        || hover_before != (app.changes.hunk_selection, app.actions.selection);
+                        || hover_before
+                            != (
+                                app.changes.hunk_selection,
+                                app.actions.selection,
+                                app.graph_state.selected(),
+                            );
                     (changed, false)
                 }
                 Event::Paste(text) => {

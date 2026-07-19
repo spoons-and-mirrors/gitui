@@ -1,7 +1,7 @@
 # hunkle
 
 - A collapsible worktree tree with per-file added/deleted line counts for inspecting, staging, unstaging, and committing changes.
-- A switchable repository file tree, including Git-ignored files, with read-only, syntax-colored previews.
+- A switchable repository file tree that respects Git ignore rules, with read-only, syntax-colored previews.
 - Local workspaces for browsing, searching, and previewing directories that are not Git repositories.
 - A resizable current-branch history shelf with HEAD, branch, remote, and tag decorations; selecting a commit shows its patch.
 - A repository Actions menu for committing, pushing, fetching, pulling with rebase, and running non-interactive Git commands with captured output.

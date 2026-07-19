@@ -653,6 +653,16 @@ fn renders_every_primary_surface() {
     let graph = app.regions.graph_table.unwrap();
     assert!(graph.x >= worktree.right());
     assert!(app.regions.diff.is_none());
+    let graph_offset = app.graph_state.offset();
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: graph.x + 1,
+        row: graph.y + 1,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert_eq!(app.graph_state.selected(), Some(1));
+    assert_eq!(app.graph_state.offset(), graph_offset);
+    assert!(!app.graph_commit_open);
     click(&mut app, graph.x + 1, graph.y + 1);
     assert_eq!(app.graph_state.selected(), Some(1));
     assert!(app.graph_commit_open);
@@ -670,9 +680,12 @@ fn renders_every_primary_surface() {
     assert!(commit_diff_screen.contains("initial commit"));
     assert!(app.regions.graph_table.is_none());
 
-    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.view, View::Graph);
     assert!(!app.graph_commit_open);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.graph_table.is_some());
+    assert!(app.regions.diff_hunks.is_empty());
     app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
     assert_eq!(app.graph_state.selected(), Some(0));
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));

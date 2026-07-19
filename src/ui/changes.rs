@@ -806,7 +806,7 @@ fn prepare_preview_lines(app: &mut App, body: Rect, path: &str, is_diff: bool) -
             end.saturating_sub(first),
             viewport_height,
         );
-        let lines = hard_wrap_lines(logical_lines, width, local_scroll, viewport_height);
+        let lines = hard_wrap_lines(logical_lines, width, local_scroll, viewport_height, is_diff);
         return PreparedPreview {
             lines,
             rendered_height,
@@ -891,11 +891,15 @@ fn preview_line_window(
         .collect()
 }
 
+type StyledGrapheme = (String, Style, usize);
+type WrapToken = (bool, Vec<StyledGrapheme>);
+
 fn hard_wrap_lines(
     lines: Vec<Line<'static>>,
     width: usize,
     skip: usize,
     take: usize,
+    is_diff: bool,
 ) -> Vec<Line<'static>> {
     if take == 0 {
         return Vec::new();
@@ -905,44 +909,196 @@ fn hard_wrap_lines(
     let mut rendered = 0_usize;
     for line in lines {
         let line_style = line.style;
-        let mut output_spans = Vec::new();
-        let mut output_width: usize = 0;
-        for span in line.spans {
-            let mut chunk = String::new();
+        let (gutter, prefix_spans) = line_gutter(&line, width, is_diff);
+        let mut output_spans = line.spans[..prefix_spans].to_vec();
+        let mut output_width = gutter;
+        let mut tokens: Vec<WrapToken> = Vec::new();
+        for span in &line.spans[prefix_spans..] {
             for grapheme in span.content.graphemes(true) {
                 let grapheme_width = UnicodeWidthStr::width(grapheme);
-                if output_width > 0 && output_width.saturating_add(grapheme_width) > width {
-                    if !chunk.is_empty() {
-                        output_spans.push(Span::styled(std::mem::take(&mut chunk), span.style));
-                    }
-                    if rendered >= skip {
-                        wrapped
-                            .push(Line::from(std::mem::take(&mut output_spans)).style(line_style));
-                        if wrapped.len() == take {
-                            return wrapped;
-                        }
-                    } else {
-                        output_spans.clear();
-                    }
-                    rendered = rendered.saturating_add(1);
-                    output_width = 0;
+                let whitespace = grapheme.chars().all(char::is_whitespace);
+                if tokens.last().is_none_or(|token| token.0 != whitespace) {
+                    tokens.push((whitespace, Vec::new()));
                 }
-                chunk.push_str(grapheme);
-                output_width = output_width.saturating_add(grapheme_width);
-            }
-            if !chunk.is_empty() {
-                output_spans.push(Span::styled(chunk, span.style));
+                tokens.last_mut().expect("token was inserted").1.push((
+                    grapheme.to_owned(),
+                    span.style,
+                    grapheme_width,
+                ));
             }
         }
-        if rendered >= skip {
-            wrapped.push(Line::from(output_spans).style(line_style));
-            if wrapped.len() == take {
+
+        let mut pending_whitespace = None;
+        let mut has_word = false;
+        for (whitespace, token) in tokens {
+            if whitespace && has_word {
+                pending_whitespace = Some(token);
+                continue;
+            }
+            let token_width = token.iter().map(|grapheme| grapheme.2).sum::<usize>();
+            let whitespace_width = pending_whitespace
+                .as_ref()
+                .map_or(0, |token: &Vec<StyledGrapheme>| {
+                    token.iter().map(|grapheme| grapheme.2).sum()
+                });
+            if !whitespace
+                && has_word
+                && token_width <= width.saturating_sub(gutter)
+                && output_width
+                    .saturating_add(whitespace_width)
+                    .saturating_add(token_width)
+                    > width
+            {
+                if emit_wrapped_row(
+                    &mut wrapped,
+                    &mut rendered,
+                    skip,
+                    take,
+                    &mut output_spans,
+                    line_style,
+                ) {
+                    return wrapped;
+                }
+                start_continuation(&mut output_spans, &mut output_width, gutter);
+                pending_whitespace = None;
+            } else if let Some(whitespace) = pending_whitespace.take()
+                && append_wrap_token(
+                    whitespace,
+                    &mut output_spans,
+                    &mut output_width,
+                    gutter,
+                    width,
+                    line_style,
+                    &mut wrapped,
+                    &mut rendered,
+                    skip,
+                    take,
+                )
+            {
                 return wrapped;
             }
+            if append_wrap_token(
+                token,
+                &mut output_spans,
+                &mut output_width,
+                gutter,
+                width,
+                line_style,
+                &mut wrapped,
+                &mut rendered,
+                skip,
+                take,
+            ) {
+                return wrapped;
+            }
+            has_word |= !whitespace;
         }
-        rendered = rendered.saturating_add(1);
+        if emit_wrapped_row(
+            &mut wrapped,
+            &mut rendered,
+            skip,
+            take,
+            &mut output_spans,
+            line_style,
+        ) {
+            return wrapped;
+        }
     }
     wrapped
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_wrap_token(
+    token: Vec<StyledGrapheme>,
+    output_spans: &mut Vec<Span<'static>>,
+    output_width: &mut usize,
+    gutter: usize,
+    width: usize,
+    line_style: Style,
+    wrapped: &mut Vec<Line<'static>>,
+    rendered: &mut usize,
+    skip: usize,
+    take: usize,
+) -> bool {
+    for (content, style, grapheme_width) in token {
+        if *output_width > gutter && output_width.saturating_add(grapheme_width) > width {
+            if emit_wrapped_row(wrapped, rendered, skip, take, output_spans, line_style) {
+                return true;
+            }
+            start_continuation(output_spans, output_width, gutter);
+        }
+        if let Some(last) = output_spans.last_mut()
+            && last.style == style
+        {
+            last.content.to_mut().push_str(&content);
+        } else {
+            output_spans.push(Span::styled(content, style));
+        }
+        *output_width = output_width.saturating_add(grapheme_width);
+    }
+    false
+}
+
+fn emit_wrapped_row(
+    wrapped: &mut Vec<Line<'static>>,
+    rendered: &mut usize,
+    skip: usize,
+    take: usize,
+    output_spans: &mut Vec<Span<'static>>,
+    line_style: Style,
+) -> bool {
+    if *rendered >= skip {
+        wrapped.push(Line::from(std::mem::take(output_spans)).style(line_style));
+    } else {
+        output_spans.clear();
+    }
+    *rendered = rendered.saturating_add(1);
+    wrapped.len() == take
+}
+
+fn start_continuation(
+    output_spans: &mut Vec<Span<'static>>,
+    output_width: &mut usize,
+    gutter: usize,
+) {
+    if gutter > 0 {
+        output_spans.push(Span::raw(" ".repeat(gutter)));
+    }
+    *output_width = gutter;
+}
+
+fn line_gutter(line: &Line<'_>, width: usize, is_diff: bool) -> (usize, usize) {
+    if !is_diff {
+        let gutter = line
+            .spans
+            .first()
+            .filter(|span| {
+                span.content.strip_suffix("  ").is_some_and(|prefix| {
+                    prefix.chars().count() >= 5 && prefix.trim().parse::<usize>().is_ok()
+                })
+            })
+            .map_or(0, |span| UnicodeWidthStr::width(span.content.as_ref()));
+        return if width > gutter && gutter > 0 {
+            (gutter, 1)
+        } else {
+            (0, 0)
+        };
+    }
+    let marker = |span: &Span<'_>| matches!(span.content.as_ref(), "+" | "-" | " ");
+    let (gutter, spans) = match line.spans.as_slice() {
+        [number, marker_span, ..]
+            if UnicodeWidthStr::width(number.content.as_ref()) == 5 && marker(marker_span) =>
+        {
+            (6, 2)
+        }
+        [marker_span, ..] if marker(marker_span) => (1, 1),
+        _ => (0, 0),
+    };
+    if width > gutter {
+        (gutter, spans)
+    } else {
+        (0, 0)
+    }
 }
 
 fn cached_rendered_hunk_rows(app: &mut App, wrapped: bool) -> (Vec<(usize, usize)>, usize) {
@@ -1354,4 +1510,35 @@ fn diff_scroll_thumb(
         track.width,
         thumb_height,
     )
+}
+
+#[cfg(test)]
+mod wrap_tests {
+    use super::*;
+
+    #[test]
+    fn wrapped_source_continuations_stay_after_the_line_number_gutter() {
+        let lines = vec![Line::from(vec![
+            Span::raw("    1  "),
+            Span::raw("abcdefghijklmnop"),
+        ])];
+
+        let wrapped = hard_wrap_lines(lines, 12, 0, 10, false);
+
+        assert_eq!(wrapped.len(), 4);
+        assert!(wrapped[0].spans[0].content.starts_with("    1  "));
+        assert!(
+            wrapped[1..]
+                .iter()
+                .all(|line| line.spans[0].content.starts_with("       "))
+        );
+
+        let lines = vec![Line::from(vec![
+            Span::raw("    1  "),
+            Span::raw("word committing"),
+        ])];
+        let wrapped = hard_wrap_lines(lines, 18, 0, 10, false);
+        assert_eq!(wrapped.len(), 2);
+        assert_eq!(wrapped[1].spans[0].content, "       committing");
+    }
 }
