@@ -1,9 +1,14 @@
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    sync::mpsc::{self, Receiver, Sender},
+    thread,
+};
 
 use ratatui::widgets::ListState;
 
 use crate::{
-    git::{self, RepositoryData},
+    git::{self, Change, RepositoryData},
     tree::{ExplorerRow, WorktreeRow, build_file_tree, build_worktree},
 };
 
@@ -26,7 +31,29 @@ pub struct ChangesState {
     pub(crate) history_focused: bool,
     pub(crate) collapsed_directories: HashSet<String>,
     pub(crate) collapsed_explorer_directories: HashSet<String>,
+    worktree_rows_cache: Vec<WorktreeRow>,
     explorer_rows_cache: Vec<ExplorerRow>,
+    preview_generation: u64,
+    preview_tx: Sender<PreviewRequest>,
+    preview_rx: Receiver<PreviewResult>,
+}
+
+struct PreviewRequest {
+    generation: u64,
+    root: PathBuf,
+    task: PreviewTask,
+}
+
+enum PreviewTask {
+    File(String),
+    Commit(String),
+    Diff(Change),
+}
+
+struct PreviewResult {
+    generation: u64,
+    root: PathBuf,
+    content: String,
 }
 
 pub(super) struct ChangesSelection {
@@ -39,6 +66,7 @@ pub(super) struct ChangesSelection {
 
 impl ChangesState {
     pub(super) fn new(repo: Option<&RepositoryData>) -> Self {
+        let (preview_tx, preview_rx) = preview_worker();
         let collapsed_explorer_directories = default_explorer_collapsed_directories(repo);
         let mut state = Self {
             pane: LeftPane::Worktree,
@@ -53,8 +81,13 @@ impl ChangesState {
             history_focused: false,
             collapsed_directories: HashSet::new(),
             collapsed_explorer_directories,
+            worktree_rows_cache: Vec::new(),
             explorer_rows_cache: Vec::new(),
+            preview_generation: 0,
+            preview_tx,
+            preview_rx,
         };
+        state.rebuild_worktree_rows(repo);
         state.rebuild_explorer_rows(repo);
         state.select_initial_rows(repo);
         state.refresh_diff(repo);
@@ -72,6 +105,7 @@ impl ChangesState {
         self.history_focused = false;
         self.collapsed_directories.clear();
         self.collapsed_explorer_directories = default_explorer_collapsed_directories(repo);
+        self.rebuild_worktree_rows(repo);
         self.rebuild_explorer_rows(repo);
         self.select_initial_rows(repo);
         self.refresh_diff(repo);
@@ -95,6 +129,7 @@ impl ChangesState {
     }
 
     pub(super) fn restore_selection(&mut self, repo: &RepositoryData, selection: ChangesSelection) {
+        self.rebuild_worktree_rows(Some(repo));
         self.rebuild_explorer_rows(Some(repo));
 
         let change_index = selection.change.and_then(|(path, staged)| {
@@ -136,8 +171,8 @@ impl ChangesState {
         self.refresh_diff(Some(repo));
     }
 
-    pub(crate) fn worktree_rows(&self, repo: &RepositoryData) -> Vec<WorktreeRow> {
-        build_worktree(&repo.changes, &self.collapsed_directories)
+    pub(crate) fn worktree_rows(&self, _repo: &RepositoryData) -> &[WorktreeRow] {
+        &self.worktree_rows_cache
     }
 
     pub(crate) fn explorer_rows(&self) -> &[ExplorerRow] {
@@ -464,6 +499,7 @@ impl ChangesState {
         if !self.collapsed_directories.remove(&path) {
             self.collapsed_directories.insert(path.clone());
         }
+        self.rebuild_worktree_rows(Some(repo));
         self.select_directory(repo, &path);
         self.refresh_diff(Some(repo));
     }
@@ -472,21 +508,25 @@ impl ChangesState {
         let Some(repo) = repo else {
             return;
         };
-        let rows = self.worktree_rows(repo);
         let Some(index) = self.worktree_state.selected() else {
             return;
         };
-        let Some(row) = rows.get(index) else { return };
-        let Some(path) = &row.directory_path else {
+        let Some(row) = self.worktree_rows(repo).get(index) else {
             return;
         };
-        if row.directory_expanded == Some(false) {
-            self.collapsed_directories.remove(path);
-            self.select_directory(repo, path);
-        } else if rows
+        let Some(path) = row.directory_path.clone() else {
+            return;
+        };
+        let expanded = row.directory_expanded;
+        let descend = self
+            .worktree_rows(repo)
             .get(index + 1)
-            .is_some_and(|child| child.depth > row.depth)
-        {
+            .is_some_and(|child| child.depth > row.depth);
+        if expanded == Some(false) {
+            self.collapsed_directories.remove(&path);
+            self.rebuild_worktree_rows(Some(repo));
+            self.select_directory(repo, &path);
+        } else if descend {
             self.worktree_state.select(Some(index + 1));
         }
         self.refresh_diff(Some(repo));
@@ -496,22 +536,26 @@ impl ChangesState {
         let Some(repo) = repo else {
             return;
         };
-        let rows = self.worktree_rows(repo);
         let Some(index) = self.worktree_state.selected() else {
             return;
         };
-        let Some(row) = rows.get(index) else { return };
-        if let Some(path) = &row.directory_path
+        let Some(row) = self.worktree_rows(repo).get(index) else {
+            return;
+        };
+        let row_depth = row.depth;
+        let directory = row.directory_path.clone();
+        if let Some(path) = directory
             && row.directory_expanded == Some(true)
         {
             self.collapsed_directories.insert(path.clone());
-            self.select_directory(repo, path);
+            self.rebuild_worktree_rows(Some(repo));
+            self.select_directory(repo, &path);
             self.refresh_diff(Some(repo));
             return;
         }
-        if let Some(parent) = rows[..index]
+        if let Some(parent) = self.worktree_rows(repo)[..index]
             .iter()
-            .rposition(|candidate| candidate.depth < row.depth)
+            .rposition(|candidate| candidate.depth < row_depth)
         {
             self.worktree_state.select(Some(parent));
             self.refresh_diff(Some(repo));
@@ -520,6 +564,7 @@ impl ChangesState {
 
     pub(super) fn refresh_diff(&mut self, repo: Option<&RepositoryData>) {
         self.diff_scroll = 0;
+        self.preview_generation = self.preview_generation.wrapping_add(1);
         let Some(repo) = repo else {
             self.diff.clear();
             return;
@@ -534,8 +579,7 @@ impl ChangesState {
                 return;
             };
             if let Some(index) = row.file_index {
-                self.diff = git::file_content(&repo.root, &repo.files[index])
-                    .unwrap_or_else(|error| error.to_string());
+                self.request_preview(repo, PreviewTask::File(repo.files[index].clone()));
             } else if let Some(path) = &row.directory_path {
                 let count = repo
                     .files
@@ -552,8 +596,7 @@ impl ChangesState {
                 .selected()
                 .and_then(|index| repo.history.get(index))
         {
-            self.diff =
-                git::commit_diff(&repo.root, &commit.oid).unwrap_or_else(|error| error.to_string());
+            self.request_preview(repo, PreviewTask::Commit(commit.oid.clone()));
             return;
         }
         let rows = self.worktree_rows(repo);
@@ -566,8 +609,7 @@ impl ChangesState {
             return;
         };
         if let Some(index) = row.change_index {
-            self.diff = git::diff(&repo.root, &repo.changes[index])
-                .unwrap_or_else(|error| error.to_string());
+            self.request_preview(repo, PreviewTask::Diff(repo.changes[index].clone()));
         } else if let Some(path) = &row.directory_path {
             let count = repo
                 .changes
@@ -578,9 +620,37 @@ impl ChangesState {
         }
     }
 
+    pub(super) fn poll_preview(&mut self, active_root: Option<&Path>) -> bool {
+        let mut changed = false;
+        while let Ok(result) = self.preview_rx.try_recv() {
+            if result.generation == self.preview_generation
+                && active_root.is_some_and(|root| root == result.root)
+            {
+                self.diff = result.content;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn request_preview(&mut self, repo: &RepositoryData, task: PreviewTask) {
+        self.diff = "Loading preview…".to_owned();
+        let _ = self.preview_tx.send(PreviewRequest {
+            generation: self.preview_generation,
+            root: repo.root.clone(),
+            task,
+        });
+    }
+
     fn rebuild_explorer_rows(&mut self, repo: Option<&RepositoryData>) {
         self.explorer_rows_cache = repo.map_or_else(Vec::new, |repo| {
             build_file_tree(&repo.files, &self.collapsed_explorer_directories)
+        });
+    }
+
+    fn rebuild_worktree_rows(&mut self, repo: Option<&RepositoryData>) {
+        self.worktree_rows_cache = repo.map_or_else(Vec::new, |repo| {
+            build_worktree(&repo.changes, &self.collapsed_directories)
         });
     }
 
@@ -641,6 +711,35 @@ impl ChangesState {
             .iter()
             .rposition(|row| row.change_index.is_some())
     }
+}
+
+fn preview_worker() -> (Sender<PreviewRequest>, Receiver<PreviewResult>) {
+    let (request_tx, request_rx) = mpsc::channel::<PreviewRequest>();
+    let (result_tx, result_rx) = mpsc::channel();
+    thread::spawn(move || {
+        while let Ok(mut request) = request_rx.recv() {
+            while let Ok(latest) = request_rx.try_recv() {
+                request = latest;
+            }
+            let content = match &request.task {
+                PreviewTask::File(path) => git::file_content(&request.root, path),
+                PreviewTask::Commit(oid) => git::commit_diff(&request.root, oid),
+                PreviewTask::Diff(change) => git::diff(&request.root, change),
+            }
+            .unwrap_or_else(|error| error.to_string());
+            if result_tx
+                .send(PreviewResult {
+                    generation: request.generation,
+                    root: request.root,
+                    content,
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    (request_tx, result_rx)
 }
 
 fn default_explorer_collapsed_directories(repo: Option<&RepositoryData>) -> HashSet<String> {

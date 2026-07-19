@@ -5,10 +5,11 @@ use std::{
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
+    thread,
     time::UNIX_EPOCH,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 #[derive(Debug, Clone)]
 pub struct RepositoryData {
@@ -76,13 +77,39 @@ pub fn discover(path: &Path) -> Result<PathBuf> {
 
 pub fn load(path: &Path) -> Result<RepositoryData> {
     let root = discover(path)?;
-    let branch = branch_name(&root)?;
-    let mut changes = status(&root)?;
-    populate_diff_stats(&root, &mut changes)?;
-    let files = repository_files(&root)?;
-    let history = branch_history(&root)?;
-    let mut commits = log(&root)?;
-    layout_graph(&mut commits);
+    let (branch, changes, files, history, commits) = thread::scope(|scope| {
+        let branch = scope.spawn(|| branch_name(&root));
+        let changes = scope.spawn(|| -> Result<Vec<Change>> {
+            let mut changes = status(&root)?;
+            populate_diff_stats(&root, &mut changes)?;
+            Ok(changes)
+        });
+        let files = scope.spawn(|| repository_files(&root));
+        let history = scope.spawn(|| branch_history(&root));
+        let commits = scope.spawn(|| -> Result<Vec<Commit>> {
+            let mut commits = log(&root)?;
+            layout_graph(&mut commits);
+            Ok(commits)
+        });
+
+        Ok::<_, anyhow::Error>((
+            branch
+                .join()
+                .map_err(|_| anyhow!("branch worker panicked"))??,
+            changes
+                .join()
+                .map_err(|_| anyhow!("status worker panicked"))??,
+            files
+                .join()
+                .map_err(|_| anyhow!("file worker panicked"))??,
+            history
+                .join()
+                .map_err(|_| anyhow!("history worker panicked"))??,
+            commits
+                .join()
+                .map_err(|_| anyhow!("graph worker panicked"))??,
+        ))
+    })?;
 
     Ok(RepositoryData {
         root,

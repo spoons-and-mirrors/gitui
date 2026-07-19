@@ -7,10 +7,22 @@ use unicode_width::UnicodeWidthStr;
 use super::palette;
 
 pub(super) fn styled_source(source: &str, path: &str, width: usize) -> Vec<Line<'static>> {
+    styled_source_window(source, path, width, 0, usize::MAX)
+}
+
+pub(super) fn styled_source_window(
+    source: &str,
+    path: &str,
+    width: usize,
+    start: usize,
+    count: usize,
+) -> Vec<Line<'static>> {
     let numbered = width >= 72;
     source
         .lines()
         .enumerate()
+        .skip(start)
+        .take(count)
         .map(|(index, line)| {
             let mut spans = if numbered {
                 vec![Span::styled(
@@ -27,11 +39,27 @@ pub(super) fn styled_source(source: &str, path: &str, width: usize) -> Vec<Line<
 }
 
 pub(super) fn styled_diff(diff: &str, path: &str, width: usize) -> Vec<Line<'static>> {
+    styled_diff_window(diff, path, width, 0, usize::MAX)
+}
+
+pub(super) fn styled_diff_window(
+    diff: &str,
+    path: &str,
+    width: usize,
+    start: usize,
+    count: usize,
+) -> Vec<Line<'static>> {
     let numbered = width >= 72;
     let mut old_line = None;
     let mut new_line = None;
 
+    for line in diff.lines().take(start) {
+        advance_diff_line(line, &mut old_line, &mut new_line);
+    }
+
     diff.lines()
+        .skip(start)
+        .take(count)
         .map(|line| {
             if line.starts_with("@@") {
                 if let Some((old, new)) = parse_hunk_lines(line) {
@@ -148,6 +176,23 @@ pub(super) fn styled_diff(diff: &str, path: &str, width: usize) -> Vec<Line<'sta
             finish_line(spans, width, background)
         })
         .collect()
+}
+
+fn advance_diff_line(line: &str, old_line: &mut Option<u32>, new_line: &mut Option<u32>) {
+    if line.starts_with("@@") {
+        if let Some((old, new)) = parse_hunk_lines(line) {
+            *old_line = Some(old);
+            *new_line = Some(new);
+        }
+    } else if line.starts_with("+++") || line.starts_with("---") {
+    } else if line.starts_with('+') {
+        *new_line = new_line.map(|value| value + 1);
+    } else if line.starts_with('-') {
+        *old_line = old_line.map(|value| value + 1);
+    } else if line.starts_with(' ') && old_line.is_some() {
+        *old_line = old_line.map(|value| value + 1);
+        *new_line = new_line.map(|value| value + 1);
+    }
 }
 
 fn parse_hunk_lines(line: &str) -> Option<(u32, u32)> {

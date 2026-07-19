@@ -496,7 +496,9 @@ pub(super) fn draw_picker(frame: &mut Frame<'_>, picker: &mut RepositoryPicker) 
     } else {
         "BROWSE"
     };
-    let section_detail = if picker.editing_path && picker.searching {
+    let section_detail = if !picker.editing_path && picker.loading {
+        "loading…".to_owned()
+    } else if picker.editing_path && picker.searching {
         "indexing…".to_owned()
     } else {
         format!("{} entries", row_count)

@@ -1,4 +1,4 @@
-use std::{fs, process::Command};
+use std::{fs, process::Command, thread, time::Duration};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{Terminal, backend::TestBackend, style::Modifier};
@@ -84,6 +84,7 @@ fn renders_every_primary_surface() {
         explorer.x + 2,
         explorer.y + selected_file_row as u16,
     );
+    wait_for_preview(&mut app);
     assert_eq!(
         app.selected_explorer_file_path(),
         Some(selected_file.as_str())
@@ -134,6 +135,13 @@ fn renders_every_primary_surface() {
     let stage_all = app.regions.stage_all.unwrap();
     assert_eq!(stage_all.width, 2);
     click(&mut app, stage_all.x, stage_all.y);
+    wait_for(&mut app, |app| {
+        app.repository()
+            .unwrap()
+            .changes
+            .iter()
+            .all(|change| change.staged)
+    });
     assert!(
         app.repository()
             .unwrap()
@@ -159,6 +167,13 @@ fn renders_every_primary_surface() {
     }
     let stage_all = app.regions.stage_all.unwrap();
     click(&mut app, stage_all.x, stage_all.y);
+    wait_for(&mut app, |app| {
+        app.repository()
+            .unwrap()
+            .changes
+            .iter()
+            .all(|change| !change.staged)
+    });
     assert!(
         app.repository()
             .unwrap()
@@ -180,6 +195,15 @@ fn renders_every_primary_surface() {
     let status = app.regions.worktree_status.unwrap();
     assert_eq!(status.width, 2);
     click(&mut app, status.x, status.y);
+    wait_for(&mut app, |app| {
+        app.repository()
+            .unwrap()
+            .changes
+            .iter()
+            .filter(|change| change.staged)
+            .count()
+            == 1
+    });
     assert_eq!(
         app.repository()
             .unwrap()
@@ -192,6 +216,13 @@ fn renders_every_primary_surface() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let status = app.regions.worktree_status.unwrap();
     click(&mut app, status.x, status.y);
+    wait_for(&mut app, |app| {
+        app.repository()
+            .unwrap()
+            .changes
+            .iter()
+            .all(|change| !change.staged)
+    });
     assert!(
         app.repository()
             .unwrap()
@@ -268,6 +299,7 @@ fn renders_every_primary_surface() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let history = app.regions.history_list.unwrap();
     click(&mut app, history.x + 2, history.y + 2);
+    wait_for_preview(&mut app);
     assert_eq!(app.changes.history_state.selected(), Some(1));
     assert!(app.changes.history_focused);
     assert!(app.changes.diff.contains("diff --git"));
@@ -275,6 +307,7 @@ fn renders_every_primary_surface() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let worktree = app.regions.worktree_list.unwrap();
     click(&mut app, worktree.x + 2, worktree.y);
+    wait_for_preview(&mut app);
     assert_eq!(app.changes.history_state.selected(), None);
     assert!(!app.changes.history_focused);
     assert!(app.changes.diff.contains("tracked.txt") || app.changes.diff.contains("untracked.txt"));
@@ -348,7 +381,7 @@ fn renders_every_primary_surface() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(action_screen.contains("Pull --rebase"));
-    assert!(action_screen.contains("Commit..."));
+    assert!(action_screen.contains("Commit"));
     assert!(action_screen.contains("Run Git command"));
     let action_list = app.regions.action_list.unwrap();
     app.handle_mouse(mouse(
@@ -573,21 +606,44 @@ fn selects_visible_text_and_suppresses_clicks_after_dragging() {
     let graph = app.regions.graph.unwrap();
     app.handle_mouse(mouse(
         MouseEventKind::Down(MouseButton::Left),
-        graph.x,
+        graph.x + 2,
         graph.y,
     ));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     app.handle_mouse(mouse(
         MouseEventKind::Drag(MouseButton::Left),
-        graph.x + 2,
+        graph.x + 4,
         graph.y,
     ));
     app.handle_mouse(mouse(
         MouseEventKind::Up(MouseButton::Left),
-        graph.x + 2,
+        graph.x + 4,
         graph.y,
     ));
     assert_eq!(app.view, View::Changes);
     assert!(app.take_copy_request().is_some());
+}
+
+fn wait_for_preview(app: &mut App) {
+    for _ in 0..100 {
+        let _ = app.poll_worker();
+        if app.changes.diff != "Loading preview…" {
+            return;
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+    panic!("preview did not complete");
+}
+
+fn wait_for(app: &mut App, predicate: impl Fn(&App) -> bool) {
+    for _ in 0..100 {
+        let _ = app.poll_worker();
+        if predicate(app) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+    panic!("application state did not update");
 }
 
 fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {

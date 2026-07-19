@@ -5,9 +5,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 
-use crate::git::{self, CommandOutput, RepositoryData};
+use crate::git::{self, Change, CommandOutput, RepositoryData};
 
 const STATUS_INTERVAL: Duration = Duration::from_millis(800);
 
@@ -15,6 +15,25 @@ pub(crate) enum WorkerCompletion {
     Commit(Result<CommandOutput, String>),
     Fetch(Result<CommandOutput, String>),
     Command(CommandCompletion),
+    Mutation(Result<(), String>),
+}
+
+pub(crate) enum Mutation {
+    Stage(Change),
+    Unstage(Change),
+    StageAll,
+    UnstageAll,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoadKind {
+    Open,
+    Reload,
+}
+
+pub(crate) struct LoadCompletion {
+    pub(crate) kind: LoadKind,
+    pub(crate) result: Result<(), String>,
 }
 
 pub(crate) struct CommandCompletion {
@@ -36,11 +55,19 @@ struct StatusResult {
     result: Result<u64, String>,
 }
 
+struct LoadResult {
+    generation: u64,
+    kind: LoadKind,
+    fetch_interval: Duration,
+    result: Result<(RepositoryData, Option<u64>), String>,
+}
+
 #[derive(Debug)]
 enum WorkerKind {
     Commit,
     Fetch,
     Command { label: String },
+    Mutation,
 }
 
 pub(crate) struct RepositorySession {
@@ -48,6 +75,7 @@ pub(crate) struct RepositorySession {
     commit_running: bool,
     fetch_running: bool,
     command_running: bool,
+    mutation_running: bool,
     worker_tx: Sender<WorkerResult>,
     worker_rx: Receiver<WorkerResult>,
     status_tx: Sender<StatusResult>,
@@ -56,12 +84,17 @@ pub(crate) struct RepositorySession {
     status_signature: Option<u64>,
     next_fetch_at: Instant,
     next_status_check: Instant,
+    load_generation: u64,
+    load_running: bool,
+    load_tx: Sender<LoadResult>,
+    load_rx: Receiver<LoadResult>,
 }
 
 impl RepositorySession {
     pub(crate) fn new(path: &Path, fetch_interval: Duration) -> Self {
         let (worker_tx, worker_rx) = mpsc::channel();
         let (status_tx, status_rx) = mpsc::channel();
+        let (load_tx, load_rx) = mpsc::channel();
         let data = git::load(path).ok();
         let status_signature = data
             .as_ref()
@@ -72,6 +105,7 @@ impl RepositorySession {
             commit_running: false,
             fetch_running: false,
             command_running: false,
+            mutation_running: false,
             worker_tx,
             worker_rx,
             status_tx,
@@ -80,6 +114,10 @@ impl RepositorySession {
             status_signature,
             next_fetch_at: Instant::now() + fetch_interval,
             next_status_check: Instant::now() + STATUS_INTERVAL,
+            load_generation: 0,
+            load_running: false,
+            load_tx,
+            load_rx,
         }
     }
 
@@ -99,23 +137,37 @@ impl RepositorySession {
         self.command_running
     }
 
-    pub(crate) fn open(&mut self, path: &Path, fetch_interval: Duration) -> Result<()> {
-        let data = git::load(path)?;
-        self.status_signature = git::worktree_signature(&data.root).ok();
-        self.next_status_check = Instant::now() + STATUS_INTERVAL;
-        self.next_fetch_at = Instant::now() + fetch_interval;
-        self.data = Some(data);
-        Ok(())
+    pub(crate) fn start_open(&mut self, path: PathBuf, fetch_interval: Duration) -> bool {
+        self.start_load(path, LoadKind::Open, fetch_interval)
     }
 
-    pub(crate) fn reload(&mut self) -> Result<()> {
+    pub(crate) fn start_reload(&mut self, fetch_interval: Duration) -> bool {
         let Some(root) = self.data.as_ref().map(|repository| repository.root.clone()) else {
-            bail!("No repository selected");
+            return false;
         };
-        let data = git::load(&root)?;
-        self.status_signature = git::worktree_signature(&data.root).ok();
-        self.data = Some(data);
-        Ok(())
+        self.start_load(root, LoadKind::Reload, fetch_interval)
+    }
+
+    pub(crate) fn next_load_completion(&mut self) -> Option<LoadCompletion> {
+        while let Ok(done) = self.load_rx.try_recv() {
+            if done.generation != self.load_generation {
+                continue;
+            }
+            self.load_running = false;
+            let result = done.result.map(|(data, signature)| {
+                self.status_signature = signature;
+                self.next_status_check = Instant::now() + STATUS_INTERVAL;
+                if done.kind == LoadKind::Open {
+                    self.next_fetch_at = Instant::now() + done.fetch_interval;
+                }
+                self.data = Some(data);
+            });
+            return Some(LoadCompletion {
+                kind: done.kind,
+                result,
+            });
+        }
+        None
     }
 
     pub(crate) fn reset_fetch_deadline(&mut self, fetch_interval: Duration) {
@@ -123,7 +175,7 @@ impl RepositorySession {
     }
 
     pub(crate) fn start_commit(&mut self, message: String) -> bool {
-        if self.commit_running || self.command_running {
+        if self.commit_running || self.command_running || self.mutation_running {
             return false;
         }
         let Some(root) = self.data.as_ref().map(|repository| repository.root.clone()) else {
@@ -144,7 +196,11 @@ impl RepositorySession {
     }
 
     pub(crate) fn start_command(&mut self, label: String, args: Vec<String>) -> bool {
-        if self.command_running || self.commit_running || self.fetch_running {
+        if self.command_running
+            || self.commit_running
+            || self.fetch_running
+            || self.mutation_running
+        {
             return false;
         }
         let Some(root) = self.data.as_ref().map(|repository| repository.root.clone()) else {
@@ -164,10 +220,50 @@ impl RepositorySession {
         true
     }
 
-    pub(crate) fn maybe_start_fetch(&mut self, enabled: bool, fetch_interval: Duration) {
-        if !enabled
+    pub(crate) fn start_mutation(&mut self, mutation: Mutation) -> bool {
+        if self.mutation_running
+            || self.commit_running
             || self.fetch_running
             || self.command_running
+            || self.load_running
+        {
+            return false;
+        }
+        let Some(root) = self.data.as_ref().map(|repository| repository.root.clone()) else {
+            return false;
+        };
+
+        self.mutation_running = true;
+        let sender = self.worker_tx.clone();
+        thread::spawn(move || {
+            let result = match &mutation {
+                Mutation::Stage(change) => git::stage(&root, change),
+                Mutation::Unstage(change) => git::unstage(&root, change),
+                Mutation::StageAll => git::stage_all(&root),
+                Mutation::UnstageAll => git::unstage_all(&root),
+            }
+            .map(|()| CommandOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                success: true,
+                exit_code: Some(0),
+            })
+            .map_err(|error| error.to_string());
+            let _ = sender.send(WorkerResult {
+                kind: WorkerKind::Mutation,
+                root,
+                result,
+            });
+        });
+        true
+    }
+
+    pub(crate) fn maybe_start_fetch(&mut self, enabled: bool, fetch_interval: Duration) {
+        if !enabled
+            || self.load_running
+            || self.fetch_running
+            || self.command_running
+            || self.mutation_running
             || Instant::now() < self.next_fetch_at
         {
             return;
@@ -191,9 +287,11 @@ impl RepositorySession {
 
     pub(crate) fn maybe_start_status_check(&mut self) {
         if self.status_check_running
+            || self.load_running
             || self.commit_running
             || self.fetch_running
             || self.command_running
+            || self.mutation_running
             || Instant::now() < self.next_status_check
         {
             return;
@@ -248,6 +346,12 @@ impl RepositorySession {
                         }));
                     }
                 }
+                WorkerKind::Mutation => {
+                    self.mutation_running = false;
+                    if active {
+                        return Some(WorkerCompletion::Mutation(done.result.map(|_| ())));
+                    }
+                }
             }
         }
         None
@@ -274,6 +378,31 @@ impl RepositorySession {
             }
         }
         false
+    }
+
+    fn start_load(&mut self, path: PathBuf, kind: LoadKind, fetch_interval: Duration) -> bool {
+        if self.load_running && kind == LoadKind::Reload {
+            return false;
+        }
+        self.load_generation = self.load_generation.wrapping_add(1);
+        self.load_running = true;
+        let generation = self.load_generation;
+        let sender = self.load_tx.clone();
+        thread::spawn(move || {
+            let result = git::load(&path)
+                .map(|data| {
+                    let signature = git::worktree_signature(&data.root).ok();
+                    (data, signature)
+                })
+                .map_err(|error| error.to_string());
+            let _ = sender.send(LoadResult {
+                generation,
+                kind,
+                fetch_interval,
+                result,
+            });
+        });
+        true
     }
 
     #[cfg(test)]
@@ -336,6 +465,29 @@ mod tests {
     }
 
     #[test]
+    fn ignores_superseded_repository_loads() {
+        let mut session = session("/active", Some(7));
+        session.load_generation = 2;
+        session.load_running = true;
+        let mut stale_data = session.data.clone().unwrap();
+        stale_data.root = PathBuf::from("/stale");
+        session
+            .load_tx
+            .send(LoadResult {
+                generation: 1,
+                kind: LoadKind::Open,
+                fetch_interval: Duration::ZERO,
+                result: Ok((stale_data, Some(99))),
+            })
+            .unwrap();
+
+        assert!(session.next_load_completion().is_none());
+        assert_eq!(session.data().unwrap().root, Path::new("/active"));
+        assert_eq!(session.status_signature, Some(7));
+        assert!(session.load_running);
+    }
+
+    #[test]
     fn ignores_status_result_from_a_previous_repository() {
         let mut session = session("/active", Some(10));
         session.status_check_running = true;
@@ -374,6 +526,7 @@ mod tests {
     fn session(root: &str, status_signature: Option<u64>) -> RepositorySession {
         let (worker_tx, worker_rx) = mpsc::channel();
         let (status_tx, status_rx) = mpsc::channel();
+        let (load_tx, load_rx) = mpsc::channel();
         RepositorySession {
             data: Some(RepositoryData {
                 root: PathBuf::from(root),
@@ -386,6 +539,7 @@ mod tests {
             commit_running: false,
             fetch_running: false,
             command_running: false,
+            mutation_running: false,
             worker_tx,
             worker_rx,
             status_tx,
@@ -394,6 +548,10 @@ mod tests {
             status_signature,
             next_fetch_at: Instant::now(),
             next_status_check: Instant::now(),
+            load_generation: 0,
+            load_running: false,
+            load_tx,
+            load_rx,
         }
     }
 }

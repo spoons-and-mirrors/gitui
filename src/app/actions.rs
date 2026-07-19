@@ -19,8 +19,8 @@ pub(crate) struct ActionItem {
 pub(crate) const ACTION_ITEMS: [ActionItem; 5] = [
     ActionItem {
         id: ActionId::Commit,
-        label: "Commit...",
-        detail: "open editor",
+        label: "Commit",
+        detail: "staged changes",
     },
     ActionItem {
         id: ActionId::Push,

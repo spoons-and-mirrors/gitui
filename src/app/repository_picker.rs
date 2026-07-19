@@ -33,9 +33,19 @@ pub struct RepositoryPicker {
     pub(crate) matches: Vec<PickerEntry>,
     pub(crate) match_state: ListState,
     pub(crate) searching: bool,
+    pub(crate) loading: bool,
     pub(crate) error: Option<String>,
-    directory_index: Vec<PathBuf>,
-    index_rx: Option<Receiver<Vec<PathBuf>>>,
+    directory_index: Vec<IndexedDirectory>,
+    index_rx: Option<Receiver<Vec<IndexedDirectory>>>,
+    browse_rx: Option<Receiver<Result<Vec<PickerEntry>, String>>>,
+}
+
+#[derive(Debug, Clone)]
+struct IndexedDirectory {
+    path: PathBuf,
+    name_lower: String,
+    depth: usize,
+    is_repo: bool,
 }
 
 pub(super) enum PickerCommand {
@@ -56,9 +66,11 @@ impl RepositoryPicker {
             matches: Vec::new(),
             match_state: ListState::default(),
             searching: false,
+            loading: false,
             error: None,
             directory_index: Vec::new(),
             index_rx: None,
+            browse_rx: None,
         };
         picker.reload();
         picker
@@ -172,54 +184,15 @@ impl RepositoryPicker {
 
     pub(super) fn reload(&mut self) {
         self.error = None;
-        let current_is_repo = is_repository_directory(&self.directory);
-        let mut entries = vec![PickerEntry {
-            label: if current_is_repo {
-                "Open current repository".to_owned()
-            } else {
-                "Open current location".to_owned()
-            },
-            path: self.directory.clone(),
-            action: PickerAction::Open,
-            is_repo: current_is_repo,
-        }];
-
-        if let Some(parent) = self.directory.parent() {
-            entries.push(PickerEntry {
-                label: "..".to_owned(),
-                path: parent.to_path_buf(),
-                action: PickerAction::Navigate,
-                is_repo: false,
-            });
-        }
-
-        match fs::read_dir(&self.directory) {
-            Ok(read_dir) => {
-                let mut directories: Vec<_> = read_dir
-                    .filter_map(Result::ok)
-                    .filter_map(|entry| {
-                        let file_type = entry.file_type().ok()?;
-                        (file_type.is_dir() || file_type.is_symlink()).then_some(entry)
-                    })
-                    .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
-                    .map(|entry| {
-                        let path = entry.path();
-                        let is_repo = path.join(".git").exists();
-                        PickerEntry {
-                            label: format!("{}/", entry.file_name().to_string_lossy()),
-                            path,
-                            action: PickerAction::Navigate,
-                            is_repo,
-                        }
-                    })
-                    .collect();
-                directories.sort_by_key(|entry| entry.label.to_lowercase());
-                entries.extend(directories);
-            }
-            Err(error) => self.error = Some(error.to_string()),
-        }
-        self.entries = entries;
-        self.state.select((!self.entries.is_empty()).then_some(0));
+        self.loading = true;
+        self.entries.clear();
+        self.state.select(None);
+        let directory = self.directory.clone();
+        let (sender, receiver) = mpsc::channel();
+        self.browse_rx = Some(receiver);
+        thread::spawn(move || {
+            let _ = sender.send(load_directory_entries(&directory));
+        });
     }
 
     pub(super) fn move_selection(&mut self, delta: isize) {
@@ -235,17 +208,36 @@ impl RepositoryPicker {
         self.refresh_matches();
     }
 
-    pub(super) fn poll_index(&mut self) {
-        let Some(receiver) = &self.index_rx else {
-            return;
-        };
-        let Ok(index) = receiver.try_recv() else {
-            return;
-        };
-        self.directory_index = index;
-        self.index_rx = None;
-        self.searching = false;
-        self.refresh_matches();
+    pub(super) fn poll_index(&mut self) -> bool {
+        let mut changed = false;
+        if let Some(index) = self
+            .index_rx
+            .as_ref()
+            .and_then(|receiver| receiver.try_recv().ok())
+        {
+            self.directory_index = index;
+            self.index_rx = None;
+            self.searching = false;
+            self.refresh_matches();
+            changed = true;
+        }
+        if let Some(result) = self
+            .browse_rx
+            .as_ref()
+            .and_then(|receiver| receiver.try_recv().ok())
+        {
+            self.browse_rx = None;
+            self.loading = false;
+            match result {
+                Ok(entries) => {
+                    self.entries = entries;
+                    self.state.select((!self.entries.is_empty()).then_some(0));
+                }
+                Err(error) => self.error = Some(error),
+            }
+            changed = true;
+        }
+        changed
     }
 
     pub(super) fn navigate(&mut self, path: PathBuf) {
@@ -285,37 +277,65 @@ impl RepositoryPicker {
             });
         }
 
-        let mut candidates = Vec::new();
-        let mut seen = HashSet::new();
-        if let Some(path) = resolve_fuzzy_path(query, &self.directory)
-            && seen.insert(path.clone())
-        {
-            candidates.push((u32::MAX, path));
-        }
-        for path in &self.directory_index {
-            let Some(score) = fuzzy_path_score(query, path) else {
+        let query_lower = query.trim_matches(['/', '\\']).to_lowercase();
+        let mut candidates = Vec::with_capacity(12);
+        let compare =
+            |(left_score, left_depth, left_index): &(u32, usize, usize),
+             (right_score, right_depth, right_index): &(u32, usize, usize)| {
+                right_score
+                    .cmp(left_score)
+                    .then_with(|| left_depth.cmp(right_depth))
+                    .then_with(|| {
+                        self.directory_index[*left_index]
+                            .path
+                            .cmp(&self.directory_index[*right_index].path)
+                    })
+            };
+        for (index, directory) in self.directory_index.iter().enumerate() {
+            let Some(score) = fuzzy_text_score_lower(&query_lower, &directory.name_lower) else {
                 continue;
             };
-            if seen.insert(path.clone()) {
-                candidates.push((score, path.clone()));
+            let candidate = (
+                score + if directory.is_repo { 750 } else { 0 },
+                directory.depth,
+                index,
+            );
+            if candidates.len() < 12 {
+                candidates.push(candidate);
+            } else if let Some((worst, _)) = candidates
+                .iter()
+                .enumerate()
+                .max_by(|(_, left), (_, right)| compare(left, right))
+                && compare(&candidate, &candidates[worst]).is_lt()
+            {
+                candidates[worst] = candidate;
             }
         }
-        candidates.sort_by(|(left_score, left), (right_score, right)| {
-            right_score
-                .cmp(left_score)
-                .then_with(|| path_depth(left).cmp(&path_depth(right)))
-                .then_with(|| left.cmp(right))
-        });
+        candidates.sort_by(compare);
         self.matches = candidates
             .into_iter()
-            .take(12)
-            .map(|(_, path)| PickerEntry {
-                label: display_search_path(&path),
-                is_repo: is_repository_directory(&path),
-                path,
+            .map(|(_, _, index)| PickerEntry {
+                label: display_search_path(&self.directory_index[index].path),
+                is_repo: self.directory_index[index].is_repo,
+                path: self.directory_index[index].path.clone(),
                 action: PickerAction::Navigate,
             })
             .collect();
+        if query.contains(['/', '\\'])
+            && let Some(path) = resolve_fuzzy_path(query, &self.directory)
+            && !self.matches.iter().any(|entry| entry.path == path)
+        {
+            self.matches.insert(
+                0,
+                PickerEntry {
+                    label: display_search_path(&path),
+                    is_repo: is_repository_directory(&path),
+                    path,
+                    action: PickerAction::Navigate,
+                },
+            );
+            self.matches.truncate(12);
+        }
         self.match_state
             .select((!self.matches.is_empty()).then_some(0));
     }
@@ -357,6 +377,50 @@ impl RepositoryPicker {
     }
 }
 
+fn load_directory_entries(directory: &Path) -> Result<Vec<PickerEntry>, String> {
+    let current_is_repo = is_repository_directory(directory);
+    let mut entries = vec![PickerEntry {
+        label: if current_is_repo {
+            "Open current repository".to_owned()
+        } else {
+            "Open current location".to_owned()
+        },
+        path: directory.to_path_buf(),
+        action: PickerAction::Open,
+        is_repo: current_is_repo,
+    }];
+    if let Some(parent) = directory.parent() {
+        entries.push(PickerEntry {
+            label: "..".to_owned(),
+            path: parent.to_path_buf(),
+            action: PickerAction::Navigate,
+            is_repo: false,
+        });
+    }
+    let read_dir = fs::read_dir(directory).map_err(|error| error.to_string())?;
+    let mut directories: Vec<_> = read_dir
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let file_type = entry.file_type().ok()?;
+            (file_type.is_dir() || file_type.is_symlink()).then_some(entry)
+        })
+        .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+        .map(|entry| {
+            let path = entry.path();
+            let is_repo = path.join(".git").exists();
+            PickerEntry {
+                label: format!("{}/", entry.file_name().to_string_lossy()),
+                path,
+                action: PickerAction::Navigate,
+                is_repo,
+            }
+        })
+        .collect();
+    directories.sort_by_cached_key(|entry| entry.label.to_lowercase());
+    entries.extend(directories);
+    Ok(entries)
+}
+
 fn search_roots(current: &Path) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Some(home) = home_directory() {
@@ -374,7 +438,7 @@ fn search_roots(current: &Path) -> Vec<PathBuf> {
     roots
 }
 
-fn index_directories(roots: &[PathBuf]) -> Vec<PathBuf> {
+fn index_directories(roots: &[PathBuf]) -> Vec<IndexedDirectory> {
     const MAX_DIRECTORIES: usize = 25_000;
     const MAX_DEPTH: usize = 7;
     let mut directories = Vec::new();
@@ -384,7 +448,17 @@ fn index_directories(roots: &[PathBuf]) -> Vec<PathBuf> {
         if directories.len() >= MAX_DIRECTORIES || !seen.insert(directory.clone()) {
             continue;
         }
-        directories.push(directory.clone());
+        directories.push(IndexedDirectory {
+            name_lower: directory
+                .file_name()
+                .unwrap_or_else(|| directory.as_os_str())
+                .to_string_lossy()
+                .to_lowercase(),
+            depth: path_depth(&directory),
+            is_repo: is_repository_directory(&directory)
+                || is_bare_repository_directory(&directory),
+            path: directory.clone(),
+        });
         if depth >= MAX_DEPTH || is_bare_repository_directory(&directory) {
             continue;
         }
@@ -474,44 +548,34 @@ fn resolve_fuzzy_path(input: &str, base: &Path) -> Option<PathBuf> {
     resolved.is_dir().then_some(resolved)
 }
 
-fn fuzzy_path_score(query: &str, path: &Path) -> Option<u32> {
-    let query = query.trim_matches(['/', '\\']);
-    if query.is_empty() {
-        return None;
-    }
-    let name = path.file_name()?.to_string_lossy();
-    fuzzy_text_score(query, &name).map(|score| {
-        score
-            + if is_repository_directory(path) {
-                750
-            } else {
-                0
-            }
-    })
-}
-
 fn fuzzy_text_score(query: &str, candidate: &str) -> Option<u32> {
     let query = query.to_lowercase();
     let candidate = candidate.to_lowercase();
+    fuzzy_text_score_lower(&query, &candidate)
+}
+
+fn fuzzy_text_score_lower(query: &str, candidate: &str) -> Option<u32> {
     let query_len = query.chars().count();
     if query == candidate {
         return Some(10_000);
     }
-    if candidate.starts_with(&query) {
+    if candidate.starts_with(query) {
         return Some(9_000u32.saturating_sub(candidate.len() as u32));
     }
-    if let Some(index) = candidate.find(&query) {
+    if let Some(index) = candidate.find(query) {
         return Some(8_000u32.saturating_sub(index as u32));
     }
-    let mut positions = Vec::new();
+    let mut first = None;
+    let mut last = 0;
     let mut offset = 0;
     for needle in query.chars() {
         let relative = candidate[offset..].find(needle)?;
         offset += relative;
-        positions.push(offset);
+        first.get_or_insert(offset);
+        last = offset;
         offset += needle.len_utf8();
     }
-    let span = positions.last()? - positions.first()?;
+    let span = last - first?;
     if span > query_len.saturating_mul(3).max(4) {
         return None;
     }
@@ -576,7 +640,7 @@ mod tests {
         assert_eq!(resolve_fuzzy_path("cod/gitu", root), Some(gitui.clone()));
 
         let mut picker = RepositoryPicker::new(root.to_path_buf());
-        picker.directory_index = vec![gitlab, gitui.clone()];
+        picker.directory_index = index_directories(&[root.to_path_buf()]);
         picker.begin_search(Some("gtu"));
         assert_eq!(picker.matches[0].path, gitui);
         assert!(picker.matches[0].is_repo);
@@ -597,9 +661,35 @@ mod tests {
         fs::write(root.join("archive.git/HEAD"), "ref: refs/heads/main\n").unwrap();
 
         let index = index_directories(&[root.to_path_buf()]);
-        assert!(index.contains(&root.join("projects/gitui")));
-        assert!(!index.contains(&root.join("target")));
-        assert!(index.contains(&root.join("archive.git")));
-        assert!(!index.contains(&root.join("archive.git/objects")));
+        let paths: Vec<_> = index.iter().map(|entry| &entry.path).collect();
+        assert!(paths.contains(&&root.join("projects/gitui")));
+        assert!(!paths.contains(&&root.join("target")));
+        assert!(paths.contains(&&root.join("archive.git")));
+        assert!(!paths.contains(&&root.join("archive.git/objects")));
+    }
+
+    #[test]
+    fn fuzzy_search_keeps_only_the_best_twelve_matches() {
+        let mut picker = RepositoryPicker::new(PathBuf::from("/"));
+        picker.directory_index = (0..30)
+            .map(|index| {
+                let name = if index == 29 {
+                    "needle".to_owned()
+                } else {
+                    format!("needle-{index:02}")
+                };
+                IndexedDirectory {
+                    path: PathBuf::from("/").join(&name),
+                    name_lower: name,
+                    depth: 1,
+                    is_repo: false,
+                }
+            })
+            .collect();
+
+        picker.begin_search(Some("needle"));
+
+        assert_eq!(picker.matches.len(), 12);
+        assert_eq!(picker.matches[0].path, Path::new("/needle"));
     }
 }

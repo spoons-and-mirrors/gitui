@@ -50,6 +50,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     .split(frame.area());
 
     app.regions = Regions::default();
+    app.regions.screen = Some(frame.area());
     draw_header(frame, app, layout[0]);
     let content = layout[1];
     match app.view {
@@ -104,11 +105,14 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
 }
 
 fn finish_selection(frame: &mut Frame<'_>, app: &mut App) {
+    if app.selection.needs_capture(frame.area()) {
+        app.selection.capture(frame.buffer_mut());
+    }
     app.selection.render(
         frame.buffer_mut(),
         Style::default().fg(palette().canvas).bg(palette().accent),
     );
-    app.selection.capture(frame.buffer_mut());
+    app.selection.discard_inactive_capture();
 }
 
 fn dim(frame: &mut Frame<'_>) {

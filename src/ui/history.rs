@@ -87,7 +87,25 @@ pub(super) fn draw_graph(
         ]
     };
 
-    let rows = repo.commits.iter().map(|commit| graph_row(commit, compact));
+    let viewport = usize::from(graph_region.height);
+    let selected = state.selected();
+    let mut offset = state
+        .offset()
+        .min(repo.commits.len().saturating_sub(viewport));
+    if let Some(selected) = selected {
+        if selected < offset {
+            offset = selected;
+        } else if selected >= offset.saturating_add(viewport) {
+            offset = selected.saturating_add(1).saturating_sub(viewport);
+        }
+    }
+    *state.offset_mut() = offset;
+    let rows = repo
+        .commits
+        .iter()
+        .skip(offset)
+        .take(viewport)
+        .map(|commit| graph_row(commit, compact));
     let headers = if compact {
         Row::new(["GRAPH", "DESCRIPTION", "AUTHOR", "COMMIT"])
     } else {
@@ -105,7 +123,9 @@ pub(super) fn draw_graph(
         .header(headers)
         .column_spacing(1)
         .row_highlight_style(Style::default().bg(palette().selected));
-    frame.render_stateful_widget(table, table_area, state);
+    let mut visible_state = TableState::default();
+    visible_state.select(selected.and_then(|selected| selected.checked_sub(offset)));
+    frame.render_stateful_widget(table, table_area, &mut visible_state);
     Some(graph_region)
 }
 

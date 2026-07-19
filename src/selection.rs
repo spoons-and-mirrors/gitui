@@ -146,6 +146,20 @@ impl SelectionState {
         });
     }
 
+    pub fn needs_capture(&self, area: Rect) -> bool {
+        self.active
+            && self
+                .screen
+                .as_ref()
+                .is_none_or(|screen| screen.area != area)
+    }
+
+    pub fn discard_inactive_capture(&mut self) {
+        if !self.active {
+            self.screen = None;
+        }
+    }
+
     pub fn screen_area(&self) -> Option<Rect> {
         self.screen.as_ref().map(|screen| screen.area)
     }

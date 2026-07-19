@@ -15,7 +15,7 @@ use crate::{
 
 use super::{
     fill, history, palette,
-    text::{styled_diff, styled_source},
+    text::{styled_diff, styled_diff_window, styled_source, styled_source_window},
     truncate_width,
 };
 
@@ -150,18 +150,20 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         history_area.height.saturating_sub(1),
     ));
 
-    let worktree_rows = app.changes.worktree_rows(repo);
+    let worktree_len = app.changes.worktree_rows(repo).len();
     let worktree_viewport = usize::from(worktree_list.height);
     app.changes.worktree_scroll = app
         .changes
         .worktree_scroll
-        .min(worktree_rows.len().saturating_sub(worktree_viewport));
+        .min(worktree_len.saturating_sub(worktree_viewport));
     let selected_style = Style::default().bg(if app.mode == Mode::Commit {
         palette().inactive_selected
     } else {
         palette().selected
     });
-    let items: Vec<ListItem<'_>> = worktree_rows
+    let items: Vec<ListItem<'_>> = app
+        .changes
+        .worktree_rows(repo)
         .iter()
         .enumerate()
         .skip(app.changes.worktree_scroll)
@@ -259,7 +261,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         app.changes
             .worktree_state
             .selected()
-            .and_then(|index| worktree_rows.get(index))
+            .and_then(|index| app.changes.worktree_rows(repo).get(index))
             .and_then(|row| row.change_index)
             .and_then(|index| repo.changes.get(index))
     } else {
@@ -273,7 +275,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         },
         |commit| commit.subject.clone(),
     );
-    let syntax_path = selected_change.map_or("", |change| change.path.as_str());
+    let syntax_path = selected_change.map_or_else(String::new, |change| change.path.clone());
     let diff_header = Rect::new(
         columns[1].x.saturating_add(1),
         columns[1].y.saturating_add(1),
@@ -342,8 +344,15 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         ])),
         diff_header,
     );
-    let diff_lines = styled_diff(&app.changes.diff, syntax_path, usize::from(diff_body.width));
-    render_scrollable_content(frame, app, columns[1], diff_body, diff_lines);
+    let (diff_lines, unwrapped_height) = prepare_preview_lines(app, diff_body, &syntax_path, true);
+    render_scrollable_content(
+        frame,
+        app,
+        columns[1],
+        diff_body,
+        diff_lines,
+        unwrapped_height,
+    );
 
     let commit_active = app.mode == Mode::Commit;
     fill(frame, commit_area, palette().canvas);
@@ -570,12 +579,51 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
         ])),
         preview_header,
     );
-    let lines = styled_source(
-        &app.changes.diff,
-        app.selected_explorer_file_path().unwrap_or_default(),
-        usize::from(preview_body.width),
+    let path = app
+        .selected_explorer_file_path()
+        .unwrap_or_default()
+        .to_owned();
+    let (lines, unwrapped_height) = prepare_preview_lines(app, preview_body, &path, false);
+    render_scrollable_content(
+        frame,
+        app,
+        columns[1],
+        preview_body,
+        lines,
+        unwrapped_height,
     );
-    render_scrollable_content(frame, app, columns[1], preview_body, lines);
+}
+
+fn prepare_preview_lines(
+    app: &mut App,
+    body: Rect,
+    path: &str,
+    is_diff: bool,
+) -> (Vec<Line<'static>>, Option<usize>) {
+    let width = usize::from(body.width);
+    if app.changes.diff_wrap {
+        let lines = if is_diff {
+            styled_diff(&app.changes.diff, path, width)
+        } else {
+            styled_source(&app.changes.diff, path, width)
+        };
+        return (lines, None);
+    }
+
+    let height = app.changes.diff.lines().count();
+    let max_scroll = height.saturating_sub(usize::from(body.height));
+    app.changes.diff_scroll = app
+        .changes
+        .diff_scroll
+        .min(max_scroll.min(usize::from(u16::MAX)) as u16);
+    let start = usize::from(app.changes.diff_scroll);
+    let count = usize::from(body.height);
+    let lines = if is_diff {
+        styled_diff_window(&app.changes.diff, path, width, start, count)
+    } else {
+        styled_source_window(&app.changes.diff, path, width, start, count)
+    };
+    (lines, Some(height))
 }
 
 fn render_scrollable_content(
@@ -584,9 +632,15 @@ fn render_scrollable_content(
     panel: Rect,
     body: Rect,
     lines: Vec<Line<'static>>,
+    unwrapped_height: Option<usize>,
 ) {
-    let rendered_height =
-        rendered_text_height(&lines, usize::from(body.width), app.changes.diff_wrap);
+    let rendered_height = unwrapped_height.unwrap_or_else(|| {
+        rendered_text_height(&lines, usize::from(body.width), app.changes.diff_wrap)
+    });
+    let mut paragraph = Paragraph::new(lines).style(Style::default().bg(palette().panel));
+    if app.changes.diff_wrap {
+        paragraph = paragraph.wrap(Wrap { trim: false });
+    }
     let viewport_height = usize::from(body.height);
     let max_scroll = rendered_height
         .saturating_sub(viewport_height)
@@ -604,12 +658,12 @@ fn render_scrollable_content(
             max_scroll,
         )
     });
-    let mut paragraph = Paragraph::new(lines)
-        .scroll((app.changes.diff_scroll, 0))
-        .style(Style::default().bg(palette().panel));
-    if app.changes.diff_wrap {
-        paragraph = paragraph.wrap(Wrap { trim: false });
-    }
+    let paragraph_scroll = if unwrapped_height.is_some() {
+        0
+    } else {
+        app.changes.diff_scroll
+    };
+    paragraph = paragraph.scroll((paragraph_scroll, 0));
     frame.render_widget(paragraph, body);
     if let Some(thumb) = app.regions.diff_scroll_thumb {
         frame.render_widget(

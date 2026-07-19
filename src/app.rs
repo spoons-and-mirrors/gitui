@@ -19,8 +19,8 @@ use ratatui::{
 };
 
 use crate::{
-    git::{self, RepositoryData},
-    repository_session::{RepositorySession, WorkerCompletion},
+    git::RepositoryData,
+    repository_session::{LoadKind, Mutation, RepositorySession, WorkerCompletion},
     selection::{SelectionOutcome, SelectionState},
 };
 
@@ -65,6 +65,7 @@ impl Default for Settings {
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Regions {
+    pub screen: Option<Rect>,
     pub changes: Option<Rect>,
     pub graph: Option<Rect>,
     pub refresh: Option<Rect>,
@@ -126,6 +127,8 @@ pub struct App {
     copy_request: Option<String>,
     pub should_quit: bool,
     pub(crate) settings_path: Option<PathBuf>,
+    pending_reload: Option<(changes::ChangesSelection, Option<String>)>,
+    reload_queued: bool,
 }
 
 impl App {
@@ -175,6 +178,8 @@ impl App {
             copy_request: None,
             should_quit: false,
             settings_path,
+            pending_reload: None,
+            reload_queued: false,
         }
     }
 
@@ -401,6 +406,7 @@ impl App {
         .into_iter()
         .flatten()
         .find(|region| region.contains(point))
+        .or(self.regions.screen)
         .or_else(|| self.selection.screen_area())
         .unwrap_or(Rect::new(point.x, point.y, 1, 1))
     }
@@ -825,15 +831,14 @@ impl App {
         self.settings.history_height = bounds.bottom().saturating_sub(top).max(3);
     }
 
-    pub fn poll_worker(&mut self) {
-        if self.mode == Mode::Picker {
-            self.picker.poll_index();
-        }
+    pub fn poll_worker(&mut self) -> bool {
+        let mut changed = self.mode == Mode::Picker && self.picker.poll_index();
         let interval = fetch_interval(&self.settings);
         self.session
             .maybe_start_fetch(self.settings.auto_fetch, interval);
         self.session.maybe_start_status_check();
         while let Some(done) = self.session.next_worker_completion(interval) {
+            changed = true;
             match done {
                 WorkerCompletion::Commit(result) => match result {
                     Ok(output) if output.success => {
@@ -875,14 +880,74 @@ impl App {
                         self.notice = Some(error);
                     }
                 },
+                WorkerCompletion::Mutation(result) => match result {
+                    Ok(()) => self.reload(),
+                    Err(error) => self.notice = Some(error),
+                },
             }
         }
         while self.session.next_worktree_change() {
+            changed = true;
             self.reload();
-            if self.notice.as_deref() == Some("Refreshed") {
-                self.notice = None;
+            self.notice = None;
+        }
+        while let Some(done) = self.session.next_load_completion() {
+            changed = true;
+            match (done.kind, done.result) {
+                (LoadKind::Open, Ok(())) => {
+                    self.pending_reload = None;
+                    self.reload_queued = false;
+                    self.mode = Mode::Normal;
+                    self.actions = ActionsState::default();
+                    self.notice = Some("Repository opened".to_owned());
+                    self.graph_state = TableState::default();
+                    self.changes.reset_repository(self.session.data());
+                    self.graph_state.select(
+                        self.session
+                            .data()
+                            .is_some_and(|repo| !repo.commits.is_empty())
+                            .then_some(0),
+                    );
+                }
+                (LoadKind::Open, Err(error)) => {
+                    self.notice = None;
+                    self.picker.error = Some(error);
+                }
+                (LoadKind::Reload, Ok(())) => {
+                    if let Some((selection, selected_oid)) = self.pending_reload.take() {
+                        let repo = self.session.data().expect("reloaded repository");
+                        let commit_index = selected_oid.and_then(|oid| {
+                            repo.commits.iter().position(|commit| commit.oid == oid)
+                        });
+                        self.graph_state
+                            .select(commit_index.or_else(|| repo.commits.first().map(|_| 0)));
+                        self.changes.restore_selection(repo, selection);
+                    }
+                    if self.notice.as_deref() == Some("Refreshing…") {
+                        self.notice = Some("Refreshed".to_owned());
+                    }
+                    if self.reload_queued {
+                        self.reload_queued = false;
+                        self.reload();
+                    }
+                }
+                (LoadKind::Reload, Err(error)) => {
+                    self.pending_reload = None;
+                    self.reload_queued = false;
+                    self.notice = Some(error);
+                }
             }
         }
+        changed |= self
+            .changes
+            .poll_preview(self.session.data().map(|repo| repo.root.as_path()));
+        changed
+    }
+
+    pub fn requires_render_before_next_event(&self) -> bool {
+        self.regions
+            .screen
+            .is_some_and(|area| self.selection.needs_capture(area))
     }
 
     pub fn change_counts(&self) -> (usize, usize) {
@@ -1156,7 +1221,11 @@ impl App {
         if action == ActionId::Commit {
             self.view = View::Changes;
             self.set_left_pane(LeftPane::Worktree);
-            self.mode = Mode::Commit;
+            if self.commit_message.trim().is_empty() {
+                self.mode = Mode::Commit;
+            } else {
+                self.start_commit();
+            }
             return;
         }
         if action == ActionId::Custom {
@@ -1190,21 +1259,12 @@ impl App {
     }
 
     fn open_repository(&mut self, path: PathBuf) {
-        match self.session.open(&path, fetch_interval(&self.settings)) {
-            Ok(()) => {
-                self.mode = Mode::Normal;
-                self.actions = ActionsState::default();
-                self.notice = Some("Repository opened".to_owned());
-                self.graph_state = TableState::default();
-                self.changes.reset_repository(self.session.data());
-                self.graph_state.select(
-                    self.session
-                        .data()
-                        .is_some_and(|repo| !repo.commits.is_empty())
-                        .then_some(0),
-                );
-            }
-            Err(error) => self.picker.error = Some(error.to_string()),
+        if self
+            .session
+            .start_open(path, fetch_interval(&self.settings))
+        {
+            self.picker.error = None;
+            self.notice = Some("Opening repository…".to_owned());
         }
     }
 
@@ -1213,7 +1273,11 @@ impl App {
             .repository()
             .map(|repo| repo.root.clone())
             .unwrap_or_else(|| self.picker.directory.clone());
-        self.picker.navigate(start);
+        if self.picker.directory == start {
+            let _ = self.picker.poll_index();
+        } else {
+            self.picker.navigate(start);
+        }
         self.picker.editing_path = false;
         self.mode = Mode::Picker;
     }
@@ -1324,27 +1388,19 @@ impl App {
         let Some(change) = repo.changes.get(index).cloned() else {
             return;
         };
-        let result = if change.staged {
-            git::unstage(&repo.root, &change)
+        let mutation = if change.staged {
+            Mutation::Unstage(change)
         } else {
-            git::stage(&repo.root, &change)
+            Mutation::Stage(change)
         };
-        if let Err(error) = result {
-            self.notice = Some(error.to_string());
-        } else {
-            self.reload();
-        }
+        let _ = self.session.start_mutation(mutation);
     }
 
     fn stage_all(&mut self) {
-        let Some(root) = self.repository().map(|repo| repo.root.clone()) else {
+        if self.repository().is_none() {
             return;
-        };
-        if let Err(error) = git::stage_all(&root) {
-            self.notice = Some(error.to_string());
-        } else {
-            self.reload();
         }
+        let _ = self.session.start_mutation(Mutation::StageAll);
     }
 
     fn toggle_all_staging(&mut self) {
@@ -1359,14 +1415,10 @@ impl App {
     }
 
     fn unstage_all(&mut self) {
-        let Some(root) = self.repository().map(|repo| repo.root.clone()) else {
+        if self.repository().is_none() {
             return;
-        };
-        if let Err(error) = git::unstage_all(&root) {
-            self.notice = Some(error.to_string());
-        } else {
-            self.reload();
         }
+        let _ = self.session.start_mutation(Mutation::UnstageAll);
     }
 
     fn reload(&mut self) {
@@ -1380,17 +1432,12 @@ impl App {
             .and_then(|index| repo.commits.get(index))
             .map(|commit| commit.oid.clone());
 
-        match self.session.reload() {
-            Ok(()) => {
-                let repo = self.session.data().expect("reloaded repository");
-                let commit_index = selected_oid
-                    .and_then(|oid| repo.commits.iter().position(|commit| commit.oid == oid));
-                self.graph_state
-                    .select(commit_index.or_else(|| repo.commits.first().map(|_| 0)));
-                self.changes.restore_selection(repo, selection);
-                self.notice = Some("Refreshed".to_owned());
-            }
-            Err(error) => self.notice = Some(error.to_string()),
+        if self.session.start_reload(fetch_interval(&self.settings)) {
+            self.pending_reload = Some((selection, selected_oid));
+            self.notice = Some("Refreshing…".to_owned());
+        } else {
+            self.pending_reload = Some((selection, selected_oid));
+            self.reload_queued = true;
         }
     }
 
@@ -1620,12 +1667,12 @@ mod tests {
         let mut app = App::new(root.to_path_buf());
         app.settings.auto_fetch = true;
         app.session.schedule_fetch_now();
-        app.poll_worker();
+        let _ = app.poll_worker();
         assert!(app.fetch_running());
 
         for _ in 0..100 {
             thread::sleep(Duration::from_millis(10));
-            app.poll_worker();
+            let _ = app.poll_worker();
             if !app.fetch_running() {
                 break;
             }
@@ -1651,8 +1698,34 @@ mod tests {
 
         for _ in 0..100 {
             thread::sleep(Duration::from_millis(10));
-            app.poll_worker();
-            if !app.commit_running() {
+            let _ = app.poll_worker();
+            if app.repository().unwrap().commits.len() == 2 {
+                break;
+            }
+        }
+        assert!(!app.commit_running());
+        assert!(app.commit_message.is_empty());
+        assert_eq!(app.repository().unwrap().commits.len(), 2);
+    }
+
+    #[test]
+    fn commit_action_submits_an_existing_message() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        initialize_repository(root);
+        fs::write(root.join("next.txt"), "next\n").unwrap();
+        run_git(root, &["add", "next.txt"]);
+
+        let mut app = App::new(root.to_path_buf());
+        app.commit_message = "commit from actions".to_owned();
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(app.commit_running());
+        for _ in 0..100 {
+            thread::sleep(Duration::from_millis(10));
+            let _ = app.poll_worker();
+            if app.repository().unwrap().commits.len() == 2 {
                 break;
             }
         }
@@ -1684,7 +1757,7 @@ mod tests {
         assert_eq!(app.actions.status, CommandStatus::Running);
         for _ in 0..100 {
             thread::sleep(Duration::from_millis(10));
-            app.poll_worker();
+            let _ = app.poll_worker();
             if !app.session.command_running() {
                 break;
             }
@@ -1712,7 +1785,7 @@ mod tests {
         assert_eq!(app.actions.transcript[0].stdout.trim(), "main");
         for _ in 0..100 {
             thread::sleep(Duration::from_millis(10));
-            app.poll_worker();
+            let _ = app.poll_worker();
             if !app.session.command_running() {
                 break;
             }
@@ -1748,7 +1821,7 @@ mod tests {
         fs::write(&tracked, "first\n").unwrap();
         app.session.schedule_status_check_now();
         for _ in 0..100 {
-            app.poll_worker();
+            let _ = app.poll_worker();
             if app.changes.diff.contains("first") {
                 break;
             }
@@ -1759,7 +1832,7 @@ mod tests {
         fs::write(&tracked, "later\n").unwrap();
         app.session.schedule_status_check_now();
         for _ in 0..100 {
-            app.poll_worker();
+            let _ = app.poll_worker();
             if app.changes.diff.contains("later") {
                 break;
             }
