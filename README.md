@@ -2,6 +2,7 @@
 
 - A collapsible worktree tree with per-file added/deleted line counts for inspecting, staging, unstaging, and committing changes.
 - A switchable repository file tree, including Git-ignored files, with read-only, syntax-colored previews.
+- Local workspaces for browsing, searching, and previewing directories that are not Git repositories.
 - A resizable current-branch history shelf with HEAD, branch, remote, and tag decorations; selecting a commit shows its patch.
 - A repository Actions menu for committing, pushing, fetching, pulling with rebase, and running non-interactive Git commands with captured output.
 - An all-refs commit graph showing branches, remotes, tags, authors, dates, and hashes.
@@ -11,14 +12,14 @@
 
 ## Run
 
-Git and a recent Rust toolchain are required.
+A recent Rust toolchain is required. Git is required for repository status, history, staging, and repository actions.
 
 ```sh
 cargo run -p hunkle
 cargo run -p hunkle -- /path/to/repository
 ```
 
-Starting outside a repository opens the directory navigator automatically.
+hunkle opens exactly the current or requested directory. When that directory is a Git repository root, Git status and history are available. Any other directory opens as a local file workspace with recursive file browsing, fuzzy search, and previews; it never climbs into an enclosing repository.
 
 ## Keys
 
@@ -31,6 +32,7 @@ Starting outside a repository opens the directory navigator automatically.
 | `w` | Toggle line wrapping in the Diff panel |
 | `e`, `E` | Open the selected file in your editor, or configure the editor |
 | `f` | Switch the left pane between Worktree and Files |
+| `F3` | Fuzzy-search repository files from anywhere |
 | `h`, `l`, `Left`, `Right` | Navigate the tree; Right enters/stages in hunk mode and Left exits it |
 | `Enter` | Toggle the selected directory |
 | `Space` | Stage or unstage the selected entry, or stage the selected hunk |
@@ -83,12 +85,12 @@ The binary stays deliberately direct, with modules split by the behavior they ow
 | Module | Responsibility |
 |---|---|
 | `main` | Terminal setup, cleanup, and event loop |
-| `app` | Global input routing, Git mutations, settings, and notices |
+| `app` | Global input routing, workspace state, Git mutations, settings, and notices |
 | `app::actions` | Repository Actions, command input, and captured results |
 | `app::changes` | Changes-screen selection, navigation, and displayed content |
 | `app::repository_picker` | Repository discovery, navigation, and fuzzy search |
-| `repository_session` | Active repository lifecycle and background operations |
-| `git` | Installed-Git commands, parsing, and repository data |
+| `repository_session` | Active repository or local-workspace lifecycle and background operations |
+| `git` | Installed-Git commands, parsing, repository data, and local file workspaces |
 | `selection` | Screen-cell selection, text extraction, and clipboard fallback |
 | `tree` | Pure worktree and file-tree projection |
 | `ui` | Rendering shell, header, and view dispatch |

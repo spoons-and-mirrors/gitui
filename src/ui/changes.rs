@@ -61,6 +61,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     let worktree_content = columns[0].inner(Margin::new(1, 0));
     let repo = app.session.data().expect("checked above");
+    let local_workspace = repo.is_local();
     let staged_count = repo.changes.iter().filter(|change| change.staged).count();
     let checkbox = if !repo.changes.is_empty() && staged_count == repo.changes.len() {
         "◉"
@@ -239,7 +240,18 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     let history_header = app.regions.history_splitter.expect("set above");
     let history_list = app.regions.history_list.expect("set above");
-    app.regions.actions = Some(draw_actions(frame, actions_row, app.mode));
+    app.regions.actions = if local_workspace {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                "LOCAL WORKSPACE",
+                Style::default().fg(palette().faint),
+            )),
+            actions_row,
+        );
+        None
+    } else {
+        Some(draw_actions(frame, actions_row, app.mode))
+    };
     history::draw_branch(
         frame,
         &repo.history,
@@ -399,7 +411,23 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let commit_active = app.mode == Mode::Commit;
     fill(frame, commit_area, palette().canvas);
     let commit_content = commit_area.inner(Margin::new(1, 0));
-    let (commit_text, commit_height) = if app.commit_running() {
+    let (commit_text, commit_height) = if local_workspace {
+        (
+            Text::from(vec![
+                Line::styled(
+                    "Local file workspace",
+                    Style::default()
+                        .fg(palette().muted)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Line::styled(
+                    "Git status and commits are unavailable",
+                    Style::default().fg(palette().faint),
+                ),
+            ]),
+            2,
+        )
+    } else if app.commit_running() {
         (
             Text::from(Line::styled(
                 "Creating commit...",
@@ -584,7 +612,7 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
     let rows = app.changes.explorer_rows();
     let items: Vec<ListItem<'_>> = if rows.is_empty() {
         vec![ListItem::new(Line::styled(
-            " No repository files",
+            " No files",
             Style::default().fg(palette().faint),
         ))]
     } else {

@@ -11,14 +11,27 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepositoryKind {
+    Git,
+    Local,
+}
+
 #[derive(Debug, Clone)]
 pub struct RepositoryData {
     pub root: PathBuf,
+    pub kind: RepositoryKind,
     pub branch: String,
     pub changes: Vec<Change>,
     pub files: Vec<String>,
     pub history: Vec<Commit>,
     pub commits: Vec<Commit>,
+}
+
+impl RepositoryData {
+    pub fn is_local(&self) -> bool {
+        self.kind == RepositoryKind::Local
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,11 +85,32 @@ pub fn discover(path: &Path) -> Result<PathBuf> {
     if root.is_empty() {
         bail!("Git did not return a worktree path");
     }
-    Ok(PathBuf::from(root))
+
+    let root = fs::canonicalize(root).context("could not resolve repository root")?;
+    let requested = fs::canonicalize(path).context("could not resolve requested directory")?;
+    if root != requested {
+        bail!(
+            "{} is not a repository root (enclosing repository: {})",
+            requested.display(),
+            root.display()
+        );
+    }
+    Ok(root)
 }
 
+#[cfg(test)]
 pub fn load(path: &Path) -> Result<RepositoryData> {
-    let root = discover(path)?;
+    load_git_root(discover(path)?)
+}
+
+pub fn load_or_local(path: &Path) -> Result<RepositoryData> {
+    match discover(path) {
+        Ok(root) => load_git_root(root),
+        Err(_) => local_workspace(path),
+    }
+}
+
+fn load_git_root(root: PathBuf) -> Result<RepositoryData> {
     let (branch, changes, files, history, commits) = thread::scope(|scope| {
         let branch = scope.spawn(|| branch_name(&root));
         let changes = scope.spawn(|| -> Result<Vec<Change>> {
@@ -113,11 +147,29 @@ pub fn load(path: &Path) -> Result<RepositoryData> {
 
     Ok(RepositoryData {
         root,
+        kind: RepositoryKind::Git,
         branch,
         changes,
         files,
         history,
         commits,
+    })
+}
+
+fn local_workspace(path: &Path) -> Result<RepositoryData> {
+    let root = fs::canonicalize(path).context("could not resolve workspace directory")?;
+    if !root.is_dir() {
+        bail!("{} is not a directory", root.display());
+    }
+    let files = repository_files(&root)?;
+    Ok(RepositoryData {
+        root,
+        kind: RepositoryKind::Local,
+        branch: "local".to_owned(),
+        changes: Vec::new(),
+        files,
+        history: Vec::new(),
+        commits: Vec::new(),
     })
 }
 
@@ -852,6 +904,49 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].path, "new.rs");
         assert_eq!(parsed[0].original_path.as_deref(), Some("old.rs"));
+    }
+
+    #[test]
+    fn does_not_climb_to_an_enclosing_repository() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "-b", "main"]);
+        let nested = root.join("nested/config");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("settings.toml"), "theme = 'test'\n").unwrap();
+
+        assert_eq!(discover(root).unwrap(), fs::canonicalize(root).unwrap());
+        let error = discover(&nested).unwrap_err().to_string();
+        assert!(error.contains("not a repository root"));
+        assert!(error.contains(&fs::canonicalize(root).unwrap().display().to_string()));
+        assert!(load(&nested).is_err());
+
+        let workspace = load_or_local(&nested).unwrap();
+        assert_eq!(workspace.kind, RepositoryKind::Local);
+        assert_eq!(workspace.root, fs::canonicalize(&nested).unwrap());
+        assert_eq!(workspace.branch, "local");
+        assert_eq!(workspace.files, ["settings.toml"]);
+        assert!(workspace.changes.is_empty());
+        assert!(workspace.history.is_empty());
+        assert!(workspace.commits.is_empty());
+    }
+
+    #[test]
+    fn loads_a_plain_directory_as_a_local_workspace() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::create_dir_all(root.join("src/components")).unwrap();
+        fs::write(root.join("README.md"), "local\n").unwrap();
+        fs::write(root.join("src/components/card.rs"), "component\n").unwrap();
+
+        let workspace = load_or_local(root).unwrap();
+        assert_eq!(workspace.kind, RepositoryKind::Local);
+        assert_eq!(workspace.root, fs::canonicalize(root).unwrap());
+        assert_eq!(workspace.branch, "local");
+        assert_eq!(workspace.files, ["README.md", "src/components/card.rs"]);
+        assert!(workspace.changes.is_empty());
+        assert!(workspace.history.is_empty());
+        assert!(workspace.commits.is_empty());
     }
 
     #[test]

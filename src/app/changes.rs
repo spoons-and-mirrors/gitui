@@ -77,7 +77,11 @@ impl ChangesState {
         let (preview_tx, preview_rx) = preview_worker();
         let collapsed_explorer_directories = default_explorer_collapsed_directories(repo);
         let mut state = Self {
-            pane: LeftPane::Worktree,
+            pane: if repo.is_some_and(RepositoryData::is_local) {
+                LeftPane::Files
+            } else {
+                LeftPane::Worktree
+            },
             worktree_state: ListState::default(),
             explorer_state: ListState::default(),
             worktree_scroll: 0,
@@ -106,6 +110,11 @@ impl ChangesState {
     }
 
     pub(super) fn reset_repository(&mut self, repo: Option<&RepositoryData>) {
+        self.pane = if repo.is_some_and(RepositoryData::is_local) {
+            LeftPane::Files
+        } else {
+            LeftPane::Worktree
+        };
         self.worktree_state = ListState::default();
         self.explorer_state = ListState::default();
         self.worktree_scroll = 0;
@@ -272,6 +281,34 @@ impl ChangesState {
             return false;
         }
         self.explorer_state.select(Some(index));
+        self.refresh_diff(Some(repo));
+        true
+    }
+
+    pub(super) fn select_explorer_file(
+        &mut self,
+        repo: &RepositoryData,
+        file_index: usize,
+        viewport: usize,
+    ) -> bool {
+        let Some(path) = repo.files.get(file_index) else {
+            return false;
+        };
+        self.collapsed_explorer_directories.retain(|directory| {
+            !path
+                .strip_prefix(directory)
+                .is_some_and(|rest| rest.starts_with('/'))
+        });
+        self.rebuild_explorer_rows(Some(repo));
+        let Some(row) = self.row_for_explorer_file(file_index) else {
+            return false;
+        };
+        self.explorer_state.select(Some(row));
+        if viewport == 0 {
+            self.explorer_scroll = row;
+        } else {
+            ensure_selection_visible(&mut self.explorer_scroll, Some(row), viewport);
+        }
         self.refresh_diff(Some(repo));
         true
     }
@@ -959,7 +996,7 @@ fn ensure_selection_visible(scroll: &mut usize, selected: Option<usize>, viewpor
 mod tests {
     use std::path::PathBuf;
 
-    use crate::git::Change;
+    use crate::git::{Change, RepositoryKind};
 
     use super::*;
 
@@ -967,6 +1004,7 @@ mod tests {
     fn starts_files_collapsed_but_keeps_worktree_expanded() {
         let repo = RepositoryData {
             root: PathBuf::new(),
+            kind: RepositoryKind::Git,
             branch: "main".to_owned(),
             changes: vec![Change {
                 path: "src/main.rs".to_owned(),

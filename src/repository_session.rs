@@ -96,9 +96,10 @@ impl RepositorySession {
         let (worker_tx, worker_rx) = mpsc::channel();
         let (status_tx, status_rx) = mpsc::channel();
         let (load_tx, load_rx) = mpsc::channel();
-        let data = git::load(path).ok();
+        let data = git::load_or_local(path).ok();
         let status_signature = data
             .as_ref()
+            .filter(|repository| !repository.is_local())
             .and_then(|repository| git::worktree_signature(&repository.root).ok());
 
         Self {
@@ -124,6 +125,13 @@ impl RepositorySession {
 
     pub(crate) fn data(&self) -> Option<&RepositoryData> {
         self.data.as_ref()
+    }
+
+    fn git_root(&self) -> Option<PathBuf> {
+        self.data
+            .as_ref()
+            .filter(|repository| !repository.is_local())
+            .map(|repository| repository.root.clone())
     }
 
     pub(crate) fn commit_running(&self) -> bool {
@@ -179,7 +187,7 @@ impl RepositorySession {
         if self.commit_running || self.command_running || self.mutation_running {
             return false;
         }
-        let Some(root) = self.data.as_ref().map(|repository| repository.root.clone()) else {
+        let Some(root) = self.git_root() else {
             return false;
         };
 
@@ -204,7 +212,7 @@ impl RepositorySession {
         {
             return false;
         }
-        let Some(root) = self.data.as_ref().map(|repository| repository.root.clone()) else {
+        let Some(root) = self.git_root() else {
             return false;
         };
 
@@ -230,7 +238,7 @@ impl RepositorySession {
         {
             return false;
         }
-        let Some(root) = self.data.as_ref().map(|repository| repository.root.clone()) else {
+        let Some(root) = self.git_root() else {
             return false;
         };
 
@@ -270,7 +278,7 @@ impl RepositorySession {
         {
             return;
         }
-        let Some(root) = self.data.as_ref().map(|repository| repository.root.clone()) else {
+        let Some(root) = self.git_root() else {
             return;
         };
 
@@ -298,7 +306,7 @@ impl RepositorySession {
         {
             return;
         }
-        let Some(root) = self.data.as_ref().map(|repository| repository.root.clone()) else {
+        let Some(root) = self.git_root() else {
             return;
         };
 
@@ -391,9 +399,11 @@ impl RepositorySession {
         let generation = self.load_generation;
         let sender = self.load_tx.clone();
         thread::spawn(move || {
-            let result = git::load(&path)
+            let result = git::load_or_local(&path)
                 .map(|data| {
-                    let signature = git::worktree_signature(&data.root).ok();
+                    let signature = (!data.is_local())
+                        .then(|| git::worktree_signature(&data.root).ok())
+                        .flatten();
                     (data, signature)
                 })
                 .map_err(|error| error.to_string());
@@ -525,6 +535,23 @@ mod tests {
         assert!(!session.status_check_running);
     }
 
+    #[test]
+    fn local_workspaces_do_not_schedule_git_background_work() {
+        let mut session = session("/local", None);
+        session.data.as_mut().unwrap().kind = git::RepositoryKind::Local;
+        session.schedule_fetch_now();
+        session.schedule_status_check_now();
+
+        session.maybe_start_fetch(true, Duration::ZERO);
+        session.maybe_start_status_check();
+
+        assert!(!session.fetch_running);
+        assert!(!session.status_check_running);
+        assert!(!session.start_commit("local".to_owned()));
+        assert!(!session.start_command("Status".to_owned(), vec!["status".to_owned()]));
+        assert!(!session.start_mutation(Mutation::StageAll));
+    }
+
     fn session(root: &str, status_signature: Option<u64>) -> RepositorySession {
         let (worker_tx, worker_rx) = mpsc::channel();
         let (status_tx, status_rx) = mpsc::channel();
@@ -532,6 +559,7 @@ mod tests {
         RepositorySession {
             data: Some(RepositoryData {
                 root: PathBuf::from(root),
+                kind: git::RepositoryKind::Git,
                 branch: "main".to_owned(),
                 changes: Vec::new(),
                 files: Vec::new(),

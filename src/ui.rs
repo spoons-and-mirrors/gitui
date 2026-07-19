@@ -67,6 +67,15 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     }
     draw_navigation(frame, app, layout[2]);
     match app.mode {
+        Mode::FileSearch => {
+            let files = app
+                .session
+                .data()
+                .map_or(&[][..], |repo| repo.files.as_slice());
+            let regions = overlays::draw_file_search(frame, &mut app.file_search, files);
+            app.regions.file_search_overlay = Some(regions.overlay);
+            app.regions.file_search_list = Some(regions.list);
+        }
         Mode::Picker => {
             let regions = overlays::draw_picker(frame, &mut app.picker);
             app.regions.picker_overlay = Some(regions.overlay);

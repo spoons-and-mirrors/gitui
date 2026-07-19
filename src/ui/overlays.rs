@@ -8,11 +8,16 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
-    ACTION_ITEMS, ActionsState, CommandStatus, PickerAction, PickerEntry, RepositoryPicker,
-    Settings,
+    ACTION_ITEMS, ActionsState, CommandStatus, FileSearch, PickerAction, PickerEntry,
+    RepositoryPicker, Settings,
 };
 
 use super::{fill, palette, truncate_width};
+
+pub(super) struct FileSearchRegions {
+    pub(super) overlay: Rect,
+    pub(super) list: Rect,
+}
 
 pub(super) struct PickerRegions {
     pub(super) overlay: Rect,
@@ -576,6 +581,195 @@ pub(super) fn draw_picker(frame: &mut Frame<'_>, picker: &mut RepositoryPicker) 
     }
 }
 
+pub(super) fn draw_file_search(
+    frame: &mut Frame<'_>,
+    search: &mut FileSearch,
+    files: &[String],
+) -> FileSearchRegions {
+    let desired_height = (11 + search.results.len().max(1).min(13) as u16).clamp(15, 24);
+    let area = centered_min(frame.area(), 78, 0, 56, desired_height);
+    frame.render_widget(Clear, area);
+    fill(frame, area, palette().panel);
+    fill(
+        frame,
+        Rect::new(area.x, area.y, area.width, 3),
+        palette().surface_alt,
+    );
+    fill(
+        frame,
+        Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
+        palette().surface_alt,
+    );
+
+    let inner_x = area.x.saturating_add(2);
+    let inner_width = area.width.saturating_sub(4);
+    let count = format!("{} FILES", files.len());
+    let title_width = "FIND FILE  Search this repository".len();
+    let title_padding = usize::from(inner_width)
+        .saturating_sub(title_width + UnicodeWidthStr::width(count.as_str()));
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "FIND FILE",
+                Style::default()
+                    .fg(palette().ink)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  Search this repository",
+                Style::default().fg(palette().faint),
+            ),
+            Span::raw(" ".repeat(title_padding)),
+            Span::styled(
+                count,
+                Style::default()
+                    .fg(palette().accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        Rect::new(inner_x, area.y.saturating_add(1), inner_width, 1),
+    );
+
+    let input = Rect::new(inner_x, area.y.saturating_add(4), inner_width, 3);
+    fill(frame, input, palette().selected);
+    fill(
+        frame,
+        Rect::new(input.x, input.y, 1, input.height),
+        palette().accent,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            "QUERY",
+            Style::default()
+                .fg(palette().muted)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Rect::new(
+            input.x.saturating_add(2),
+            input.y,
+            input.width.saturating_sub(4),
+            1,
+        ),
+    );
+    let query_width = usize::from(input.width.saturating_sub(5));
+    let query = truncate_start_width(&search.query, query_width);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                if query.is_empty() {
+                    "Type a filename or path…".to_owned()
+                } else {
+                    query
+                },
+                Style::default().fg(if search.query.is_empty() {
+                    palette().faint
+                } else {
+                    palette().ink
+                }),
+            ),
+            Span::styled("▌", Style::default().fg(palette().accent)),
+        ])),
+        Rect::new(
+            input.x.saturating_add(2),
+            input.y.saturating_add(1),
+            input.width.saturating_sub(4),
+            1,
+        ),
+    );
+
+    let detail = if search.query.trim().is_empty() {
+        "start typing".to_owned()
+    } else if search.match_count > search.results.len() {
+        format!(
+            "showing {} of {} matches",
+            search.results.len(),
+            search.match_count
+        )
+    } else {
+        format!("{} matches", search.match_count)
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "RESULTS",
+                Style::default()
+                    .fg(palette().muted)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {detail}"), Style::default().fg(palette().faint)),
+        ])),
+        Rect::new(inner_x, area.y.saturating_add(8), inner_width, 1),
+    );
+
+    let list_y = area.y.saturating_add(10);
+    let list = Rect::new(
+        inner_x,
+        list_y,
+        inner_width,
+        area.bottom().saturating_sub(1).saturating_sub(list_y),
+    );
+    if search.results.is_empty() {
+        let message = if search.query.trim().is_empty() {
+            "Search by filename, path, or multiple words"
+        } else {
+            "No repository files match that query"
+        };
+        frame.render_widget(
+            List::new([ListItem::new(Line::styled(
+                message,
+                Style::default().fg(palette().faint),
+            ))]),
+            list,
+        );
+    } else {
+        let items = search.results.iter().filter_map(|result| {
+            files
+                .get(result.file_index)
+                .map(|path| file_search_item(path, usize::from(list.width)))
+        });
+        frame.render_stateful_widget(
+            List::new(items).highlight_style(Style::default().bg(palette().selected)),
+            list,
+            &mut search.state,
+        );
+    }
+
+    frame.render_widget(
+        Paragraph::new("Enter open   ↑↓ select   Ctrl+U clear   F3 / Esc close")
+            .style(Style::default().fg(palette().muted))
+            .alignment(Alignment::Right),
+        Rect::new(inner_x, area.bottom().saturating_sub(1), inner_width, 1),
+    );
+
+    FileSearchRegions {
+        overlay: area,
+        list,
+    }
+}
+
+fn file_search_item(path: &str, width: usize) -> ListItem<'static> {
+    let (parent, name) = path.rsplit_once('/').unwrap_or(("", path));
+    let available = width.saturating_sub(2);
+    let name = truncate_width(name, available);
+    let name_width = UnicodeWidthStr::width(name.as_str());
+    let parent_width = available.saturating_sub(name_width + 2);
+    let parent = truncate_start_width(parent, parent_width);
+    let mut spans = vec![
+        Span::styled("› ", Style::default().fg(palette().accent)),
+        Span::styled(
+            name,
+            Style::default()
+                .fg(palette().ink)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if !parent.is_empty() {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(parent, Style::default().fg(palette().faint)));
+    }
+    ListItem::new(Line::from(spans))
+}
+
 fn picker_item(entry: &PickerEntry, width: usize) -> ListItem<'static> {
     let (marker, label, detail, color) = match entry.action {
         PickerAction::Open if entry.is_repo => ("● ", entry.label.clone(), "open", palette().green),
@@ -950,6 +1144,7 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
         help_line("g", "Git command"),
         help_line("e / E", "Edit / configure editor"),
         help_line("f", "Worktree / files"),
+        help_line("F3", "Find repository file"),
         help_line("w", "Wrap diff"),
     ];
     let worktree = vec![

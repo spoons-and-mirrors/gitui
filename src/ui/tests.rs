@@ -827,6 +827,117 @@ fn colors_changed_files_in_the_files_view() {
 }
 
 #[test]
+fn opens_plain_directories_as_file_workspaces() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    fs::create_dir_all(root.join("config/nested")).unwrap();
+    fs::write(root.join("README.md"), "local workspace\n").unwrap();
+    fs::write(root.join("config/nested/settings.toml"), "theme = 'test'\n").unwrap();
+
+    let mut app = App::new(root.to_path_buf());
+    assert_eq!(app.mode, Mode::Normal);
+    assert!(app.repository().unwrap().is_local());
+    assert_eq!(app.changes.pane, LeftPane::Files);
+    wait_for_preview(&mut app);
+    assert_eq!(app.changes.diff, "local workspace\n");
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(screen.contains("WORKTREE"));
+    assert!(screen.contains("FILES"));
+    assert!(screen.contains("README.md"));
+    assert!(screen.contains("local workspace"));
+
+    let worktree_tab = app.regions.worktree_tab.unwrap();
+    click(&mut app, worktree_tab.x, worktree_tab.y);
+    assert_eq!(app.changes.pane, LeftPane::Worktree);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(screen.contains("Working tree clean"));
+    assert!(screen.contains("LOCAL WORKSPACE"));
+    assert!(screen.contains("Local file workspace"));
+}
+
+#[test]
+fn fuzzy_searches_and_opens_repository_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    fs::create_dir_all(root.join("src/components")).unwrap();
+    fs::write(
+        root.join("src/components/profile_card.rs"),
+        "pub struct ProfileCard;\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/components/button.rs"),
+        "pub struct Button;\n",
+    )
+    .unwrap();
+    fs::write(root.join("README.md"), "search fixture\n").unwrap();
+
+    let mut app = App::new(root.to_path_buf());
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::FileSearch);
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    app.view = View::Graph;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+    for character in "profile card".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+    }
+    assert_eq!(app.mode, Mode::FileSearch);
+    assert_eq!(app.file_search.match_count, 1);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(screen.contains("FIND FILE"));
+    assert!(screen.contains("profile_card.rs"));
+    assert!(screen.contains("src/components"));
+    assert!(app.regions.file_search_overlay.is_some());
+    assert!(app.regions.file_search_list.is_some());
+
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    wait_for_preview(&mut app);
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.view, View::Changes);
+    assert_eq!(app.changes.pane, LeftPane::Files);
+    assert_eq!(
+        app.selected_explorer_file_path(),
+        Some("src/components/profile_card.rs")
+    );
+    assert_eq!(app.changes.diff, "pub struct ProfileCard;\n");
+    assert!(
+        app.changes
+            .explorer_rows()
+            .iter()
+            .any(|row| row.label == "profile_card.rs")
+    );
+}
+
+#[test]
 fn selects_visible_text_and_suppresses_clicks_after_dragging() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();

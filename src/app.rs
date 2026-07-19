@@ -1,10 +1,13 @@
 mod actions;
 mod changes;
+mod file_search;
+mod fuzzy;
 mod repository_picker;
 mod text_input;
 
 pub(crate) use actions::{ACTION_ITEMS, ActionsState, CommandStatus};
 pub use changes::{ChangesState, LeftPane};
+pub(crate) use file_search::FileSearch;
 pub use repository_picker::{PickerAction, PickerEntry, RepositoryPicker};
 
 use std::{
@@ -39,6 +42,7 @@ pub enum View {
 pub enum Mode {
     Normal,
     Commit,
+    FileSearch,
     Picker,
     Settings,
     Help,
@@ -115,6 +119,8 @@ pub struct Regions {
     pub command_overlay: Option<Rect>,
     pub command_output: Option<Rect>,
     pub editor_overlay: Option<Rect>,
+    pub file_search_overlay: Option<Rect>,
+    pub file_search_list: Option<Rect>,
     pub editor_setting: Option<Rect>,
     pub auto_fetch: Option<Rect>,
     pub fetch_interval: Option<Rect>,
@@ -138,6 +144,7 @@ pub struct App {
     pub dragging_diff_scrollbar: bool,
     diff_scroll_drag_offset: u16,
     pub picker: RepositoryPicker,
+    pub(crate) file_search: FileSearch,
     pub(crate) actions: ActionsState,
     pub settings: Settings,
     pub settings_selection: usize,
@@ -189,6 +196,7 @@ impl App {
             .unwrap_or(path);
 
         let changes = ChangesState::new(session.data());
+        let file_search = FileSearch::new(session.data().map_or(&[], |repo| repo.files.as_slice()));
         let mut graph_state = TableState::default();
         graph_state.select(
             session
@@ -209,6 +217,7 @@ impl App {
             dragging_diff_scrollbar: false,
             diff_scroll_drag_offset: 0,
             picker: RepositoryPicker::new(start),
+            file_search,
             actions: ActionsState::default(),
             settings,
             settings_selection: 0,
@@ -231,6 +240,25 @@ impl App {
         self.session.data()
     }
 
+    fn git_repository(&self) -> Option<&RepositoryData> {
+        self.repository().filter(|repo| !repo.is_local())
+    }
+
+    fn require_git_repository(&mut self) -> bool {
+        if self.git_repository().is_some() {
+            return true;
+        }
+        self.notice = Some(
+            if self.repository().is_some() {
+                "Not a Git repository"
+            } else {
+                "Open a repository first"
+            }
+            .to_owned(),
+        );
+        false
+    }
+
     pub(crate) fn commit_running(&self) -> bool {
         self.session.commit_running()
     }
@@ -250,9 +278,14 @@ impl App {
             self.should_quit = true;
             return;
         }
+        if key.code == KeyCode::F(3) && self.mode != Mode::FileSearch {
+            self.open_file_search();
+            return;
+        }
         match self.mode {
             Mode::Normal => self.handle_normal(key),
             Mode::Commit => self.handle_commit_input(key),
+            Mode::FileSearch => self.handle_file_search(key),
             Mode::Picker => self.handle_picker(key),
             Mode::Settings => self.handle_settings(key),
             Mode::ActionMenu => self.handle_action_menu(key),
@@ -269,6 +302,11 @@ impl App {
     pub fn handle_paste(&mut self, text: &str) {
         match self.mode {
             Mode::Commit => self.commit_input.insert(text),
+            Mode::FileSearch => {
+                if let Some(repo) = self.session.data() {
+                    self.file_search.paste(text, &repo.files);
+                }
+            }
             Mode::Picker => self.picker.paste(text),
             Mode::Command if self.actions.status != CommandStatus::Running => {
                 self.actions.input.push_str(text);
@@ -360,6 +398,10 @@ impl App {
         }
         if self.mode == Mode::Picker {
             self.handle_picker_mouse(mouse);
+            return;
+        }
+        if self.mode == Mode::FileSearch {
+            self.handle_file_search_mouse(mouse);
             return;
         }
         if self.mode == Mode::Settings {
@@ -461,6 +503,7 @@ impl App {
         [
             self.regions.command_overlay,
             self.regions.editor_overlay,
+            self.regions.file_search_overlay,
             self.regions.picker_overlay,
             self.regions.settings_overlay,
             self.regions.action_menu,
@@ -487,6 +530,7 @@ impl App {
             Mode::ActionMenu => self.handle_action_mouse(mouse),
             Mode::Command => self.handle_command_mouse(mouse),
             Mode::Picker => self.handle_picker_mouse(mouse),
+            Mode::FileSearch => self.handle_file_search_mouse(mouse),
             Mode::Settings => self.handle_settings_mouse(mouse),
             Mode::Help => self.mode = Mode::Normal,
             Mode::Editor => {}
@@ -702,6 +746,36 @@ impl App {
                     self.picker.state.select(Some(index));
                     let command = self.picker.activate_selected(true);
                     self.apply_picker_command(command);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_file_search_mouse(&mut self, mouse: MouseEvent) {
+        let point = Position::new(mouse.column, mouse.row);
+        match mouse.kind {
+            MouseEventKind::ScrollDown => self.file_search.move_selection(1),
+            MouseEventKind::ScrollUp => self.file_search.move_selection(-1),
+            MouseEventKind::Down(MouseButton::Left) => {
+                if self
+                    .regions
+                    .file_search_overlay
+                    .is_some_and(|rect| !rect.contains(point))
+                {
+                    self.mode = Mode::Normal;
+                    return;
+                }
+                let Some(list) = self
+                    .regions
+                    .file_search_list
+                    .filter(|rect| rect.contains(point))
+                else {
+                    return;
+                };
+                let index = self.file_search.state.offset() + usize::from(point.y - list.y);
+                if self.file_search.select(index) {
+                    self.activate_file_search_result();
                 }
             }
             _ => {}
@@ -988,9 +1062,21 @@ impl App {
                     self.reload_queued = false;
                     self.mode = Mode::Normal;
                     self.actions = ActionsState::default();
-                    self.notice = Some("Repository opened".to_owned());
+                    self.notice = Some(
+                        if self.session.data().is_some_and(RepositoryData::is_local) {
+                            "Workspace opened"
+                        } else {
+                            "Repository opened"
+                        }
+                        .to_owned(),
+                    );
                     self.graph_state = TableState::default();
                     self.changes.reset_repository(self.session.data());
+                    self.file_search.reindex(
+                        self.session
+                            .data()
+                            .map_or(&[], |repo| repo.files.as_slice()),
+                    );
                     self.graph_state.select(
                         self.session
                             .data()
@@ -1011,6 +1097,9 @@ impl App {
                         self.graph_state
                             .select(commit_index.or_else(|| repo.commits.first().map(|_| 0)));
                         self.changes.restore_selection(repo, selection);
+                    }
+                    if let Some(repo) = self.session.data() {
+                        self.file_search.reindex(&repo.files);
                     }
                     if self.notice.as_deref() == Some("Refreshing…") {
                         self.notice = Some("Refreshed".to_owned());
@@ -1277,6 +1366,35 @@ impl App {
         self.apply_picker_command(command);
     }
 
+    fn handle_file_search(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::F(3) => self.mode = Mode::Normal,
+            KeyCode::Enter => self.activate_file_search_result(),
+            KeyCode::Down | KeyCode::Tab => self.file_search.move_selection(1),
+            KeyCode::Up | KeyCode::BackTab => self.file_search.move_selection(-1),
+            KeyCode::Backspace => {
+                if let Some(repo) = self.session.data() {
+                    self.file_search.backspace(&repo.files);
+                }
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(repo) = self.session.data() {
+                    self.file_search.clear(&repo.files);
+                }
+            }
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                if let Some(repo) = self.session.data() {
+                    self.file_search.push(character, &repo.files);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn handle_settings(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc | KeyCode::Char('s') => self.mode = Mode::Normal,
@@ -1535,20 +1653,16 @@ impl App {
     }
 
     fn open_actions(&mut self) {
-        if self.repository().is_none() {
-            self.notice = Some("Open a repository first".to_owned());
-            return;
+        if self.require_git_repository() {
+            self.mode = Mode::ActionMenu;
         }
-        self.mode = Mode::ActionMenu;
     }
 
     fn open_git_command(&mut self) {
-        if self.repository().is_none() {
-            self.notice = Some("Open a repository first".to_owned());
-            return;
+        if self.require_git_repository() {
+            self.actions.begin_input();
+            self.mode = Mode::Command;
         }
-        self.actions.begin_input();
-        self.mode = Mode::Command;
     }
 
     fn activate_action(&mut self) {
@@ -1573,6 +1687,10 @@ impl App {
     }
 
     fn start_git_command(&mut self, label: String, args: Vec<String>) {
+        if !self.require_git_repository() {
+            self.mode = Mode::Normal;
+            return;
+        }
         let display = display_git_command(&args);
         if self.session.start_command(label, args) {
             self.actions.begin_command(display);
@@ -1615,6 +1733,36 @@ impl App {
         }
         self.picker.editing_path = false;
         self.mode = Mode::Picker;
+    }
+
+    fn open_file_search(&mut self) {
+        if self.repository().is_none() {
+            return;
+        }
+        self.file_search.open();
+        self.mode = Mode::FileSearch;
+    }
+
+    fn activate_file_search_result(&mut self) {
+        let Some(file_index) = self.file_search.selected_file_index() else {
+            return;
+        };
+        let viewport = self
+            .regions
+            .explorer_list
+            .map_or(0, |rect| usize::from(rect.height));
+        let Some(repo) = self.session.data() else {
+            return;
+        };
+        self.changes.set_pane(LeftPane::Files, Some(repo));
+        if self
+            .changes
+            .select_explorer_file(repo, file_index, viewport)
+        {
+            self.view = View::Changes;
+            self.graph_commit_open = false;
+            self.mode = Mode::Normal;
+        }
     }
 
     fn toggle_auto_fetch(&mut self) {
@@ -1750,10 +1898,9 @@ impl App {
     }
 
     fn stage_all(&mut self) {
-        if self.repository().is_none() {
-            return;
+        if self.require_git_repository() {
+            let _ = self.session.start_mutation(Mutation::StageAll);
         }
-        let _ = self.session.start_mutation(Mutation::StageAll);
     }
 
     fn toggle_all_staging(&mut self) {
@@ -1768,10 +1915,9 @@ impl App {
     }
 
     fn unstage_all(&mut self) {
-        if self.repository().is_none() {
-            return;
+        if self.require_git_repository() {
+            let _ = self.session.start_mutation(Mutation::UnstageAll);
         }
-        let _ = self.session.start_mutation(Mutation::UnstageAll);
     }
 
     fn reload(&mut self) {
@@ -1813,6 +1959,10 @@ impl App {
     }
 
     fn start_commit(&mut self) {
+        if !self.require_git_repository() {
+            self.mode = Mode::Normal;
+            return;
+        }
         if self.session.commit_running() {
             self.notice = Some("A commit is already running".to_owned());
             return;
@@ -1832,6 +1982,9 @@ impl App {
     }
 
     fn focus_commit(&mut self) {
+        if !self.require_git_repository() {
+            return;
+        }
         self.mode = Mode::Commit;
         self.commit_input.focus();
     }
@@ -1941,6 +2094,54 @@ mod tests {
     use std::{process::Command, thread};
 
     use super::*;
+
+    #[test]
+    fn opens_a_nested_directory_as_a_local_workspace() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        initialize_repository(root);
+        let nested = root.join("nested/config");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("settings.toml"), "theme = 'test'\n").unwrap();
+
+        let app = App::new(nested.clone());
+
+        let repo = app.repository().unwrap();
+        assert!(repo.is_local());
+        assert_eq!(repo.root, fs::canonicalize(&nested).unwrap());
+        assert_eq!(repo.branch, "local");
+        assert_eq!(repo.files, ["settings.toml"]);
+        assert_eq!(app.change_counts(), (0, 0));
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.changes.pane, LeftPane::Files);
+    }
+
+    #[test]
+    fn local_workspaces_reload_files_and_reject_git_actions() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::write(root.join("one.txt"), "one\n").unwrap();
+        let mut app = App::new(root.to_path_buf());
+        assert!(app.repository().unwrap().is_local());
+
+        for key in ['x', 'g', 'c', 'a', 'u'] {
+            app.mode = Mode::Normal;
+            app.handle_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
+            assert_eq!(app.mode, Mode::Normal, "{key}");
+            assert_eq!(app.notice.as_deref(), Some("Not a Git repository"), "{key}");
+        }
+
+        fs::write(root.join("two.txt"), "two\n").unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        for _ in 0..100 {
+            let _ = app.poll_worker();
+            if app.repository().unwrap().files == ["one.txt", "two.txt"] {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(app.repository().unwrap().files, ["one.txt", "two.txt"]);
+    }
 
     #[test]
     fn persists_auto_fetch_settings() {
