@@ -40,6 +40,9 @@ Starting outside a repository opens the directory navigator automatically.
 | `a`, `u` | Stage all or unstage all |
 | `c` | Focus the commit message editor |
 | `Enter`, `Ctrl+Enter` | New commit-message line, create commit |
+| `Left`, `Right`, `Home`, `End` | Move within the commit message |
+| `Ctrl+A` | Select the complete commit message |
+| `Ctrl+Backspace`, `Alt+Backspace` | Delete the previous commit-message word |
 | `r` | Refresh |
 | `o` | Choose another repository |
 | `s` | Open settings |

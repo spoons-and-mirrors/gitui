@@ -546,10 +546,32 @@ fn renders_every_primary_surface() {
     let commit = app.regions.commit.unwrap();
     click(&mut app, commit.x + 2, commit.y + 1);
     assert_eq!(app.mode, Mode::Commit);
-    app.commit_message = "Subject".to_owned();
+    app.commit_input.set("ac");
+    app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+    assert_eq!(app.commit_input.text(), "abc");
+    app.commit_input.set("alpha beta");
+    app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL));
+    assert_eq!(app.commit_input.text(), "alpha ");
+    app.commit_input.set("alpha beta");
+    app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT));
+    assert_eq!(app.commit_input.text(), "alpha ");
+    app.commit_input.set("replace me");
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let width = usize::from(buffer.area.width);
+    let input_cell =
+        &buffer.content[usize::from(commit.y) * width + usize::from(commit.x.saturating_add(1))];
+    let focus_edge = &buffer.content[usize::from(commit.y) * width + usize::from(commit.x)];
+    assert_eq!(input_cell.bg, super::palette().selected);
+    assert_eq!(focus_edge.bg, super::palette().canvas);
+    app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    assert_eq!(app.commit_input.text(), "x");
+    app.commit_input.set("Subject");
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(app.commit_message, "Subject\n");
-    app.commit_message.push_str("Body");
+    assert_eq!(app.commit_input.text(), "Subject\n");
+    app.commit_input.insert("Body");
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.mode, Mode::Normal);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -563,7 +585,8 @@ fn renders_every_primary_surface() {
     assert!(unfocused_screen.contains("Subject"));
     assert!(unfocused_screen.contains("Body"));
 
-    app.commit_message = format!("wrap-start {} wrap-end", "x".repeat(90));
+    app.commit_input
+        .set(format!("wrap-start {} wrap-end", "x".repeat(90)));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let wrapped_screen: String = terminal
         .backend()
@@ -574,17 +597,17 @@ fn renders_every_primary_surface() {
         .collect();
     assert!(wrapped_screen.contains("wrap-start"));
     assert!(wrapped_screen.contains("wrap-end"));
-    app.commit_message = "Subject\nBody".to_owned();
+    app.commit_input.set("Subject\nBody");
 
     app.mode = Mode::Commit;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let diff = app.regions.diff.unwrap();
     click(&mut app, diff.x + 1, diff.y + 1);
     assert_eq!(app.mode, Mode::Normal);
-    assert_eq!(app.commit_message, "Subject\nBody");
+    assert_eq!(app.commit_input.text(), "Subject\nBody");
 
     app.mode = Mode::Commit;
-    app.commit_message.clear();
+    app.commit_input.clear();
     app.notice = None;
     app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
     assert_eq!(

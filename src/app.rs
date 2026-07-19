@@ -1,6 +1,7 @@
 mod actions;
 mod changes;
 mod repository_picker;
+mod text_input;
 
 pub(crate) use actions::{ACTION_ITEMS, ActionsState, CommandStatus};
 pub use changes::{ChangesState, LeftPane};
@@ -26,6 +27,7 @@ use crate::{
 
 use actions::{ActionId, action_command, display_git_command, parse_command_args, parse_git_args};
 use repository_picker::PickerCommand;
+pub(crate) use text_input::TextInput;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -129,7 +131,7 @@ pub struct App {
     pub mode: Mode,
     pub changes: ChangesState,
     pub graph_state: TableState,
-    pub commit_message: String,
+    pub(crate) commit_input: TextInput,
     pub dragging_splitter: bool,
     pub dragging_history: bool,
     pub dragging_diff_scrollbar: bool,
@@ -190,7 +192,7 @@ impl App {
             mode,
             changes,
             graph_state,
-            commit_message: String::new(),
+            commit_input: TextInput::default(),
             dragging_splitter: false,
             dragging_history: false,
             dragging_diff_scrollbar: false,
@@ -255,7 +257,7 @@ impl App {
 
     pub fn handle_paste(&mut self, text: &str) {
         match self.mode {
-            Mode::Commit => self.commit_message.push_str(text),
+            Mode::Commit => self.commit_input.insert(text),
             Mode::Picker => self.picker.paste(text),
             Mode::Command if self.actions.status != CommandStatus::Running => {
                 self.actions.input.push_str(text);
@@ -597,7 +599,7 @@ impl App {
         } else if self.select_graph_row(point) {
             self.view = View::Graph;
         } else if self.regions.commit.is_some_and(|rect| rect.contains(point)) {
-            self.mode = Mode::Commit;
+            self.focus_commit();
         }
     }
 
@@ -903,6 +905,7 @@ impl App {
 
     pub fn poll_worker(&mut self) -> bool {
         let mut changed = self.mode == Mode::Picker && self.picker.poll_index();
+        changed |= self.commit_input.poll_blink(self.mode == Mode::Commit);
         let interval = fetch_interval(&self.settings);
         self.session
             .maybe_start_fetch(self.settings.auto_fetch, interval);
@@ -912,7 +915,7 @@ impl App {
             match done {
                 WorkerCompletion::Commit(result) => match result {
                     Ok(output) if output.success => {
-                        self.commit_message.clear();
+                        self.commit_input.clear();
                         self.reload();
                         self.notice = Some("Commit created".to_owned());
                     }
@@ -1089,7 +1092,7 @@ impl App {
             KeyCode::Char('f') if self.view == View::Changes => self.toggle_left_pane(),
             KeyCode::Char('c') if self.view == View::Changes => {
                 self.set_left_pane(LeftPane::Worktree);
-                self.mode = Mode::Commit;
+                self.focus_commit();
             }
             KeyCode::Char('a')
                 if self.view == View::Changes && self.changes.pane == LeftPane::Worktree =>
@@ -1200,6 +1203,7 @@ impl App {
     }
 
     fn handle_commit_input(&mut self, key: KeyEvent) {
+        self.commit_input.focus();
         match key.code {
             KeyCode::Esc => self.mode = Mode::Normal,
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1208,12 +1212,29 @@ impl App {
             KeyCode::Char('j' | 'm') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.start_commit();
             }
-            KeyCode::Enter => self.commit_message.push('\n'),
-            KeyCode::Backspace => {
-                self.commit_message.pop();
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.commit_input.select_all();
             }
-            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.commit_message.push(character);
+            KeyCode::Backspace
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.commit_input.delete_word();
+            }
+            KeyCode::Left => self.commit_input.move_left(),
+            KeyCode::Right => self.commit_input.move_right(),
+            KeyCode::Home => self.commit_input.move_home(),
+            KeyCode::End => self.commit_input.move_end(),
+            KeyCode::Delete => self.commit_input.delete(),
+            KeyCode::Enter => self.commit_input.insert_char('\n'),
+            KeyCode::Backspace => self.commit_input.backspace(),
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.commit_input.insert_char(character);
             }
             _ => {}
         }
@@ -1487,8 +1508,8 @@ impl App {
         if action == ActionId::Commit {
             self.view = View::Changes;
             self.set_left_pane(LeftPane::Worktree);
-            if self.commit_message.trim().is_empty() {
-                self.mode = Mode::Commit;
+            if self.commit_input.text().trim().is_empty() {
+                self.focus_commit();
             } else {
                 self.start_commit();
             }
@@ -1752,7 +1773,7 @@ impl App {
             self.notice = Some("Another Git operation is already running".to_owned());
             return;
         }
-        let message = self.commit_message.trim().to_owned();
+        let message = self.commit_input.text().trim().to_owned();
         if message.is_empty() {
             self.notice = Some("Commit message cannot be empty".to_owned());
             return;
@@ -1760,6 +1781,11 @@ impl App {
         if self.session.start_commit(message) {
             self.mode = Mode::Normal;
         }
+    }
+
+    fn focus_commit(&mut self) {
+        self.mode = Mode::Commit;
+        self.commit_input.focus();
     }
 }
 
@@ -1996,10 +2022,10 @@ mod tests {
 
         let mut app = App::new(root.to_path_buf());
         app.mode = Mode::Commit;
-        app.commit_message = "commit from control enter".to_owned();
+        app.commit_input.set("commit from control enter");
         app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
         assert!(app.commit_running());
-        assert_eq!(app.commit_message, "commit from control enter");
+        assert_eq!(app.commit_input.text(), "commit from control enter");
 
         for _ in 0..100 {
             thread::sleep(Duration::from_millis(10));
@@ -2009,7 +2035,7 @@ mod tests {
             }
         }
         assert!(!app.commit_running());
-        assert!(app.commit_message.is_empty());
+        assert!(app.commit_input.is_empty());
         assert_eq!(app.repository().unwrap().commits.len(), 2);
     }
 
@@ -2022,7 +2048,7 @@ mod tests {
         run_git(root, &["add", "next.txt"]);
 
         let mut app = App::new(root.to_path_buf());
-        app.commit_message = "commit from actions".to_owned();
+        app.commit_input.set("commit from actions");
         app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -2035,7 +2061,7 @@ mod tests {
             }
         }
         assert!(!app.commit_running());
-        assert!(app.commit_message.is_empty());
+        assert!(app.commit_input.is_empty());
         assert_eq!(app.repository().unwrap().commits.len(), 2);
     }
 

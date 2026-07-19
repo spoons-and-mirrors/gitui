@@ -965,6 +965,8 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
         help_line("Space", "Stage file / hunk"),
         help_line("a / u", "Stage / unstage all"),
         help_line("c", "Commit editor"),
+        help_line("← / →", "Commit cursor"),
+        help_line("C-A / C-⌫", "Select all / del word"),
         help_line("Ctrl+Enter", "Commit"),
         help_line("Esc", "Close / unfocus"),
         help_line("q", "Quit"),

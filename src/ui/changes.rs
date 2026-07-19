@@ -8,7 +8,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    app::{App, DiffHunkRegion, LeftPane, Mode},
+    app::{App, DiffHunkRegion, LeftPane, Mode, TextInput},
     git::Change,
     tree::{ExplorerRow, WorktreeRow, WorktreeSection},
 };
@@ -390,13 +390,6 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     let commit_active = app.mode == Mode::Commit;
     fill(frame, commit_area, palette().canvas);
-    if commit_active {
-        fill(
-            frame,
-            Rect::new(commit_area.x, commit_area.y, 1, commit_area.height),
-            palette().accent,
-        );
-    }
     let commit_content = commit_area.inner(Margin::new(1, 0));
     let (commit_text, commit_height) = if app.commit_running() {
         (
@@ -406,25 +399,8 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             )),
             1,
         )
-    } else if commit_active || !app.commit_message.is_empty() {
-        let mut lines: Vec<Line<'_>> = app
-            .commit_message
-            .split('\n')
-            .map(|line| {
-                Line::styled(
-                    line,
-                    Style::default().fg(if commit_active {
-                        palette().ink
-                    } else {
-                        palette().muted
-                    }),
-                )
-            })
-            .collect();
-        if commit_active && let Some(last) = lines.last_mut() {
-            last.spans
-                .push(Span::styled("█", Style::default().fg(palette().accent)));
-        }
+    } else if commit_active || !app.commit_input.is_empty() {
+        let lines = commit_input_lines(&app.commit_input, commit_active);
         let height = rendered_text_height(&lines, usize::from(commit_content.width), true);
         (Text::from(lines), height)
     } else {
@@ -451,9 +427,13 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             )
         }
     };
-    let commit_scroll = commit_height
-        .saturating_sub(usize::from(commit_content.height))
-        .min(usize::from(u16::MAX)) as u16;
+    let commit_scroll = if commit_active {
+        commit_cursor_row(&app.commit_input, usize::from(commit_content.width))
+            .saturating_sub(usize::from(commit_content.height).saturating_sub(1))
+    } else {
+        commit_height.saturating_sub(usize::from(commit_content.height))
+    }
+    .min(usize::from(u16::MAX)) as u16;
     frame.render_widget(
         Paragraph::new(commit_text)
             .wrap(Wrap { trim: false })
@@ -461,6 +441,63 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             .style(Style::default().bg(palette().canvas)),
         commit_content,
     );
+}
+
+fn commit_input_lines(input: &TextInput, active: bool) -> Vec<Line<'static>> {
+    let selection = active.then(|| input.selection()).flatten();
+    let mut line_start = 0;
+    input
+        .text()
+        .split('\n')
+        .map(|line| {
+            if !active {
+                line_start += line.len() + 1;
+                return Line::styled(line.to_owned(), Style::default().fg(palette().muted));
+            }
+
+            let mut spans = Vec::new();
+            for (offset, character) in line.char_indices() {
+                let index = line_start + offset;
+                let selected = selection.is_some_and(|(start, end)| start <= index && index < end);
+                let cursor = input.cursor_visible() && input.cursor() == index;
+                let style = if cursor {
+                    Style::default().fg(palette().canvas).bg(palette().accent)
+                } else if selected {
+                    Style::default().fg(palette().ink).bg(palette().selected)
+                } else {
+                    Style::default().fg(palette().ink)
+                };
+                spans.push(Span::styled(character.to_string(), style));
+            }
+            if input.cursor() == line_start + line.len() {
+                spans.push(Span::styled(
+                    " ",
+                    if input.cursor_visible() {
+                        Style::default().bg(palette().accent)
+                    } else {
+                        Style::default()
+                    },
+                ));
+            }
+            line_start += line.len() + 1;
+            Line::from(spans)
+        })
+        .collect()
+}
+
+fn commit_cursor_row(input: &TextInput, width: usize) -> usize {
+    let width = width.max(1);
+    let mut row = 0;
+    let mut lines = input.text()[..input.cursor()].split('\n').peekable();
+    while let Some(line) = lines.next() {
+        let line_width = UnicodeWidthStr::width(line);
+        if lines.peek().is_some() {
+            row += line_width.saturating_sub(1) / width + 1;
+        } else {
+            row += line_width / width;
+        }
+    }
+    row
 }
 
 fn draw_actions(frame: &mut Frame<'_>, area: Rect, mode: Mode) -> Rect {
