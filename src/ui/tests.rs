@@ -310,7 +310,25 @@ fn renders_every_primary_surface() {
     wait_for_preview(&mut app);
     assert_eq!(app.changes.history_state.selected(), None);
     assert!(!app.changes.history_focused);
-    assert!(app.changes.diff.contains("tracked.txt") || app.changes.diff.contains("untracked.txt"));
+    assert!(app.changes.diff.contains("tracked.txt"));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(app.regions.diff_hunks.len(), 1);
+    let rect = app.regions.diff_hunks[0].rect;
+    let buffer = terminal.backend().buffer();
+    let offset = usize::from(rect.y) * usize::from(buffer.area.width) + usize::from(rect.x);
+    let button: String = buffer.content[offset..offset + 3]
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert_eq!(button, "[+]");
+    click(&mut app, rect.x + 1, rect.y);
+    wait_for(&mut app, |app| {
+        app.repository()
+            .unwrap()
+            .changes
+            .iter()
+            .any(|change| change.path == "tracked.txt" && change.staged)
+    });
 
     app.changes.diff = (0..100)
         .map(|line| format!("+scrollbar line {line}"))

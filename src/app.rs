@@ -63,7 +63,13 @@ impl Default for Settings {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
+pub struct DiffHunkRegion {
+    pub rect: Rect,
+    pub index: usize,
+}
+
+#[derive(Debug, Default, Clone)]
 pub struct Regions {
     pub screen: Option<Rect>,
     pub changes: Option<Rect>,
@@ -104,6 +110,7 @@ pub struct Regions {
     pub fetch_interval_up: Option<Rect>,
     pub stage_all: Option<Rect>,
     pub unstage_all: Option<Rect>,
+    pub diff_hunks: Vec<DiffHunkRegion>,
 }
 
 pub struct App {
@@ -433,6 +440,16 @@ impl App {
             && !self.regions.commit.is_some_and(|rect| rect.contains(point))
         {
             self.mode = Mode::Normal;
+        }
+        if let Some(hunk) = self
+            .regions
+            .diff_hunks
+            .iter()
+            .find(|hunk| hunk.rect.contains(point))
+            .copied()
+        {
+            self.stage_hunk(hunk.index);
+            return;
         }
         if self
             .regions
@@ -1394,6 +1411,13 @@ impl App {
             Mutation::Stage(change)
         };
         let _ = self.session.start_mutation(mutation);
+    }
+
+    fn stage_hunk(&mut self, index: usize) {
+        let patch = self.changes.diff.clone();
+        let _ = self
+            .session
+            .start_mutation(Mutation::StageHunk { patch, index });
     }
 
     fn stage_all(&mut self) {

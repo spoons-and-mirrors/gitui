@@ -23,6 +23,7 @@ pub(crate) enum Mutation {
     Unstage(Change),
     StageAll,
     UnstageAll,
+    StageHunk { patch: String, index: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,6 +242,7 @@ impl RepositorySession {
                 Mutation::Unstage(change) => git::unstage(&root, change),
                 Mutation::StageAll => git::stage_all(&root),
                 Mutation::UnstageAll => git::unstage_all(&root),
+                Mutation::StageHunk { patch, index } => git::stage_hunk(&root, patch, *index),
             }
             .map(|()| CommandOutput {
                 stdout: String::new(),

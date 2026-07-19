@@ -8,7 +8,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    app::{App, LeftPane, Mode},
+    app::{App, DiffHunkRegion, LeftPane, Mode},
     git::Change,
     tree::{ExplorerRow, WorktreeRow},
 };
@@ -344,7 +344,20 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         ])),
         diff_header,
     );
+    let show_hunk_actions =
+        selected_history.is_none() && selected_change.is_some_and(|change| !change.staged);
     let (diff_lines, unwrapped_height) = prepare_preview_lines(app, diff_body, &syntax_path, true);
+    let hunk_rows = if show_hunk_actions {
+        visible_hunk_rows(
+            &app.changes.diff,
+            &diff_lines,
+            diff_body,
+            app.changes.diff_scroll,
+            unwrapped_height.is_none(),
+        )
+    } else {
+        Vec::new()
+    };
     render_scrollable_content(
         frame,
         app,
@@ -353,6 +366,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         diff_lines,
         unwrapped_height,
     );
+    draw_hunk_actions(frame, app, diff_body, hunk_rows);
 
     let commit_active = app.mode == Mode::Commit;
     fill(frame, commit_area, palette().canvas);
@@ -691,6 +705,60 @@ fn render_scrollable_content(
             )),
             thumb,
         );
+    }
+}
+
+fn visible_hunk_rows(
+    diff: &str,
+    styled: &[Line<'_>],
+    body: Rect,
+    scroll: u16,
+    wrapped: bool,
+) -> Vec<(usize, u16)> {
+    let top = usize::from(scroll);
+    let bottom = top.saturating_add(usize::from(body.height));
+    let mut rendered_row = if wrapped { 0 } else { top };
+    let mut hunk_index = 0;
+    let mut rows = Vec::new();
+
+    for (line_index, line) in diff.lines().enumerate() {
+        let row = if wrapped { rendered_row } else { line_index };
+        if line.starts_with("@@") {
+            if row >= top && row < bottom {
+                rows.push((hunk_index, body.y.saturating_add((row - top) as u16)));
+            }
+            hunk_index += 1;
+        }
+        if wrapped {
+            let Some(line) = styled.get(line_index) else {
+                break;
+            };
+            rendered_row = rendered_row.saturating_add(rendered_text_height(
+                std::slice::from_ref(line),
+                usize::from(body.width),
+                true,
+            ));
+        }
+    }
+    rows
+}
+
+fn draw_hunk_actions(frame: &mut Frame<'_>, app: &mut App, body: Rect, rows: Vec<(usize, u16)>) {
+    if body.width < 3 {
+        return;
+    }
+    for (index, y) in rows {
+        let rect = Rect::new(body.right().saturating_sub(3), y, 3, 1);
+        frame.render_widget(
+            Paragraph::new("[+]").style(
+                Style::default()
+                    .fg(palette().green)
+                    .bg(palette().raised)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            rect,
+        );
+        app.regions.diff_hunks.push(DiffHunkRegion { rect, index });
     }
 }
 

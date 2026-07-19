@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, hash_map::DefaultHasher},
     fs,
     hash::{Hash, Hasher},
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     thread,
@@ -213,6 +213,49 @@ pub fn unstage_all(root: &Path) -> Result<()> {
         return Ok(());
     }
     run_ok(root, &["reset"])
+}
+
+pub fn stage_hunk(root: &Path, diff: &str, index: usize) -> Result<()> {
+    let patch = hunk_patch(diff, index).context("diff hunk is no longer available")?;
+    let mut child = base_command(root)
+        .args(["apply", "--cached", "-"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .context("could not start git apply --cached")?;
+    child
+        .stdin
+        .take()
+        .context("could not open git apply input")?
+        .write_all(patch.as_bytes())
+        .context("could not write diff hunk to git apply")?;
+    let output = child
+        .wait_with_output()
+        .context("could not finish git apply --cached")?;
+    if !output.status.success() {
+        bail!("{}", clean_stderr(&output));
+    }
+    Ok(())
+}
+
+fn hunk_patch(diff: &str, target: usize) -> Option<String> {
+    let lines: Vec<&str> = diff.lines().collect();
+    let first_hunk = lines.iter().position(|line| line.starts_with("@@"))?;
+    let start = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.starts_with("@@"))
+        .nth(target)?
+        .0;
+    let end = lines[start + 1..]
+        .iter()
+        .position(|line| line.starts_with("@@") || line.starts_with("diff --git"))
+        .map_or(lines.len(), |offset| start + 1 + offset);
+
+    let mut patch = lines[..first_hunk].join("\n");
+    patch.push('\n');
+    patch.push_str(&lines[start..end].join("\n"));
+    patch.push('\n');
+    Some(patch)
 }
 
 pub fn commit(root: &Path, message: &str) -> Result<CommandOutput> {
@@ -926,6 +969,47 @@ mod tests {
 
         let fetched = super::fetch(root).unwrap();
         assert!(fetched.success, "{}", fetched.stderr);
+    }
+
+    #[test]
+    fn stages_only_the_selected_hunk() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "-b", "main"]);
+        git(root, &["config", "user.name", "Test Author"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        let original = (1..=20)
+            .map(|line| format!("line {line:02}"))
+            .collect::<Vec<_>>();
+        fs::write(root.join("split.txt"), original.join("\n") + "\n").unwrap();
+        git(root, &["add", "split.txt"]);
+        git(root, &["commit", "-m", "base"]);
+
+        let mut changed = original;
+        changed[1] = "changed first".to_owned();
+        changed[18] = "changed second".to_owned();
+        fs::write(root.join("split.txt"), changed.join("\n") + "\n").unwrap();
+        let change = load(root).unwrap().changes.remove(0);
+        let patch = diff(root, &change).unwrap();
+        assert_eq!(
+            patch.lines().filter(|line| line.starts_with("@@")).count(),
+            2
+        );
+
+        stage_hunk(root, &patch, 0).unwrap();
+
+        let staged = String::from_utf8(
+            run(root, &["diff", "--cached", "--", "split.txt"])
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let unstaged =
+            String::from_utf8(run(root, &["diff", "--", "split.txt"]).unwrap().stdout).unwrap();
+        assert!(staged.contains("changed first"));
+        assert!(!staged.contains("changed second"));
+        assert!(!unstaged.contains("changed first"));
+        assert!(unstaged.contains("changed second"));
     }
 
     #[cfg(test)]
