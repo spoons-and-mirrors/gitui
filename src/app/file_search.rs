@@ -25,16 +25,20 @@ pub(crate) struct FileSearch {
     pub(crate) state: ListState,
     pub(crate) match_count: usize,
     index: Vec<IndexedFile>,
+    files_fingerprint: Option<u64>,
 }
 
 impl FileSearch {
-    pub(crate) fn new(files: &[String]) -> Self {
+    pub(crate) fn new(files: &[String], files_fingerprint: Option<u64>) -> Self {
         let mut search = Self::default();
-        search.reindex(files);
+        search.reindex(files, files_fingerprint);
         search
     }
 
-    pub(crate) fn reindex(&mut self, files: &[String]) {
+    pub(crate) fn reindex(&mut self, files: &[String], files_fingerprint: Option<u64>) {
+        if self.files_fingerprint == files_fingerprint {
+            return;
+        }
         self.index = files
             .iter()
             .map(|path| {
@@ -50,6 +54,7 @@ impl FileSearch {
                 }
             })
             .collect();
+        self.files_fingerprint = files_fingerprint;
         self.refresh(files);
     }
 
@@ -176,7 +181,7 @@ mod tests {
             "docs/app-notes.md".to_owned(),
             "src/ui/app_view.rs".to_owned(),
         ];
-        let mut search = FileSearch::new(&files);
+        let mut search = FileSearch::new(&files, Some(1));
 
         for character in "app view".chars() {
             search.push(character, &files);
@@ -191,7 +196,7 @@ mod tests {
         let files = (0..100)
             .map(|index| format!("src/file-{index:03}.rs"))
             .collect::<Vec<_>>();
-        let mut search = FileSearch::new(&files);
+        let mut search = FileSearch::new(&files, Some(1));
 
         search.push('f', &files);
 

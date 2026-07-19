@@ -347,14 +347,16 @@ fn renders_every_primary_surface() {
     assert!(!app.changes.history_focused);
     assert!(app.changes.diff.contains("tracked.txt"));
     let tracked_diff = app.changes.diff.clone();
-    app.changes.diff = concat!(
-        "diff --git a/tracked.txt b/tracked.txt\n",
-        "--- a/tracked.txt\n",
-        "+++ b/tracked.txt\n",
-        "@@ -1 +1 @@\n-old one\n+new one\n",
-        "@@ -3 +3 @@\n-old two\n+new two\n",
-    )
-    .to_owned();
+    app.changes.set_diff(
+        concat!(
+            "diff --git a/tracked.txt b/tracked.txt\n",
+            "--- a/tracked.txt\n",
+            "+++ b/tracked.txt\n",
+            "@@ -1 +1 @@\n-old one\n+new one\n",
+            "@@ -3 +3 @@\n-old two\n+new two\n",
+        )
+        .to_owned(),
+    );
     app.changes.diff_scroll = 0;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let normal_hunk_y = app.regions.diff_hunks[0].action.unwrap().y;
@@ -389,12 +391,12 @@ fn renders_every_primary_surface() {
     assert_eq!(app.changes.hunk_selection, Some(1));
     app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
     assert_eq!(app.changes.hunk_selection, None);
-    app.changes.diff = format!(
+    app.changes.set_diff(format!(
         "@@ -1,80 +1,80 @@\n{}",
         (0..80)
             .map(|line| format!(" line {line}\n"))
             .collect::<String>()
-    );
+    ));
     app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.regions.diff_hunks[0].continues_below);
@@ -407,7 +409,7 @@ fn renders_every_primary_surface() {
     app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
     assert_eq!(app.changes.diff_scroll, 0);
     app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
-    app.changes.diff = tracked_diff;
+    app.changes.set_diff(tracked_diff);
     app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
     assert_eq!(app.changes.hunk_selection, Some(0));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -433,10 +435,12 @@ fn renders_every_primary_surface() {
     assert!(rows.iter().any(|row| row.label == "STAGED"));
     assert!(rows.iter().any(|row| row.label == "UNSTAGED"));
 
-    app.changes.diff = (0..100)
-        .map(|line| format!("+scrollbar line {line}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    app.changes.set_diff(
+        (0..100)
+            .map(|line| format!("+scrollbar line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
     app.changes.diff_scroll = 0;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let scrollbar = app.regions.diff_scrollbar.unwrap();
@@ -463,6 +467,21 @@ fn renders_every_primary_surface() {
     ));
     assert_eq!(app.changes.diff_scroll, 0);
     assert!(!app.dragging_diff_scrollbar);
+
+    app.changes.set_diff(
+        (0..30_001)
+            .map(|line| format!("+{line:05} {}", "x".repeat(200)))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    app.changes.diff_wrap = true;
+    app.changes.diff_scroll = usize::MAX;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let cache = app.changes.preview_render_cache.as_ref().unwrap();
+    assert!(!cache.fully_styled);
+    assert!(!cache.lines.is_empty());
+    assert!(app.changes.diff_scroll > usize::from(u16::MAX));
+    app.changes.diff_wrap = false;
 
     let changes_screen: String = terminal
         .backend()
@@ -945,7 +964,7 @@ fn selects_visible_text_and_suppresses_clicks_after_dragging() {
     fs::write(root.join("selected.txt"), "select me\n").unwrap();
 
     let mut app = App::new(root.to_path_buf());
-    app.changes.diff = "select me".to_owned();
+    app.changes.set_diff("select me".to_owned());
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 

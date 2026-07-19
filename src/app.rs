@@ -6,6 +6,7 @@ mod repository_picker;
 mod text_input;
 
 pub(crate) use actions::{ACTION_ITEMS, ActionsState, CommandStatus};
+pub(crate) use changes::PreviewRenderCache;
 pub use changes::{ChangesState, LeftPane};
 pub(crate) use file_search::FileSearch;
 pub use repository_picker::{PickerAction, PickerEntry, RepositoryPicker};
@@ -79,8 +80,8 @@ pub struct DiffHunkRegion {
     pub index: usize,
     pub continues_above: bool,
     pub continues_below: bool,
-    pub scroll_start: u16,
-    pub scroll_end: u16,
+    pub scroll_start: usize,
+    pub scroll_end: usize,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -105,7 +106,7 @@ pub struct Regions {
     pub diff: Option<Rect>,
     pub diff_scrollbar: Option<Rect>,
     pub diff_scroll_thumb: Option<Rect>,
-    pub diff_scroll_max: u16,
+    pub diff_scroll_max: usize,
     pub splitter: Option<Rect>,
     pub split_bounds: Option<Rect>,
     pub commit: Option<Rect>,
@@ -196,7 +197,10 @@ impl App {
             .unwrap_or(path);
 
         let changes = ChangesState::new(session.data());
-        let file_search = FileSearch::new(session.data().map_or(&[], |repo| repo.files.as_slice()));
+        let file_search = FileSearch::new(
+            session.data().map_or(&[], |repo| repo.files.as_slice()),
+            session.data().map(|repo| repo.files_fingerprint),
+        );
         let mut graph_state = TableState::default();
         graph_state.select(
             session
@@ -268,6 +272,7 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        self.session.note_activity();
         if self.selection.has_selection() {
             self.selection.clear();
             if key.code == KeyCode::Esc {
@@ -1076,6 +1081,7 @@ impl App {
                         self.session
                             .data()
                             .map_or(&[], |repo| repo.files.as_slice()),
+                        self.session.data().map(|repo| repo.files_fingerprint),
                     );
                     self.graph_state.select(
                         self.session
@@ -1099,7 +1105,8 @@ impl App {
                         self.changes.restore_selection(repo, selection);
                     }
                     if let Some(repo) = self.session.data() {
-                        self.file_search.reindex(&repo.files);
+                        self.file_search
+                            .reindex(&repo.files, Some(repo.files_fingerprint));
                     }
                     if self.notice.as_deref() == Some("Refreshing…") {
                         self.notice = Some("Refreshed".to_owned());
@@ -1131,17 +1138,8 @@ impl App {
                 .is_some_and(|area| self.selection.needs_capture(area))
     }
 
-    pub fn hunk_selection_active(&self) -> bool {
-        self.changes.hunk_selection.is_some()
-    }
-
     pub fn change_counts(&self) -> (usize, usize) {
-        self.repository().map_or((0, 0), |repo| {
-            (
-                repo.changes.iter().filter(|change| change.staged).count(),
-                repo.changes.iter().filter(|change| !change.staged).count(),
-            )
-        })
+        self.repository().map_or((0, 0), |repo| repo.change_counts)
     }
 
     fn handle_normal(&mut self, key: KeyEvent) {

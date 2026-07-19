@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, hash_map::DefaultHasher},
     fs,
     hash::{Hash, Hasher},
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     thread,
@@ -26,6 +26,11 @@ pub struct RepositoryData {
     pub files: Vec<String>,
     pub history: Vec<Commit>,
     pub commits: Vec<Commit>,
+    pub files_fingerprint: u64,
+    pub changes_fingerprint: u64,
+    pub change_counts: (usize, usize),
+    pub graph_width: usize,
+    pub graph_truncated: bool,
 }
 
 impl RepositoryData {
@@ -34,7 +39,7 @@ impl RepositoryData {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Change {
     pub path: String,
     pub original_path: Option<String>,
@@ -118,12 +123,12 @@ fn load_git_root(root: PathBuf) -> Result<RepositoryData> {
             populate_diff_stats(&root, &mut changes)?;
             Ok(changes)
         });
-        let files = scope.spawn(|| repository_files(&root));
+        let files = scope.spawn(|| git_repository_files(&root));
         let history = scope.spawn(|| branch_history(&root));
-        let commits = scope.spawn(|| -> Result<Vec<Commit>> {
-            let mut commits = log(&root)?;
+        let commits = scope.spawn(|| -> Result<(Vec<Commit>, bool)> {
+            let (mut commits, truncated) = log(&root)?;
             layout_graph(&mut commits);
-            Ok(commits)
+            Ok((commits, truncated))
         });
 
         Ok::<_, anyhow::Error>((
@@ -145,6 +150,12 @@ fn load_git_root(root: PathBuf) -> Result<RepositoryData> {
         ))
     })?;
 
+    let (commits, graph_truncated) = commits;
+    let files_fingerprint = fingerprint(&files);
+    let changes_fingerprint = fingerprint(&changes);
+    let change_counts = change_counts(&changes);
+    let graph_width = graph_width(&commits);
+
     Ok(RepositoryData {
         root,
         kind: RepositoryKind::Git,
@@ -153,6 +164,11 @@ fn load_git_root(root: PathBuf) -> Result<RepositoryData> {
         files,
         history,
         commits,
+        files_fingerprint,
+        changes_fingerprint,
+        change_counts,
+        graph_width,
+        graph_truncated,
     })
 }
 
@@ -161,7 +177,8 @@ fn local_workspace(path: &Path) -> Result<RepositoryData> {
     if !root.is_dir() {
         bail!("{} is not a directory", root.display());
     }
-    let files = repository_files(&root)?;
+    let files = local_files(&root)?;
+    let files_fingerprint = fingerprint(&files);
     Ok(RepositoryData {
         root,
         kind: RepositoryKind::Local,
@@ -170,10 +187,58 @@ fn local_workspace(path: &Path) -> Result<RepositoryData> {
         files,
         history: Vec::new(),
         commits: Vec::new(),
+        files_fingerprint,
+        changes_fingerprint: fingerprint(&Vec::<Change>::new()),
+        change_counts: (0, 0),
+        graph_width: 0,
+        graph_truncated: false,
     })
 }
 
-pub fn repository_files(root: &Path) -> Result<Vec<String>> {
+fn git_repository_files(root: &Path) -> Result<Vec<String>> {
+    let output = run(
+        root,
+        &[
+            "ls-files",
+            "-z",
+            "-t",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--deleted",
+        ],
+    )?;
+    if !output.status.success() {
+        bail!("{}", clean_stderr(&output));
+    }
+    let mut states = HashMap::<String, (bool, bool)>::new();
+    for entry in output.stdout.split(|byte| *byte == 0) {
+        let Some((&tag, path)) = entry.split_first() else {
+            continue;
+        };
+        let path = path.strip_prefix(b" ").unwrap_or(path);
+        if path.is_empty() {
+            continue;
+        }
+        let path = String::from_utf8_lossy(path).into_owned();
+        let absent_skip_worktree = tag == b'S' && root.join(&path).symlink_metadata().is_err();
+        let state = states.entry(path).or_default();
+        if tag == b'R' || absent_skip_worktree {
+            state.1 = true;
+        } else {
+            state.0 = true;
+        }
+    }
+    let mut files: Vec<String> = states
+        .into_iter()
+        .filter_map(|(path, (present, deleted))| (present && !deleted).then_some(path))
+        .collect();
+    files.sort_unstable();
+    files.dedup();
+    Ok(files)
+}
+
+fn local_files(root: &Path) -> Result<Vec<String>> {
     let mut files = Vec::new();
     let mut directories = vec![root.to_owned()];
     while let Some(directory) = directories.pop() {
@@ -202,6 +267,30 @@ pub fn repository_files(root: &Path) -> Result<Vec<String>> {
     Ok(files)
 }
 
+fn fingerprint<T: Hash>(value: &T) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn change_counts(changes: &[Change]) -> (usize, usize) {
+    changes.iter().fold((0, 0), |(staged, unstaged), change| {
+        if change.staged {
+            (staged + 1, unstaged)
+        } else {
+            (staged, unstaged + 1)
+        }
+    })
+}
+
+fn graph_width(commits: &[Commit]) -> usize {
+    commits
+        .iter()
+        .map(|commit| commit.graph.len())
+        .max()
+        .unwrap_or(1)
+}
+
 pub fn file_content(root: &Path, relative_path: &str) -> Result<String> {
     const MAX_PREVIEW_BYTES: u64 = 1_048_576;
 
@@ -212,6 +301,9 @@ pub fn file_content(root: &Path, relative_path: &str) -> Result<String> {
         let target = fs::read_link(&path)
             .with_context(|| format!("could not read link {}", path.display()))?;
         return Ok(format!("Symbolic link -> {}", target.display()));
+    }
+    if metadata.is_dir() {
+        return Ok("Directory\n\nThis path may be a Git submodule.".to_owned());
     }
     if metadata.len() > MAX_PREVIEW_BYTES {
         return Ok(format!(
@@ -335,8 +427,6 @@ pub fn worktree_signature(root: &Path) -> Result<u64> {
     let output = run(
         root,
         &[
-            "-c",
-            "core.fsmonitor=false",
             "status",
             "--porcelain=v2",
             "--branch",
@@ -381,15 +471,41 @@ fn porcelain_v2_path(record: &[u8]) -> Option<&[u8]> {
 
 pub fn diff(root: &Path, change: &Change) -> Result<String> {
     if !change.staged && change.code == '?' {
+        const MAX_UNTRACKED_PREVIEW_BYTES: u64 = 128 * 1024;
+        const MAX_UNTRACKED_PREVIEW_LINES: usize = 500;
+
         let path = root.join(&change.path);
-        let bytes =
-            fs::read(&path).with_context(|| format!("could not read {}", path.display()))?;
+        let metadata =
+            fs::metadata(&path).with_context(|| format!("could not inspect {}", path.display()))?;
+        let mut bytes =
+            Vec::with_capacity(metadata.len().min(MAX_UNTRACKED_PREVIEW_BYTES + 1) as usize);
+        fs::File::open(&path)
+            .with_context(|| format!("could not read {}", path.display()))?
+            .take(MAX_UNTRACKED_PREVIEW_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .with_context(|| format!("could not read {}", path.display()))?;
         if bytes.contains(&0) {
-            return Ok(format!("Binary untracked file\n\n{} bytes", bytes.len()));
+            return Ok(format!("Binary untracked file\n\n{} bytes", metadata.len()));
         }
+        let byte_truncated = bytes.len() > MAX_UNTRACKED_PREVIEW_BYTES as usize;
+        bytes.truncate(MAX_UNTRACKED_PREVIEW_BYTES as usize);
         let text = String::from_utf8_lossy(&bytes);
-        let preview: String = text.lines().take(500).collect::<Vec<_>>().join("\n");
-        return Ok(format!("Untracked file: {}\n\n{preview}", change.path));
+        let mut lines = text.lines();
+        let preview = lines
+            .by_ref()
+            .take(MAX_UNTRACKED_PREVIEW_LINES)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let line_truncated = lines.next().is_some();
+        let suffix = if byte_truncated || line_truncated {
+            format!("\n\n[Preview truncated; file is {} bytes]", metadata.len())
+        } else {
+            String::new()
+        };
+        return Ok(format!(
+            "Untracked file: {}\n\n{preview}{suffix}",
+            change.path
+        ));
     }
 
     let mut args = if change.staged {
@@ -580,18 +696,28 @@ fn count_file_lines(path: &Path) -> Result<u64> {
     Ok(lines + u64::from(has_bytes && !ends_with_newline))
 }
 
-fn log(root: &Path) -> Result<Vec<Commit>> {
-    read_log(
+const GRAPH_COMMIT_LIMIT: usize = 5_000;
+
+fn log(root: &Path) -> Result<(Vec<Commit>, bool)> {
+    let commits = read_log(
         root,
         &[
             "--date-order",
             "--ignore-missing",
+            "--max-count=5001",
             "--branches",
             "--remotes",
             "--tags",
             "HEAD",
         ],
-    )
+    )?;
+    Ok(cap_graph_commits(commits))
+}
+
+fn cap_graph_commits(mut commits: Vec<Commit>) -> (Vec<Commit>, bool) {
+    let truncated = commits.len() > GRAPH_COMMIT_LIMIT;
+    commits.truncate(GRAPH_COMMIT_LIMIT);
+    (commits, truncated)
 }
 
 fn branch_history(root: &Path) -> Result<Vec<Commit>> {
@@ -671,56 +797,70 @@ const LEFT: u8 = 4;
 const RIGHT: u8 = 8;
 
 fn layout_graph(commits: &mut [Commit]) {
-    let mut lanes: Vec<Option<String>> = Vec::new();
+    let mut oid_ids = HashMap::new();
+    let mut next_oid = 0usize;
+    for commit in commits.iter() {
+        for oid in std::iter::once(&commit.oid).chain(commit.parents.iter()) {
+            oid_ids.entry(oid.clone()).or_insert_with(|| {
+                let id = next_oid;
+                next_oid += 1;
+                id
+            });
+        }
+    }
+
+    let mut lanes: Vec<Option<usize>> = Vec::new();
     let mut colors: Vec<usize> = Vec::new();
     let mut next_color = 0;
 
     for commit in commits {
-        let before = lanes.clone();
-        let incoming: Vec<usize> = before
+        let commit_id = oid_ids[&commit.oid];
+        let incoming: Vec<usize> = lanes
             .iter()
             .enumerate()
-            .filter_map(|(index, oid)| (oid.as_deref() == Some(&commit.oid)).then_some(index))
+            .filter_map(|(index, oid)| (*oid == Some(commit_id)).then_some(index))
             .collect();
 
         let node = incoming.first().copied().unwrap_or_else(|| {
             if let Some(index) = lanes.iter().position(Option::is_none) {
-                lanes[index] = Some(commit.oid.clone());
+                lanes[index] = Some(commit_id);
                 colors[index] = next_color;
                 next_color += 1;
                 index
             } else {
-                lanes.push(Some(commit.oid.clone()));
+                lanes.push(Some(commit_id));
                 colors.push(next_color);
                 next_color += 1;
                 lanes.len() - 1
             }
         });
 
+        let before_len = lanes.len();
         let mut after = lanes.clone();
         for lane in incoming.iter().copied().skip(1) {
             after[lane] = None;
         }
 
         if let Some(first_parent) = commit.parents.first() {
-            after[node] = Some(first_parent.clone());
+            after[node] = Some(oid_ids[first_parent]);
         } else {
             after[node] = None;
         }
 
         let mut outgoing = Vec::new();
         for parent in commit.parents.iter().skip(1) {
+            let parent_id = oid_ids[parent];
             let destination = after
                 .iter()
-                .position(|oid| oid.as_deref() == Some(parent))
+                .position(|oid| *oid == Some(parent_id))
                 .unwrap_or_else(|| {
                     if let Some(index) = after.iter().position(Option::is_none) {
-                        after[index] = Some(parent.clone());
+                        after[index] = Some(parent_id);
                         colors[index] = next_color;
                         next_color += 1;
                         index
                     } else {
-                        after.push(Some(parent.clone()));
+                        after.push(Some(parent_id));
                         colors.push(next_color);
                         next_color += 1;
                         after.len() - 1
@@ -729,11 +869,11 @@ fn layout_graph(commits: &mut [Commit]) {
             outgoing.push(destination);
         }
 
-        let lane_count = before.len().max(after.len()).max(node + 1);
+        let lane_count = before_len.max(after.len()).max(node + 1);
         let mut masks = vec![0_u8; lane_count.saturating_mul(2).saturating_sub(1)];
         let mut cell_colors = vec![colors.get(node).copied().unwrap_or(0); masks.len()];
 
-        for (index, lane) in before.iter().enumerate() {
+        for (index, lane) in lanes.iter().enumerate() {
             if lane.is_some() {
                 masks[index * 2] |= UP;
                 cell_colors[index * 2] = colors[index];
@@ -975,6 +1115,76 @@ mod tests {
                 .iter()
                 .any(|cell| matches!(cell.symbol, '─' | '╮' | '╭'))
         );
+        assert_eq!(
+            commits
+                .iter()
+                .map(|commit| commit
+                    .graph
+                    .iter()
+                    .map(|cell| cell.symbol)
+                    .collect::<String>())
+                .collect::<Vec<_>>(),
+            ["●─╮", "● │", "│ ●", "●─╯"]
+        );
+    }
+
+    #[test]
+    fn lays_out_linear_history_without_extra_lanes() {
+        let mut commits = vec![
+            commit("three", &["two"]),
+            commit("two", &["one"]),
+            commit("one", &[]),
+        ];
+        layout_graph(&mut commits);
+        assert_eq!(
+            commits
+                .iter()
+                .map(|commit| commit
+                    .graph
+                    .iter()
+                    .map(|cell| cell.symbol)
+                    .collect::<String>())
+                .collect::<Vec<_>>(),
+            ["●", "●", "●"]
+        );
+    }
+
+    #[test]
+    fn lays_out_a_distinct_branch_exactly() {
+        let mut commits = vec![
+            commit("main", &["base"]),
+            commit("side", &["base"]),
+            commit("base", &[]),
+        ];
+        layout_graph(&mut commits);
+        let symbols = commits
+            .iter()
+            .map(|commit| {
+                commit
+                    .graph
+                    .iter()
+                    .map(|cell| cell.symbol)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(symbols, ["●", "│ ●", "●─╯"]);
+    }
+
+    #[test]
+    fn caps_graph_commits_and_reports_truncation() {
+        let commits = (0..=GRAPH_COMMIT_LIMIT)
+            .map(|index| commit(&index.to_string(), &[]))
+            .collect();
+        let (commits, truncated) = cap_graph_commits(commits);
+        assert_eq!(commits.len(), GRAPH_COMMIT_LIMIT);
+        assert!(truncated);
+        let mut commits = commits;
+        layout_graph(&mut commits);
+        assert!(
+            commits
+                .iter()
+                .all(|commit| { commit.graph.len() == 1 && commit.graph[0].symbol == '●' })
+        );
     }
 
     fn commit(oid: &str, parents: &[&str]) -> Commit {
@@ -1039,7 +1249,7 @@ mod tests {
         );
         assert!(repo.files.iter().any(|path| path == "base.txt"));
         assert!(repo.files.iter().any(|path| path == "feature.txt"));
-        assert!(repo.files.iter().any(|path| path == "ignored/cache.txt"));
+        assert!(!repo.files.iter().any(|path| path == "ignored/cache.txt"));
         assert!(
             !repo
                 .changes
@@ -1072,6 +1282,52 @@ mod tests {
 
         let fetched = super::fetch(root).unwrap();
         assert!(fetched.success, "{}", fetched.stderr);
+    }
+
+    #[test]
+    fn git_files_include_untracked_files_and_exclude_deleted_tracked_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "-b", "main"]);
+        fs::write(root.join("tracked.txt"), "tracked\n").unwrap();
+        git(root, &["add", "tracked.txt"]);
+        fs::write(root.join("untracked.txt"), "new\n").unwrap();
+        fs::remove_file(root.join("tracked.txt")).unwrap();
+
+        let files = git_repository_files(root).unwrap();
+        assert_eq!(files, ["untracked.txt"]);
+    }
+
+    #[test]
+    fn git_files_exclude_absent_sparse_checkout_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "-b", "main"]);
+        fs::write(root.join("sparse.txt"), "tracked\n").unwrap();
+        git(root, &["add", "sparse.txt"]);
+        git(root, &["update-index", "--skip-worktree", "sparse.txt"]);
+        fs::remove_file(root.join("sparse.txt")).unwrap();
+
+        assert!(git_repository_files(root).unwrap().is_empty());
+    }
+
+    #[test]
+    fn truncates_large_untracked_previews() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::write(root.join("large.txt"), vec![b'x'; 256 * 1024]).unwrap();
+        let change = Change {
+            path: "large.txt".to_owned(),
+            original_path: None,
+            code: '?',
+            staged: false,
+            additions: 0,
+            deletions: 0,
+        };
+
+        let preview = diff(root, &change).unwrap();
+        assert!(preview.contains("Preview truncated; file is 262144 bytes"));
+        assert!(preview.len() < 140 * 1024);
     }
 
     #[test]

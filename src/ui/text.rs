@@ -1,10 +1,9 @@
+use super::palette;
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
 use unicode_width::UnicodeWidthStr;
-
-use super::palette;
 
 mod syntax;
 use syntax::syntax_spans;
@@ -61,6 +60,53 @@ pub(super) fn diff_display_line_count(diff: &str) -> usize {
         count += 1;
     }
     count
+}
+
+pub(super) fn wrapped_preview_line_starts(
+    content: &str,
+    is_diff: bool,
+    width: usize,
+) -> Vec<usize> {
+    let width = width.max(1);
+    let numbered = width >= 72;
+    let has_hunks = is_diff && content.lines().any(|line| line.starts_with("@@"));
+    let mut in_hunk = false;
+    let mut starts = vec![0_usize];
+    for line in content.lines() {
+        let hunk_header = line.starts_with("@@");
+        if has_hunks && !in_hunk && !hunk_header {
+            continue;
+        }
+        if hunk_header {
+            if in_hunk {
+                starts.push(starts.last().copied().unwrap_or(0).saturating_add(1));
+            }
+            in_hunk = true;
+        }
+        let prefix = if !is_diff {
+            usize::from(numbered) * 7
+        } else if in_hunk
+            && !hunk_header
+            && !line.starts_with("+++")
+            && !line.starts_with("---")
+            && (line.starts_with('+') || line.starts_with('-') || line.starts_with(' '))
+        {
+            usize::from(numbered) * 5 + 1
+        } else {
+            0
+        };
+        let payload = if prefix > 0 { &line[1..] } else { line };
+        let display_width = prefix.saturating_add(UnicodeWidthStr::width(payload));
+        let line_height = display_width.max(1).div_ceil(width);
+        starts.push(
+            starts
+                .last()
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(line_height),
+        );
+    }
+    starts
 }
 
 pub(super) fn styled_diff_window(
@@ -280,14 +326,7 @@ fn line_number(new: Option<u32>) -> Vec<Span<'static>> {
     )]
 }
 
-fn finish_line(mut spans: Vec<Span<'static>>, width: usize, background: Color) -> Line<'static> {
-    let used: usize = spans
-        .iter()
-        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
-        .sum();
-    if used < width {
-        spans.push(Span::raw(" ".repeat(width - used)));
-    }
+fn finish_line(spans: Vec<Span<'static>>, _width: usize, background: Color) -> Line<'static> {
     Line::from(spans).style(Style::default().bg(background))
 }
 
@@ -323,5 +362,37 @@ mod tests {
                 .iter()
                 .any(|span| span.content == "let" && span.style.fg == Some(palette().purple))
         );
+    }
+
+    #[test]
+    fn wrapped_line_index_matches_styled_diff_heights() {
+        let diff = concat!(
+            "diff --git a/src/main.rs b/src/main.rs\n",
+            "@@ -1 +1 @@\n",
+            "+a line that wraps\n",
+            "@@ -3 +3 @@\n",
+            " context\n",
+            "diff --git a/very-long-old-name.rs b/very-long-new-name.rs\n",
+            "--- a/very-long-old-name.rs\n",
+            "+++ b/very-long-new-name.rs\n",
+            "@@ -1 +1 @@\n",
+            "+emoji 👩‍💻 line",
+        );
+        let width = 10;
+        let lines = styled_diff(diff, "src/main.rs", width);
+        let starts = wrapped_preview_line_starts(diff, true, width);
+
+        assert_eq!(starts.len(), lines.len() + 1);
+        for (index, line) in lines.iter().enumerate() {
+            let display_width = line
+                .spans
+                .iter()
+                .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+                .sum::<usize>();
+            assert_eq!(
+                starts[index + 1] - starts[index],
+                display_width.max(1).div_ceil(width)
+            );
+        }
     }
 }

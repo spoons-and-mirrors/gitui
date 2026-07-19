@@ -489,6 +489,7 @@ dependencies = [
  "ratatui",
  "serde_json",
  "tempfile",
+ "unicode-segmentation",
  "unicode-width",
 ]
 

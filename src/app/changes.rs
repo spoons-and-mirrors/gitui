@@ -1,15 +1,15 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender},
     thread,
 };
 
-use ratatui::widgets::ListState;
+use ratatui::{text::Line, widgets::ListState};
 
 use crate::{
     git::{self, Change, Commit, RepositoryData},
-    tree::{ExplorerRow, WorktreeRow, WorktreeSection, build_file_tree, build_worktree},
+    tree::{ExplorerRow, FileTree, WorktreeRow, WorktreeSection, WorktreeTree},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,10 +23,11 @@ pub struct ChangesState {
     pub(crate) worktree_state: ListState,
     pub(crate) explorer_state: ListState,
     pub(crate) worktree_scroll: usize,
+    pub(crate) worktree_scroll_to_selection: bool,
     pub(crate) explorer_scroll: usize,
     pub(crate) history_state: ListState,
     pub(crate) diff: String,
-    pub(crate) diff_scroll: u16,
+    pub(crate) diff_scroll: usize,
     pub(crate) diff_wrap: bool,
     pub(crate) hunk_selection: Option<usize>,
     hunk_pin_pending: bool,
@@ -36,7 +37,14 @@ pub struct ChangesState {
     pub(crate) collapsed_explorer_directories: HashSet<String>,
     worktree_rows_cache: Vec<WorktreeRow>,
     explorer_rows_cache: Vec<ExplorerRow>,
+    file_tree: Option<FileTree>,
+    file_tree_fingerprint: Option<u64>,
+    worktree_tree: Option<WorktreeTree>,
+    worktree_tree_fingerprint: Option<u64>,
+    change_codes: HashMap<String, char>,
     preview_generation: u64,
+    pub(crate) preview_content_generation: u64,
+    pub(crate) preview_render_cache: Option<PreviewRenderCache>,
     preview_tx: Sender<PreviewRequest>,
     preview_rx: Receiver<PreviewResult>,
 }
@@ -64,6 +72,20 @@ struct PendingHunkSelection {
     index: usize,
 }
 
+pub(crate) struct PreviewRenderCache {
+    pub(crate) generation: u64,
+    pub(crate) path: String,
+    pub(crate) is_diff: bool,
+    pub(crate) width: usize,
+    pub(crate) lines: Vec<Line<'static>>,
+    pub(crate) fully_styled: bool,
+    pub(crate) window_start: usize,
+    pub(crate) display_count: usize,
+    pub(crate) wrapped_line_starts: Option<Vec<usize>>,
+    pub(crate) unwrapped_hunks: Option<(Vec<(usize, usize)>, usize)>,
+    pub(crate) wrapped_hunks: Option<(Vec<(usize, usize)>, usize)>,
+}
+
 pub(super) struct ChangesSelection {
     change: Option<(String, bool)>,
     directory: Option<(String, WorktreeSection)>,
@@ -75,7 +97,10 @@ pub(super) struct ChangesSelection {
 impl ChangesState {
     pub(super) fn new(repo: Option<&RepositoryData>) -> Self {
         let (preview_tx, preview_rx) = preview_worker();
-        let collapsed_explorer_directories = default_explorer_collapsed_directories(repo);
+        let file_tree = repo.map(|repo| FileTree::new(&repo.files));
+        let collapsed_explorer_directories = file_tree
+            .as_ref()
+            .map_or_else(HashSet::new, FileTree::default_collapsed_directories);
         let mut state = Self {
             pane: if repo.is_some_and(RepositoryData::is_local) {
                 LeftPane::Files
@@ -85,6 +110,7 @@ impl ChangesState {
             worktree_state: ListState::default(),
             explorer_state: ListState::default(),
             worktree_scroll: 0,
+            worktree_scroll_to_selection: true,
             explorer_scroll: 0,
             history_state: ListState::default(),
             diff: String::new(),
@@ -98,7 +124,14 @@ impl ChangesState {
             collapsed_explorer_directories,
             worktree_rows_cache: Vec::new(),
             explorer_rows_cache: Vec::new(),
+            file_tree,
+            file_tree_fingerprint: repo.map(|repo| repo.files_fingerprint),
+            worktree_tree: repo.map(|repo| WorktreeTree::new(&repo.changes)),
+            worktree_tree_fingerprint: repo.map(|repo| repo.changes_fingerprint),
+            change_codes: repo.map_or_else(HashMap::new, |repo| change_codes(&repo.changes)),
             preview_generation: 0,
+            preview_content_generation: 0,
+            preview_render_cache: None,
             preview_tx,
             preview_rx,
         };
@@ -118,16 +151,21 @@ impl ChangesState {
         self.worktree_state = ListState::default();
         self.explorer_state = ListState::default();
         self.worktree_scroll = 0;
+        self.worktree_scroll_to_selection = true;
         self.explorer_scroll = 0;
         self.history_state = ListState::default();
-        self.diff.clear();
+        self.set_diff(String::new());
         self.diff_scroll = 0;
         self.hunk_selection = None;
         self.hunk_pin_pending = false;
         self.pending_hunk_selection = None;
         self.history_focused = false;
         self.collapsed_directories.clear();
-        self.collapsed_explorer_directories = default_explorer_collapsed_directories(repo);
+        self.sync_repository_caches(repo);
+        self.collapsed_explorer_directories = self
+            .file_tree
+            .as_ref()
+            .map_or_else(HashSet::new, FileTree::default_collapsed_directories);
         self.rebuild_worktree_rows(repo);
         self.rebuild_explorer_rows(repo);
         self.select_initial_rows(repo);
@@ -178,6 +216,7 @@ impl ChangesState {
             })
             .or_else(|| self.first_change_row(repo));
         self.worktree_state.select(change_row);
+        self.worktree_scroll_to_selection = true;
 
         let history_index = selection
             .history_oid
@@ -446,6 +485,7 @@ impl ChangesState {
         delta: isize,
     ) {
         let len = repo.map_or(0, |repo| self.worktree_rows(repo).len());
+        self.worktree_scroll_to_selection = false;
         scroll_viewport(&mut self.worktree_scroll, len, viewport, delta);
     }
 
@@ -458,11 +498,11 @@ impl ChangesState {
         );
     }
 
-    pub(super) fn scroll_diff_by(&mut self, maximum: u16, delta: isize) {
+    pub(super) fn scroll_diff_by(&mut self, maximum: usize, delta: isize) {
         self.diff_scroll = if delta > 0 {
-            self.diff_scroll.saturating_add(delta as u16).min(maximum)
+            self.diff_scroll.saturating_add(delta as usize).min(maximum)
         } else {
-            self.diff_scroll.saturating_sub(delta.unsigned_abs() as u16)
+            self.diff_scroll.saturating_sub(delta.unsigned_abs())
         };
     }
 
@@ -473,7 +513,7 @@ impl ChangesState {
         track_height: u16,
         thumb_height: u16,
         drag_offset: u16,
-        maximum: u16,
+        maximum: usize,
     ) {
         let travel = track_height.saturating_sub(thumb_height);
         if travel == 0 || maximum == 0 {
@@ -484,8 +524,8 @@ impl ChangesState {
             .saturating_sub(track_y)
             .saturating_sub(drag_offset)
             .min(travel);
-        self.diff_scroll = ((u32::from(position) * u32::from(maximum) + u32::from(travel) / 2)
-            / u32::from(travel)) as u16;
+        self.diff_scroll =
+            (usize::from(position) * maximum + usize::from(travel) / 2) / usize::from(travel);
     }
 
     pub(super) fn toggle_wrap(&mut self) -> bool {
@@ -534,14 +574,16 @@ impl ChangesState {
         }
     }
 
-    pub(super) fn select_hunk(&mut self, index: usize) {
+    pub(super) fn select_hunk(&mut self, index: usize) -> bool {
         if self.hunk_selection.is_some()
             && index < hunk_count(&self.diff)
             && self.hunk_selection != Some(index)
         {
             self.hunk_selection = Some(index);
             self.hunk_pin_pending = true;
+            return true;
         }
+        false
     }
 
     pub(super) fn leave_hunk_selection(&mut self) {
@@ -731,7 +773,7 @@ impl ChangesState {
         }
         self.preview_generation = self.preview_generation.wrapping_add(1);
         let Some(repo) = repo else {
-            self.diff.clear();
+            self.set_diff(String::new());
             return;
         };
         if self.pane == LeftPane::Files {
@@ -740,18 +782,13 @@ impl ChangesState {
                 .selected()
                 .and_then(|index| self.explorer_rows_cache.get(index))
             else {
-                self.diff = "Select a file to preview".to_owned();
+                self.set_diff("Select a file to preview".to_owned());
                 return;
             };
             if let Some(index) = row.file_index {
                 self.request_preview(repo, PreviewTask::File(repo.files[index].clone()));
             } else if let Some(path) = &row.directory_path {
-                let count = repo
-                    .files
-                    .iter()
-                    .filter(|file| file.starts_with(&format!("{path}/")))
-                    .count();
-                self.diff = format!("{count} files in {path}/");
+                self.set_diff(format!("{} files in {path}/", row.descendant_count));
             }
             return;
         }
@@ -770,18 +807,13 @@ impl ChangesState {
             .selected()
             .and_then(|index| rows.get(index))
         else {
-            self.diff = "Working tree clean".to_owned();
+            self.set_diff("Working tree clean".to_owned());
             return;
         };
         if let Some(index) = row.change_index {
             self.request_preview(repo, PreviewTask::Diff(repo.changes[index].clone()));
         } else if let Some(path) = &row.directory_path {
-            let count = repo
-                .changes
-                .iter()
-                .filter(|change| change.path.starts_with(&format!("{path}/")))
-                .count();
-            self.diff = format!("{count} changed files in {path}/");
+            self.set_diff(format!("{} changed files in {path}/", row.descendant_count));
         }
     }
 
@@ -791,7 +823,7 @@ impl ChangesState {
             if result.generation == self.preview_generation
                 && active_root.is_some_and(|root| root == result.root)
             {
-                self.diff = result.content;
+                self.set_diff(result.content);
                 if let Some(pending) = self.pending_hunk_selection.take() {
                     let count = hunk_count(&self.diff);
                     self.hunk_selection = (count > 0).then(|| pending.index.min(count - 1));
@@ -804,7 +836,7 @@ impl ChangesState {
     }
 
     fn request_preview(&mut self, repo: &RepositoryData, task: PreviewTask) {
-        self.diff = "Loading preview…".to_owned();
+        self.set_diff("Loading preview…".to_owned());
         let _ = self.preview_tx.send(PreviewRequest {
             generation: self.preview_generation,
             root: repo.root.clone(),
@@ -813,15 +845,42 @@ impl ChangesState {
     }
 
     fn rebuild_explorer_rows(&mut self, repo: Option<&RepositoryData>) {
-        self.explorer_rows_cache = repo.map_or_else(Vec::new, |repo| {
-            build_file_tree(&repo.files, &self.collapsed_explorer_directories)
+        self.sync_repository_caches(repo);
+        self.explorer_rows_cache = self.file_tree.as_ref().map_or_else(Vec::new, |tree| {
+            tree.rows(&self.collapsed_explorer_directories)
         });
     }
 
     fn rebuild_worktree_rows(&mut self, repo: Option<&RepositoryData>) {
-        self.worktree_rows_cache = repo.map_or_else(Vec::new, |repo| {
-            build_worktree(&repo.changes, &self.collapsed_directories)
-        });
+        self.sync_repository_caches(repo);
+        self.worktree_rows_cache = self
+            .worktree_tree
+            .as_ref()
+            .map_or_else(Vec::new, |tree| tree.rows(&self.collapsed_directories));
+    }
+
+    fn sync_repository_caches(&mut self, repo: Option<&RepositoryData>) {
+        let files_fingerprint = repo.map(|repo| repo.files_fingerprint);
+        if self.file_tree_fingerprint != files_fingerprint {
+            self.file_tree = repo.map(|repo| FileTree::new(&repo.files));
+            self.file_tree_fingerprint = files_fingerprint;
+        }
+        let changes_fingerprint = repo.map(|repo| repo.changes_fingerprint);
+        if self.worktree_tree_fingerprint != changes_fingerprint {
+            self.worktree_tree = repo.map(|repo| WorktreeTree::new(&repo.changes));
+            self.change_codes = repo.map_or_else(HashMap::new, |repo| change_codes(&repo.changes));
+            self.worktree_tree_fingerprint = changes_fingerprint;
+        }
+    }
+
+    pub(crate) fn explorer_change_code(&self, path: &str) -> Option<char> {
+        self.change_codes.get(path).copied()
+    }
+
+    pub(crate) fn set_diff(&mut self, content: String) {
+        self.diff = content;
+        self.preview_content_generation = self.preview_content_generation.wrapping_add(1);
+        self.preview_render_cache = None;
     }
 
     fn select_initial_rows(&mut self, repo: Option<&RepositoryData>) {
@@ -857,14 +916,13 @@ impl ChangesState {
     }
 
     fn select_directory(&mut self, repo: &RepositoryData, path: &str, section: WorktreeSection) {
-        let row = self
-            .worktree_rows(repo)
-            .iter()
-            .enumerate()
-            .position(|(index, row)| {
-                row.directory_path.as_deref() == Some(path)
-                    && self.worktree_section(index) == Some(section)
-            });
+        let mut current_section = None;
+        let row = self.worktree_rows(repo).iter().position(|row| {
+            if let Some(row_section) = row.section {
+                current_section = Some(row_section);
+            }
+            row.directory_path.as_deref() == Some(path) && current_section == Some(section)
+        });
         self.worktree_state.select(row);
     }
 
@@ -920,13 +978,32 @@ fn preview_worker() -> (Sender<PreviewRequest>, Receiver<PreviewResult>) {
     (request_tx, result_rx)
 }
 
-fn default_explorer_collapsed_directories(repo: Option<&RepositoryData>) -> HashSet<String> {
-    repo.map_or_else(HashSet::new, |repo| {
-        build_file_tree(&repo.files, &HashSet::new())
-            .into_iter()
-            .filter_map(|row| row.directory_path)
-            .collect()
-    })
+fn change_codes(changes: &[Change]) -> HashMap<String, char> {
+    let mut codes = HashMap::new();
+    for change in changes {
+        codes
+            .entry(change.path.clone())
+            .and_modify(|code| {
+                if change_code_priority(change.code) < change_code_priority(*code) {
+                    *code = change.code;
+                }
+            })
+            .or_insert(change.code);
+    }
+    codes
+}
+
+fn change_code_priority(code: char) -> u8 {
+    match code {
+        'D' | 'U' => 0,
+        '?' => 1,
+        'A' => 2,
+        'R' => 3,
+        'C' => 4,
+        'M' => 5,
+        'T' => 6,
+        _ => 7,
+    }
 }
 
 fn move_list(state: &mut ListState, len: usize, delta: isize) {
@@ -1021,6 +1098,11 @@ mod tests {
             ],
             history: Vec::new(),
             commits: Vec::new(),
+            files_fingerprint: 1,
+            changes_fingerprint: 1,
+            change_counts: (0, 1),
+            graph_width: 0,
+            graph_truncated: false,
         };
 
         let mut state = ChangesState::new(Some(&repo));

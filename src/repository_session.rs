@@ -9,7 +9,8 @@ use anyhow::Result;
 
 use crate::git::{self, Change, CommandOutput, RepositoryData};
 
-const STATUS_INTERVAL: Duration = Duration::from_millis(800);
+const MIN_STATUS_INTERVAL: Duration = Duration::from_millis(800);
+const MAX_STATUS_INTERVAL: Duration = Duration::from_secs(10);
 
 pub(crate) enum WorkerCompletion {
     Commit(Result<CommandOutput, String>),
@@ -53,6 +54,7 @@ struct WorkerResult {
 struct StatusResult {
     root: PathBuf,
     baseline: Option<u64>,
+    activity_generation: u64,
     result: Result<u64, String>,
 }
 
@@ -85,6 +87,8 @@ pub(crate) struct RepositorySession {
     status_signature: Option<u64>,
     next_fetch_at: Instant,
     next_status_check: Instant,
+    status_interval: Duration,
+    status_activity_generation: u64,
     load_generation: u64,
     load_running: bool,
     load_tx: Sender<LoadResult>,
@@ -115,7 +119,9 @@ impl RepositorySession {
             status_check_running: false,
             status_signature,
             next_fetch_at: Instant::now() + fetch_interval,
-            next_status_check: Instant::now() + STATUS_INTERVAL,
+            next_status_check: Instant::now() + MIN_STATUS_INTERVAL,
+            status_interval: MIN_STATUS_INTERVAL,
+            status_activity_generation: 0,
             load_generation: 0,
             load_running: false,
             load_tx,
@@ -165,7 +171,7 @@ impl RepositorySession {
             self.load_running = false;
             let result = done.result.map(|(data, signature)| {
                 self.status_signature = signature;
-                self.next_status_check = Instant::now() + STATUS_INTERVAL;
+                self.reset_status_interval();
                 if done.kind == LoadKind::Open {
                     self.next_fetch_at = Instant::now() + done.fetch_interval;
                 }
@@ -311,14 +317,15 @@ impl RepositorySession {
         };
 
         self.status_check_running = true;
-        self.next_status_check = Instant::now() + STATUS_INTERVAL;
         let baseline = self.status_signature;
+        let activity_generation = self.status_activity_generation;
         let sender = self.status_tx.clone();
         thread::spawn(move || {
             let result = git::worktree_signature(&root).map_err(|error| error.to_string());
             let _ = sender.send(StatusResult {
                 root,
                 baseline,
+                activity_generation,
                 result,
             });
         });
@@ -383,11 +390,32 @@ impl RepositorySession {
                     .replace(signature)
                     .is_some_and(|previous| previous != signature);
                 if changed {
+                    self.reset_status_interval();
                     return true;
                 }
             }
+            if done.activity_generation == self.status_activity_generation {
+                self.status_interval = self
+                    .status_interval
+                    .saturating_mul(2)
+                    .min(MAX_STATUS_INTERVAL);
+                self.next_status_check = Instant::now() + self.status_interval;
+            }
         }
         false
+    }
+
+    pub(crate) fn note_activity(&mut self) {
+        self.status_activity_generation = self.status_activity_generation.wrapping_add(1);
+        self.status_interval = MIN_STATUS_INTERVAL;
+        self.next_status_check = self
+            .next_status_check
+            .min(Instant::now() + MIN_STATUS_INTERVAL);
+    }
+
+    fn reset_status_interval(&mut self) {
+        self.status_interval = MIN_STATUS_INTERVAL;
+        self.next_status_check = Instant::now() + MIN_STATUS_INTERVAL;
     }
 
     fn start_load(&mut self, path: PathBuf, kind: LoadKind, fetch_interval: Duration) -> bool {
@@ -508,6 +536,7 @@ mod tests {
             .send(StatusResult {
                 root: PathBuf::from("/previous"),
                 baseline: Some(10),
+                activity_generation: 0,
                 result: Ok(20),
             })
             .unwrap();
@@ -526,6 +555,7 @@ mod tests {
             .send(StatusResult {
                 root: PathBuf::from("/active"),
                 baseline: Some(10),
+                activity_generation: 0,
                 result: Ok(30),
             })
             .unwrap();
@@ -552,6 +582,27 @@ mod tests {
         assert!(!session.start_mutation(Mutation::StageAll));
     }
 
+    #[test]
+    fn activity_does_not_postpone_or_back_off_status_checks() {
+        let mut session = session("/active", Some(10));
+        session.next_status_check = Instant::now();
+        session.note_activity();
+        assert!(session.next_status_check <= Instant::now());
+
+        session.status_check_running = true;
+        session
+            .status_tx
+            .send(StatusResult {
+                root: PathBuf::from("/active"),
+                baseline: Some(10),
+                activity_generation: 0,
+                result: Ok(10),
+            })
+            .unwrap();
+        assert!(!session.next_worktree_change());
+        assert_eq!(session.status_interval, MIN_STATUS_INTERVAL);
+    }
+
     fn session(root: &str, status_signature: Option<u64>) -> RepositorySession {
         let (worker_tx, worker_rx) = mpsc::channel();
         let (status_tx, status_rx) = mpsc::channel();
@@ -565,6 +616,11 @@ mod tests {
                 files: Vec::new(),
                 history: Vec::new(),
                 commits: Vec::new(),
+                files_fingerprint: 0,
+                changes_fingerprint: 0,
+                change_counts: (0, 0),
+                graph_width: 0,
+                graph_truncated: false,
             }),
             commit_running: false,
             fetch_running: false,
@@ -578,6 +634,8 @@ mod tests {
             status_signature,
             next_fetch_at: Instant::now(),
             next_status_check: Instant::now(),
+            status_interval: MIN_STATUS_INTERVAL,
+            status_activity_generation: 0,
             load_generation: 0,
             load_running: false,
             load_tx,

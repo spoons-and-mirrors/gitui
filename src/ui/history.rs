@@ -35,18 +35,22 @@ pub(super) fn draw_graph(
         area.width.saturating_sub(2),
         1,
     );
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                "ALL BRANCHES",
-                Style::default()
-                    .fg(palette().muted)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  date order", Style::default().fg(palette().faint)),
-        ])),
-        graph_header,
-    );
+    let mut graph_title = vec![
+        Span::styled(
+            "ALL BRANCHES",
+            Style::default()
+                .fg(palette().muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  date order", Style::default().fg(palette().faint)),
+    ];
+    if repo.graph_truncated {
+        graph_title.push(Span::styled(
+            format!("  first {} commits", repo.commits.len()),
+            Style::default().fg(palette().yellow),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(graph_title)), graph_header);
     let table_area = Rect::new(
         graph_header.x,
         graph_header.y.saturating_add(2),
@@ -62,13 +66,7 @@ pub(super) fn draw_graph(
     );
 
     let maximum_graph_width = table_area.width.saturating_sub(35).clamp(8, 40);
-    let graph_width = repo
-        .commits
-        .iter()
-        .map(|commit| commit.graph.len())
-        .max()
-        .unwrap_or(1)
-        .clamp(8, maximum_graph_width as usize) as u16;
+    let graph_width = repo.graph_width.clamp(8, maximum_graph_width as usize) as u16;
     let compact = table_area.width < 110;
     let widths = if compact {
         vec![
@@ -177,24 +175,60 @@ pub(super) fn draw_branch(
         ])),
         header,
     );
-    let items: Vec<ListItem<'_>> = if commits.is_empty() {
-        vec![ListItem::new(Line::styled(
+    if commits.is_empty() {
+        let items = vec![ListItem::new(Line::styled(
             "  No commits on this branch",
             Style::default().fg(palette().faint),
-        ))]
-    } else {
-        commits
-            .iter()
-            .map(|commit| history_item(commit, usize::from(list.width)))
-            .collect()
-    };
+        ))];
+        frame.render_stateful_widget(List::new(items), list, state);
+        return;
+    }
+
+    let selected = state.selected();
+    let mut offset = state.offset().min(commits.len().saturating_sub(1));
+    if let Some(selected) = selected {
+        if selected < offset {
+            offset = selected;
+        }
+        while offset < selected
+            && commits[offset..=selected]
+                .iter()
+                .map(history_item_height)
+                .sum::<usize>()
+                > usize::from(list.height)
+        {
+            offset += 1;
+        }
+    }
+    *state.offset_mut() = offset;
+    let mut height = 0usize;
+    let items: Vec<ListItem<'_>> = commits
+        .iter()
+        .skip(offset)
+        .take_while(|commit| {
+            let item_height = history_item_height(commit);
+            let include =
+                height == 0 || height.saturating_add(item_height) <= usize::from(list.height);
+            if include {
+                height = height.saturating_add(item_height);
+            }
+            include
+        })
+        .map(|commit| history_item(commit, usize::from(list.width)))
+        .collect();
     let history =
         List::new(items).highlight_style(Style::default().bg(if focused && mode == Mode::Normal {
             palette().selected
         } else {
             palette().inactive_selected
         }));
-    frame.render_stateful_widget(history, list, state);
+    let mut visible_state = ListState::default();
+    visible_state.select(selected.and_then(|selected| selected.checked_sub(offset)));
+    frame.render_stateful_widget(history, list, &mut visible_state);
+}
+
+fn history_item_height(commit: &Commit) -> usize {
+    1 + usize::from(!commit.refs.is_empty())
 }
 
 fn graph_row(commit: &Commit, compact: bool) -> Row<'static> {

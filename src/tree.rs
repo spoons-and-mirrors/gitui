@@ -12,6 +12,7 @@ pub(crate) struct WorktreeRow {
     pub(crate) directory_expanded: Option<bool>,
     pub(crate) section: Option<WorktreeSection>,
     pub(crate) section_stats: Option<(u64, u64)>,
+    pub(crate) descendant_count: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,46 +29,97 @@ pub(crate) struct ExplorerRow {
     pub(crate) file_index: Option<usize>,
     pub(crate) directory_path: Option<String>,
     pub(crate) directory_expanded: Option<bool>,
+    pub(crate) descendant_count: usize,
 }
 
 #[derive(Default)]
 struct Node {
     children: BTreeMap<String, Node>,
     entries: Vec<usize>,
+    descendant_count: usize,
 }
 
-pub(crate) fn build_worktree(changes: &[Change], collapsed: &HashSet<String>) -> Vec<WorktreeRow> {
-    let mut rows = Vec::new();
-    append_worktree_section(changes, collapsed, WorktreeSection::Staged, &mut rows);
-    append_worktree_section(changes, collapsed, WorktreeSection::Unstaged, &mut rows);
-    rows
+pub(crate) struct FileTree {
+    root: Node,
+}
+
+impl FileTree {
+    pub(crate) fn new(files: &[String]) -> Self {
+        let mut root = Node::default();
+        for (index, path) in files.iter().enumerate() {
+            insert_path(&mut root, path, index);
+        }
+        Self { root }
+    }
+
+    pub(crate) fn rows(&self, collapsed: &HashSet<String>) -> Vec<ExplorerRow> {
+        let mut rows = Vec::new();
+        flatten_file_tree(&self.root, "", &[], true, collapsed, &mut rows);
+        rows
+    }
+
+    pub(crate) fn default_collapsed_directories(&self) -> HashSet<String> {
+        let mut directories = HashSet::new();
+        collect_directory_paths(&self.root, "", &mut directories);
+        directories
+    }
+}
+
+struct WorktreeSectionTree {
+    section: WorktreeSection,
+    root: Node,
+    additions: u64,
+    deletions: u64,
+}
+
+pub(crate) struct WorktreeTree {
+    sections: Vec<WorktreeSectionTree>,
+}
+
+impl WorktreeTree {
+    pub(crate) fn new(changes: &[Change]) -> Self {
+        let mut sections = Vec::new();
+        for section in [WorktreeSection::Staged, WorktreeSection::Unstaged] {
+            let mut root = Node::default();
+            let mut additions = 0_u64;
+            let mut deletions = 0_u64;
+            for (index, change) in changes.iter().enumerate() {
+                let belongs = match section {
+                    WorktreeSection::Staged => change.staged,
+                    WorktreeSection::Unstaged => !change.staged,
+                };
+                if belongs {
+                    insert_path(&mut root, &change.path, index);
+                    additions = additions.saturating_add(change.additions);
+                    deletions = deletions.saturating_add(change.deletions);
+                }
+            }
+            if root.descendant_count > 0 {
+                sections.push(WorktreeSectionTree {
+                    section,
+                    root,
+                    additions,
+                    deletions,
+                });
+            }
+        }
+        Self { sections }
+    }
+
+    pub(crate) fn rows(&self, collapsed: &HashSet<String>) -> Vec<WorktreeRow> {
+        let mut rows = Vec::new();
+        for tree in &self.sections {
+            append_worktree_section(tree, collapsed, &mut rows);
+        }
+        rows
+    }
 }
 
 fn append_worktree_section(
-    changes: &[Change],
+    tree: &WorktreeSectionTree,
     collapsed: &HashSet<String>,
-    section: WorktreeSection,
     rows: &mut Vec<WorktreeRow>,
 ) {
-    let mut root = Node::default();
-    let mut count = 0;
-    let mut additions = 0_u64;
-    let mut deletions = 0_u64;
-    for (index, change) in changes.iter().enumerate() {
-        let belongs = match section {
-            WorktreeSection::Staged => change.staged,
-            WorktreeSection::Unstaged => !change.staged,
-        };
-        if belongs {
-            insert_path(&mut root, &change.path, index);
-            count += 1;
-            additions = additions.saturating_add(change.additions);
-            deletions = deletions.saturating_add(change.deletions);
-        }
-    }
-    if count == 0 {
-        return;
-    }
     rows.push(WorktreeRow {
         prefix: String::new(),
         label: String::new(),
@@ -75,12 +127,13 @@ fn append_worktree_section(
         change_index: None,
         directory_path: None,
         directory_expanded: None,
-        section: Some(section),
+        section: Some(tree.section),
         section_stats: None,
+        descendant_count: tree.root.descendant_count,
     });
     rows.push(WorktreeRow {
         prefix: String::new(),
-        label: match section {
+        label: match tree.section {
             WorktreeSection::Staged => "STAGED".to_owned(),
             WorktreeSection::Unstaged => "UNSTAGED".to_owned(),
         },
@@ -88,28 +141,47 @@ fn append_worktree_section(
         change_index: None,
         directory_path: None,
         directory_expanded: None,
-        section: Some(section),
-        section_stats: Some((additions, deletions)),
+        section: Some(tree.section),
+        section_stats: Some((tree.additions, tree.deletions)),
+        descendant_count: tree.root.descendant_count,
     });
-    flatten_worktree(&root, "", &[], true, collapsed, rows);
-}
-
-pub(crate) fn build_file_tree(files: &[String], collapsed: &HashSet<String>) -> Vec<ExplorerRow> {
-    let mut root = Node::default();
-    for (index, path) in files.iter().enumerate() {
-        insert_path(&mut root, path, index);
-    }
-    let mut rows = Vec::new();
-    flatten_file_tree(&root, "", &[], true, collapsed, &mut rows);
-    rows
+    flatten_worktree(&tree.root, "", &[], true, collapsed, rows);
 }
 
 fn insert_path(root: &mut Node, path: &str, entry_index: usize) {
     let mut node = root;
+    node.descendant_count += 1;
     for component in path.split('/').filter(|component| !component.is_empty()) {
         node = node.children.entry(component.to_owned()).or_default();
+        node.descendant_count += 1;
     }
     node.entries.push(entry_index);
+}
+
+fn collect_directory_paths(node: &Node, parent_path: &str, paths: &mut HashSet<String>) {
+    for (name, child) in sorted_children(node) {
+        if child.children.is_empty() {
+            continue;
+        }
+        let mut path = join_path(parent_path, name);
+        let mut directory = child;
+        while directory.entries.is_empty() && directory.children.len() == 1 {
+            let (next_name, next) = directory.children.first_key_value().expect("one child");
+            if next.children.is_empty() {
+                break;
+            }
+            path = join_path(&path, next_name);
+            directory = next;
+        }
+        paths.insert(path.clone());
+        collect_directory_paths(directory, &path, paths);
+    }
+}
+
+fn sorted_children(node: &Node) -> Vec<(&String, &Node)> {
+    let mut children: Vec<_> = node.children.iter().collect();
+    children.sort_by_key(|(name, child)| (child.children.is_empty(), name.as_str()));
+    children
 }
 
 fn flatten_file_tree(
@@ -120,8 +192,7 @@ fn flatten_file_tree(
     collapsed: &HashSet<String>,
     rows: &mut Vec<ExplorerRow>,
 ) {
-    let mut children: Vec<_> = node.children.iter().collect();
-    children.sort_by_key(|(name, child)| (child.children.is_empty(), name.as_str()));
+    let children = sorted_children(node);
     let child_count = children.len();
     for (position, (name, child)) in children.into_iter().enumerate() {
         let is_last = position + 1 == child_count;
@@ -137,6 +208,7 @@ fn flatten_file_tree(
                     file_index: Some(*file_index),
                     directory_path: None,
                     directory_expanded: None,
+                    descendant_count: 1,
                 });
             }
             continue;
@@ -162,6 +234,7 @@ fn flatten_file_tree(
             file_index: None,
             directory_path: Some(path.clone()),
             directory_expanded: Some(expanded),
+            descendant_count: directory.descendant_count,
         });
         if expanded {
             let mut child_lineage = lineage.to_vec();
@@ -179,8 +252,7 @@ fn flatten_worktree(
     collapsed: &HashSet<String>,
     rows: &mut Vec<WorktreeRow>,
 ) {
-    let mut children: Vec<_> = node.children.iter().collect();
-    children.sort_by_key(|(name, child)| (child.children.is_empty(), name.as_str()));
+    let children = sorted_children(node);
     let child_count = children.len();
     for (position, (name, child)) in children.into_iter().enumerate() {
         let is_last = position + 1 == child_count;
@@ -203,14 +275,28 @@ fn flatten_worktree(
                     directory_expanded: None,
                     section: None,
                     section_stats: None,
+                    descendant_count: 1,
                 });
             }
         } else {
+            for change_index in &child.entries {
+                rows.push(WorktreeRow {
+                    prefix: prefix.clone(),
+                    label: name.clone(),
+                    depth: lineage.len(),
+                    change_index: Some(*change_index),
+                    directory_path: None,
+                    directory_expanded: None,
+                    section: None,
+                    section_stats: None,
+                    descendant_count: 1,
+                });
+            }
             let mut label = name.clone();
             let mut directory = child;
             while directory.entries.is_empty() && directory.children.len() == 1 {
                 let (next_name, next) = directory.children.first_key_value().expect("one child");
-                if next.children.is_empty() {
+                if next.children.is_empty() || !next.entries.is_empty() {
                     break;
                 }
                 label.push('/');
@@ -228,6 +314,9 @@ fn flatten_worktree(
                 directory_expanded: Some(expanded),
                 section: None,
                 section_stats: None,
+                descendant_count: directory
+                    .descendant_count
+                    .saturating_sub(directory.entries.len()),
             });
             if expanded {
                 let mut child_lineage = lineage.to_vec();
@@ -236,6 +325,16 @@ fn flatten_worktree(
             }
         }
     }
+}
+
+#[cfg(test)]
+fn build_worktree(changes: &[Change], collapsed: &HashSet<String>) -> Vec<WorktreeRow> {
+    WorktreeTree::new(changes).rows(collapsed)
+}
+
+#[cfg(test)]
+fn build_file_tree(files: &[String], collapsed: &HashSet<String>) -> Vec<ExplorerRow> {
+    FileTree::new(files).rows(collapsed)
 }
 
 fn join_path(parent: &str, name: &str) -> String {
@@ -315,6 +414,28 @@ mod tests {
         assert_eq!(rows[5].label, "UNSTAGED");
         assert_eq!(rows[5].section_stats, Some((2, 1)));
         assert_eq!(rows[7].change_index, Some(0));
+    }
+
+    #[test]
+    fn keeps_a_deleted_file_alongside_an_untracked_directory_at_the_same_path() {
+        let changes = [
+            change("foo"),
+            change("foo/bar.txt"),
+            change("dir/nested"),
+            change("dir/nested/child.txt"),
+        ];
+
+        let rows = build_worktree(&changes, &HashSet::new());
+
+        assert!(rows.iter().any(|row| row.change_index == Some(0)));
+        assert!(rows.iter().any(|row| row.change_index == Some(1)));
+        assert!(rows.iter().any(|row| row.change_index == Some(2)));
+        assert!(rows.iter().any(|row| row.change_index == Some(3)));
+        let directory = rows
+            .iter()
+            .find(|row| row.directory_path.as_deref() == Some("foo"))
+            .unwrap();
+        assert_eq!(directory.descendant_count, 1);
     }
 
     #[test]

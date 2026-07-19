@@ -5,10 +5,11 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{List, ListItem, Paragraph, Wrap},
 };
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    app::{App, DiffHunkRegion, LeftPane, Mode, TextInput, View},
+    app::{App, DiffHunkRegion, LeftPane, Mode, PreviewRenderCache, TextInput, View},
     git::Change,
     tree::{ExplorerRow, WorktreeRow, WorktreeSection},
 };
@@ -17,7 +18,7 @@ use super::{
     fill, history, palette,
     text::{
         diff_display_line_count, styled_diff, styled_diff_window, styled_source,
-        styled_source_window,
+        styled_source_window, wrapped_preview_line_starts,
     },
     truncate_width,
 };
@@ -62,7 +63,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let worktree_content = columns[0].inner(Margin::new(1, 0));
     let repo = app.session.data().expect("checked above");
     let local_workspace = repo.is_local();
-    let staged_count = repo.changes.iter().filter(|change| change.staged).count();
+    let staged_count = repo.change_counts.0;
     let checkbox = if !repo.changes.is_empty() && staged_count == repo.changes.len() {
         "◉"
     } else if staged_count > 0 {
@@ -160,6 +161,23 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .changes
         .worktree_scroll
         .min(worktree_len.saturating_sub(worktree_viewport));
+    if app.changes.worktree_scroll_to_selection
+        && worktree_viewport > 0
+        && let Some(selected) = app.changes.worktree_state.selected()
+    {
+        if selected < app.changes.worktree_scroll {
+            app.changes.worktree_scroll = selected;
+        } else if selected
+            >= app
+                .changes
+                .worktree_scroll
+                .saturating_add(worktree_viewport)
+        {
+            app.changes.worktree_scroll =
+                selected.saturating_add(1).saturating_sub(worktree_viewport);
+        }
+    }
+    app.changes.worktree_scroll_to_selection = false;
     let selected_style = Style::default().bg(if app.mode == Mode::Commit {
         palette().inactive_selected
     } else {
@@ -369,15 +387,9 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     );
     let show_hunk_actions =
         selected_commit.is_none() && selected_change.is_some_and(|change| !change.staged);
-    let (mut diff_lines, unwrapped_height) =
-        prepare_preview_lines(app, diff_body, &syntax_path, true);
+    let mut preview = prepare_preview_lines(app, diff_body, &syntax_path, true);
     let (hunk_rows, rendered_height) = if show_hunk_actions {
-        rendered_hunk_rows(
-            &app.changes.diff,
-            &diff_lines,
-            diff_body.width,
-            unwrapped_height.is_none(),
-        )
+        cached_rendered_hunk_rows(app, preview.wrapped)
     } else {
         (Vec::new(), 0)
     };
@@ -388,8 +400,8 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     {
         let old_scroll = app.changes.diff_scroll;
         app.changes.diff_scroll = scroll_to_row(*row, rendered_height);
-        if app.changes.diff_scroll != old_scroll && unwrapped_height.is_some() {
-            diff_lines = prepare_preview_lines(app, diff_body, &syntax_path, true).0;
+        if app.changes.diff_scroll != old_scroll {
+            preview = prepare_preview_lines(app, diff_body, &syntax_path, true);
         }
     }
     let visible_hunks = visible_hunks(
@@ -398,14 +410,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         diff_body,
         app.changes.diff_scroll,
     );
-    render_scrollable_content(
-        frame,
-        app,
-        columns[1],
-        diff_body,
-        diff_lines,
-        unwrapped_height,
-    );
+    render_scrollable_content(frame, app, columns[1], diff_body, preview);
     draw_hunk_actions(frame, app, diff_body, visible_hunks);
 
     let commit_active = app.mode == Mode::Commit;
@@ -622,12 +627,11 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
             .take(viewport)
             .map(|(index, row)| {
                 let repo = app.repository().expect("checked above");
-                let item = explorer_item(
-                    row,
-                    &repo.files,
-                    &repo.changes,
-                    usize::from(list_area.width),
-                );
+                let code = row
+                    .file_index
+                    .and_then(|file_index| repo.files.get(file_index))
+                    .and_then(|path| app.changes.explorer_change_code(path));
+                let item = explorer_item(row, code, usize::from(list_area.width));
                 if app.changes.explorer_state.selected() == Some(index) {
                     item.style(Style::default().bg(palette().selected))
                 } else {
@@ -696,55 +700,278 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
         .selected_explorer_file_path()
         .unwrap_or_default()
         .to_owned();
-    let (lines, unwrapped_height) = prepare_preview_lines(app, preview_body, &path, false);
-    render_scrollable_content(
-        frame,
-        app,
-        columns[1],
-        preview_body,
-        lines,
-        unwrapped_height,
-    );
+    let preview = prepare_preview_lines(app, preview_body, &path, false);
+    render_scrollable_content(frame, app, columns[1], preview_body, preview);
 }
 
-fn prepare_preview_lines(
-    app: &mut App,
-    body: Rect,
-    path: &str,
-    is_diff: bool,
-) -> (Vec<Line<'static>>, Option<usize>) {
+struct PreparedPreview {
+    lines: Vec<Line<'static>>,
+    rendered_height: usize,
+    wrapped: bool,
+}
+
+fn prepare_preview_lines(app: &mut App, body: Rect, path: &str, is_diff: bool) -> PreparedPreview {
+    const MAX_CACHED_PREVIEW_LINES: usize = 30_000;
+
     let width = usize::from(body.width);
-    if app.changes.diff_wrap {
-        let lines = if is_diff {
-            styled_diff(&app.changes.diff, path, width)
+    let generation = app.changes.preview_content_generation;
+    let cache_matches = app
+        .changes
+        .preview_render_cache
+        .as_ref()
+        .is_some_and(|cache| {
+            cache.generation == generation
+                && cache.path == path
+                && cache.is_diff == is_diff
+                && cache.width == width
+        });
+    if !cache_matches {
+        let display_count = if is_diff {
+            diff_display_line_count(&app.changes.diff)
         } else {
-            styled_source(&app.changes.diff, path, width)
+            app.changes.diff.lines().count()
         };
-        return (lines, None);
+        let fully_styled = display_count <= MAX_CACHED_PREVIEW_LINES;
+        let lines = if fully_styled {
+            if is_diff {
+                styled_diff(&app.changes.diff, path, width)
+            } else {
+                styled_source(&app.changes.diff, path, width)
+            }
+        } else {
+            Vec::new()
+        };
+        app.changes.preview_render_cache = Some(PreviewRenderCache {
+            generation,
+            path: path.to_owned(),
+            is_diff,
+            width,
+            lines,
+            fully_styled,
+            window_start: 0,
+            display_count,
+            wrapped_line_starts: None,
+            unwrapped_hunks: None,
+            wrapped_hunks: None,
+        });
     }
 
-    let height = if is_diff {
-        diff_display_line_count(&app.changes.diff)
-    } else {
-        app.changes.diff.lines().count()
-    };
+    let wrapped = app.changes.diff_wrap;
+    if wrapped {
+        if app
+            .changes
+            .preview_render_cache
+            .as_ref()
+            .is_some_and(|cache| cache.wrapped_line_starts.is_none())
+        {
+            let starts = wrapped_preview_line_starts(&app.changes.diff, is_diff, width);
+            app.changes
+                .preview_render_cache
+                .as_mut()
+                .expect("preview cache was initialized")
+                .wrapped_line_starts = Some(starts);
+        }
+        let starts = app
+            .changes
+            .preview_render_cache
+            .as_ref()
+            .and_then(|cache| cache.wrapped_line_starts.as_deref())
+            .expect("wrapped line starts were initialized");
+        let display_count = starts.len().saturating_sub(1);
+        let rendered_height = starts.last().copied().unwrap_or(0);
+        let viewport_height = usize::from(body.height);
+        let scroll_limit = if app.changes.hunk_selection.is_some() {
+            rendered_height.saturating_sub(1)
+        } else {
+            rendered_height.saturating_sub(viewport_height)
+        };
+        app.changes.diff_scroll = app.changes.diff_scroll.min(scroll_limit);
+        let scroll = app.changes.diff_scroll;
+        let first = starts
+            .partition_point(|start| *start <= scroll)
+            .saturating_sub(1)
+            .min(display_count);
+        let visible_end = scroll.saturating_add(viewport_height);
+        let end = starts
+            .partition_point(|start| *start < visible_end)
+            .max(first.saturating_add(1))
+            .min(display_count);
+        let local_scroll = scroll.saturating_sub(starts[first]);
+        let logical_lines = preview_line_window(
+            app,
+            is_diff,
+            path,
+            width,
+            first,
+            end.saturating_sub(first),
+            viewport_height,
+        );
+        let lines = hard_wrap_lines(logical_lines, width, local_scroll, viewport_height);
+        return PreparedPreview {
+            lines,
+            rendered_height,
+            wrapped: true,
+        };
+    }
+
+    let height = app
+        .changes
+        .preview_render_cache
+        .as_ref()
+        .expect("preview cache was initialized")
+        .display_count;
     let max_scroll = if is_diff && app.changes.hunk_selection.is_some() {
         height.saturating_sub(1)
     } else {
         height.saturating_sub(usize::from(body.height))
     };
-    app.changes.diff_scroll = app
-        .changes
-        .diff_scroll
-        .min(max_scroll.min(usize::from(u16::MAX)) as u16);
-    let start = usize::from(app.changes.diff_scroll);
+    app.changes.diff_scroll = app.changes.diff_scroll.min(max_scroll);
+    let start = app.changes.diff_scroll;
     let count = usize::from(body.height);
-    let lines = if is_diff {
-        styled_diff_window(&app.changes.diff, path, width, start, count)
-    } else {
-        styled_source_window(&app.changes.diff, path, width, start, count)
-    };
-    (lines, Some(height))
+    let lines = preview_line_window(app, is_diff, path, width, start, count, count);
+    PreparedPreview {
+        lines,
+        rendered_height: height,
+        wrapped: false,
+    }
+}
+
+fn preview_line_window(
+    app: &mut App,
+    is_diff: bool,
+    path: &str,
+    width: usize,
+    start: usize,
+    count: usize,
+    viewport_height: usize,
+) -> Vec<Line<'static>> {
+    let cache = app
+        .changes
+        .preview_render_cache
+        .as_ref()
+        .expect("preview cache was initialized");
+    if cache.fully_styled {
+        return cache
+            .lines
+            .iter()
+            .skip(start)
+            .take(count)
+            .cloned()
+            .collect();
+    }
+    let cached_end = cache.window_start.saturating_add(cache.lines.len());
+    if start < cache.window_start || start.saturating_add(count) > cached_end {
+        let margin = viewport_height.saturating_mul(4).max(256);
+        let window_start = start.saturating_sub(margin);
+        let window_count = count.saturating_add(margin.saturating_mul(2));
+        let lines = if is_diff {
+            styled_diff_window(&app.changes.diff, path, width, window_start, window_count)
+        } else {
+            styled_source_window(&app.changes.diff, path, width, window_start, window_count)
+        };
+        let cache = app
+            .changes
+            .preview_render_cache
+            .as_mut()
+            .expect("preview cache was initialized");
+        cache.window_start = window_start;
+        cache.lines = lines;
+    }
+    let cache = app
+        .changes
+        .preview_render_cache
+        .as_ref()
+        .expect("preview cache was initialized");
+    cache
+        .lines
+        .iter()
+        .skip(start.saturating_sub(cache.window_start))
+        .take(count)
+        .cloned()
+        .collect()
+}
+
+fn hard_wrap_lines(
+    lines: Vec<Line<'static>>,
+    width: usize,
+    skip: usize,
+    take: usize,
+) -> Vec<Line<'static>> {
+    if take == 0 {
+        return Vec::new();
+    }
+    let width = width.max(1);
+    let mut wrapped = Vec::with_capacity(take);
+    let mut rendered = 0_usize;
+    for line in lines {
+        let line_style = line.style;
+        let mut output_spans = Vec::new();
+        let mut output_width: usize = 0;
+        for span in line.spans {
+            let mut chunk = String::new();
+            for grapheme in span.content.graphemes(true) {
+                let grapheme_width = UnicodeWidthStr::width(grapheme);
+                if output_width > 0 && output_width.saturating_add(grapheme_width) > width {
+                    if !chunk.is_empty() {
+                        output_spans.push(Span::styled(std::mem::take(&mut chunk), span.style));
+                    }
+                    if rendered >= skip {
+                        wrapped
+                            .push(Line::from(std::mem::take(&mut output_spans)).style(line_style));
+                        if wrapped.len() == take {
+                            return wrapped;
+                        }
+                    } else {
+                        output_spans.clear();
+                    }
+                    rendered = rendered.saturating_add(1);
+                    output_width = 0;
+                }
+                chunk.push_str(grapheme);
+                output_width = output_width.saturating_add(grapheme_width);
+            }
+            if !chunk.is_empty() {
+                output_spans.push(Span::styled(chunk, span.style));
+            }
+        }
+        if rendered >= skip {
+            wrapped.push(Line::from(output_spans).style(line_style));
+            if wrapped.len() == take {
+                return wrapped;
+            }
+        }
+        rendered = rendered.saturating_add(1);
+    }
+    wrapped
+}
+
+fn cached_rendered_hunk_rows(app: &mut App, wrapped: bool) -> (Vec<(usize, usize)>, usize) {
+    if let Some(cache) = &app.changes.preview_render_cache {
+        let cached = if wrapped {
+            &cache.wrapped_hunks
+        } else {
+            &cache.unwrapped_hunks
+        };
+        if let Some(cached) = cached {
+            return cached.clone();
+        }
+    }
+    let rendered = rendered_hunk_rows(
+        &app.changes.diff,
+        app.changes
+            .preview_render_cache
+            .as_ref()
+            .and_then(|cache| cache.wrapped_line_starts.as_deref()),
+        wrapped,
+    );
+    if let Some(cache) = &mut app.changes.preview_render_cache {
+        if wrapped {
+            cache.wrapped_hunks = Some(rendered.clone());
+        } else {
+            cache.unwrapped_hunks = Some(rendered.clone());
+        }
+    }
+    rendered
 }
 
 fn render_scrollable_content(
@@ -752,22 +979,14 @@ fn render_scrollable_content(
     app: &mut App,
     panel: Rect,
     body: Rect,
-    lines: Vec<Line<'static>>,
-    unwrapped_height: Option<usize>,
+    preview: PreparedPreview,
 ) {
-    let rendered_height = unwrapped_height.unwrap_or_else(|| {
-        rendered_text_height(&lines, usize::from(body.width), app.changes.diff_wrap)
-    });
-    let mut paragraph = Paragraph::new(lines).style(Style::default().bg(palette().panel));
-    if app.changes.diff_wrap {
-        paragraph = paragraph.wrap(Wrap { trim: false });
-    }
+    let rendered_height = preview.rendered_height;
+    let paragraph = Paragraph::new(preview.lines).style(Style::default().bg(palette().panel));
     let viewport_height = usize::from(body.height);
-    let max_scroll = rendered_height
-        .saturating_sub(viewport_height)
-        .min(usize::from(u16::MAX)) as u16;
+    let max_scroll = rendered_height.saturating_sub(viewport_height);
     let scroll_limit = if app.changes.hunk_selection.is_some() {
-        rendered_height.saturating_sub(1).min(usize::from(u16::MAX)) as u16
+        rendered_height.saturating_sub(1)
     } else {
         max_scroll
     };
@@ -784,12 +1003,6 @@ fn render_scrollable_content(
             max_scroll,
         )
     });
-    let paragraph_scroll = if unwrapped_height.is_some() {
-        0
-    } else {
-        app.changes.diff_scroll
-    };
-    paragraph = paragraph.scroll((paragraph_scroll, 0));
     frame.render_widget(paragraph, body);
     if let Some(thumb) = app.regions.diff_scroll_thumb {
         frame.render_widget(
@@ -822,8 +1035,7 @@ fn render_scrollable_content(
 
 fn rendered_hunk_rows(
     diff: &str,
-    styled: &[Line<'_>],
-    width: u16,
+    wrapped_line_starts: Option<&[usize]>,
     wrapped: bool,
 ) -> (Vec<(usize, usize)>, usize) {
     let mut rendered_row: usize = 0;
@@ -841,14 +1053,12 @@ fn rendered_hunk_rows(
         if hunk_header {
             if hunk_index > 0 {
                 if wrapped {
-                    let Some(blank) = styled.get(styled_index) else {
+                    let Some(line_height) = wrapped_line_starts.and_then(|starts| {
+                        Some(starts.get(styled_index + 1)? - starts.get(styled_index)?)
+                    }) else {
                         break;
                     };
-                    rendered_row = rendered_row.saturating_add(rendered_text_height(
-                        std::slice::from_ref(blank),
-                        usize::from(width),
-                        true,
-                    ));
+                    rendered_row = rendered_row.saturating_add(line_height);
                     styled_index += 1;
                 } else {
                     rendered_row += 1;
@@ -859,14 +1069,12 @@ fn rendered_hunk_rows(
             hunk_index += 1;
         }
         if wrapped {
-            let Some(line) = styled.get(styled_index) else {
+            let Some(line_height) = wrapped_line_starts
+                .and_then(|starts| Some(starts.get(styled_index + 1)? - starts.get(styled_index)?))
+            else {
                 break;
             };
-            rendered_row = rendered_row.saturating_add(rendered_text_height(
-                std::slice::from_ref(line),
-                usize::from(width),
-                true,
-            ));
+            rendered_row = rendered_row.saturating_add(line_height);
             styled_index += 1;
         } else {
             rendered_row += 1;
@@ -881,17 +1089,17 @@ struct VisibleHunk {
     header_y: Option<u16>,
     continues_above: bool,
     continues_below: bool,
-    scroll_start: u16,
-    scroll_end: u16,
+    scroll_start: usize,
+    scroll_end: usize,
 }
 
 fn visible_hunks(
     rows: &[(usize, usize)],
     rendered_height: usize,
     body: Rect,
-    scroll: u16,
+    scroll: usize,
 ) -> Vec<VisibleHunk> {
-    let top = usize::from(scroll);
+    let top = scroll;
     let bottom = top.saturating_add(usize::from(body.height));
     rows.iter()
         .enumerate()
@@ -901,11 +1109,8 @@ fn visible_hunks(
                 .map_or(rendered_height, |(_, next)| next.saturating_sub(1));
             let visible_start = (*header).max(top);
             let visible_end = end.min(bottom);
-            let scroll_start = (*header).min(usize::from(u16::MAX)) as u16;
-            let scroll_end = end
-                .saturating_sub(usize::from(body.height))
-                .max(*header)
-                .min(usize::from(u16::MAX)) as u16;
+            let scroll_start = *header;
+            let scroll_end = end.saturating_sub(usize::from(body.height)).max(*header);
             (visible_start < visible_end).then(|| VisibleHunk {
                 index: *index,
                 area: Rect::new(
@@ -925,9 +1130,8 @@ fn visible_hunks(
         .collect()
 }
 
-fn scroll_to_row(row: usize, rendered_height: usize) -> u16 {
+fn scroll_to_row(row: usize, rendered_height: usize) -> usize {
     row.min(rendered_height.saturating_sub(1))
-        .min(usize::from(u16::MAX)) as u16
 }
 
 fn draw_hunk_actions(frame: &mut Frame<'_>, app: &mut App, body: Rect, hunks: Vec<VisibleHunk>) {
@@ -1070,12 +1274,7 @@ fn worktree_item<'a>(row: &'a WorktreeRow, changes: &'a [Change], width: usize) 
     ListItem::new(Line::from(spans))
 }
 
-fn explorer_item(
-    row: &ExplorerRow,
-    files: &[String],
-    changes: &[Change],
-    width: usize,
-) -> ListItem<'static> {
+fn explorer_item(row: &ExplorerRow, change_code: Option<char>, width: usize) -> ListItem<'static> {
     if row.file_index.is_none() {
         let marker = if row.directory_expanded == Some(false) {
             "▸ "
@@ -1090,10 +1289,8 @@ fn explorer_item(
     let prefix = truncate_width(&row.prefix, width);
     let label_width = width.saturating_sub(UnicodeWidthStr::width(prefix.as_str()));
     let label = truncate_width(&row.label, label_width);
-    let color = row
-        .file_index
-        .and_then(|index| files.get(index))
-        .and_then(|path| explorer_file_color(path, changes))
+    let color = change_code
+        .map(explorer_file_color)
         .unwrap_or(palette().ink);
     ListItem::new(Line::from(vec![
         Span::styled(prefix, Style::default().fg(palette().ink)),
@@ -1101,22 +1298,8 @@ fn explorer_item(
     ]))
 }
 
-fn explorer_file_color(path: &str, changes: &[Change]) -> Option<ratatui::style::Color> {
-    let code = changes
-        .iter()
-        .filter(|change| change.path == path)
-        .map(|change| change.code)
-        .min_by_key(|code| match code {
-            'D' | 'U' => 0,
-            '?' => 1,
-            'A' => 2,
-            'R' => 3,
-            'C' => 4,
-            'M' => 5,
-            'T' => 6,
-            _ => 7,
-        })?;
-    Some(match code {
+fn explorer_file_color(code: char) -> ratatui::style::Color {
+    match code {
         'D' | 'U' => palette().red,
         '?' => palette().green,
         'A' => palette().accent,
@@ -1124,7 +1307,7 @@ fn explorer_file_color(path: &str, changes: &[Change]) -> Option<ratatui::style:
         'C' => palette().cyan,
         'M' => palette().yellow,
         _ => palette().orange,
-    })
+    }
 }
 
 fn folder_style() -> Style {
@@ -1153,8 +1336,8 @@ fn diff_scroll_thumb(
     track: Rect,
     content_height: usize,
     viewport_height: usize,
-    scroll: u16,
-    max_scroll: u16,
+    scroll: usize,
+    max_scroll: usize,
 ) -> Rect {
     let thumb_height = (usize::from(track.height) * viewport_height)
         .checked_div(content_height.max(1))
@@ -1162,12 +1345,9 @@ fn diff_scroll_thumb(
         .max(1)
         .min(usize::from(track.height)) as u16;
     let travel = track.height.saturating_sub(thumb_height);
-    let offset = if max_scroll == 0 {
-        0
-    } else {
-        ((u32::from(scroll) * u32::from(travel) + u32::from(max_scroll) / 2)
-            / u32::from(max_scroll)) as u16
-    };
+    let offset = ((scroll as u128 * u128::from(travel) + max_scroll as u128 / 2)
+        .checked_div(max_scroll as u128)
+        .unwrap_or(0)) as u16;
     Rect::new(
         track.x,
         track.y.saturating_add(offset),

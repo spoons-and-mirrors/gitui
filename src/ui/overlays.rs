@@ -235,12 +235,15 @@ pub(super) fn draw_command(frame: &mut Frame<'_>, actions: &mut ActionsState) ->
             .saturating_sub(area.y.saturating_add(4))
             .saturating_sub(1),
     );
-    let lines = command_lines(actions);
-    let rendered_height = rendered_height(&lines, usize::from(output.width));
+    let rendered_height = {
+        let lines = command_lines(actions);
+        rendered_height(&lines, usize::from(output.width))
+    };
     actions.scroll_max = rendered_height
         .saturating_sub(usize::from(output.height))
         .min(usize::from(u16::MAX)) as u16;
     actions.scroll = actions.scroll.min(actions.scroll_max);
+    let lines = command_lines(actions);
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
@@ -269,7 +272,7 @@ pub(super) fn draw_command(frame: &mut Frame<'_>, actions: &mut ActionsState) ->
     }
 }
 
-fn command_lines(actions: &ActionsState) -> Vec<Line<'static>> {
+fn command_lines<'a>(actions: &'a ActionsState) -> Vec<Line<'a>> {
     if actions.status == CommandStatus::Input && actions.transcript.is_empty() {
         return if actions.stderr.is_empty() {
             vec![
@@ -289,7 +292,7 @@ fn command_lines(actions: &ActionsState) -> Vec<Line<'static>> {
             ]
         } else {
             vec![Line::styled(
-                actions.stderr.clone(),
+                actions.stderr.as_str(),
                 Style::default().fg(palette().red),
             )]
         };
@@ -308,7 +311,7 @@ fn command_lines(actions: &ActionsState) -> Vec<Line<'static>> {
         };
         lines.push(Line::from(vec![
             Span::styled(
-                record.command.clone(),
+                record.command.as_str(),
                 Style::default()
                     .fg(palette().accent)
                     .add_modifier(Modifier::BOLD),
@@ -320,7 +323,7 @@ fn command_lines(actions: &ActionsState) -> Vec<Line<'static>> {
                 record
                     .stdout
                     .lines()
-                    .map(|line| Line::styled(line.to_owned(), Style::default().fg(palette().ink))),
+                    .map(|line| Line::styled(line, Style::default().fg(palette().ink))),
             );
         }
         if !record.stderr.is_empty() {
@@ -328,7 +331,7 @@ fn command_lines(actions: &ActionsState) -> Vec<Line<'static>> {
                 record
                     .stderr
                     .lines()
-                    .map(|line| Line::styled(line.to_owned(), Style::default().fg(palette().red))),
+                    .map(|line| Line::styled(line, Style::default().fg(palette().red))),
             );
         }
         if record.stdout.is_empty() && record.stderr.is_empty() {
@@ -343,7 +346,7 @@ fn command_lines(actions: &ActionsState) -> Vec<Line<'static>> {
             lines.push(Line::raw(""));
         }
         lines.push(Line::styled(
-            actions.stderr.clone(),
+            actions.stderr.as_str(),
             Style::default().fg(palette().red),
         ));
     }
@@ -586,7 +589,7 @@ pub(super) fn draw_file_search(
     search: &mut FileSearch,
     files: &[String],
 ) -> FileSearchRegions {
-    let desired_height = (11 + search.results.len().max(1).min(13) as u16).clamp(15, 24);
+    let desired_height = (11 + search.results.len().clamp(1, 13) as u16).clamp(15, 24);
     let area = centered_min(frame.area(), 78, 0, 56, desired_height);
     frame.render_widget(Clear, area);
     fill(frame, area, palette().panel);

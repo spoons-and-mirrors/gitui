@@ -9,7 +9,7 @@ mod ui;
 use std::{io, path::PathBuf, process::Command, time::Duration};
 
 use anyhow::Result;
-use app::{App, EditorRequest, Mode};
+use app::{App, EditorRequest};
 use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -48,10 +48,10 @@ fn main() -> Result<()> {
                     (true, false)
                 }
                 Event::Mouse(mouse) => {
-                    let changed = !matches!(mouse.kind, event::MouseEventKind::Moved)
-                        || app.mode == Mode::ActionMenu
-                        || app.hunk_selection_active();
+                    let hover_before = (app.changes.hunk_selection, app.actions.selection);
                     app.handle_mouse(mouse);
+                    let changed = !matches!(mouse.kind, event::MouseEventKind::Moved)
+                        || hover_before != (app.changes.hunk_selection, app.actions.selection);
                     (changed, false)
                 }
                 Event::Paste(text) => {
