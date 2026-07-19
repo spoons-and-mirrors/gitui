@@ -1,4 +1,5 @@
 mod app;
+mod filesystem;
 mod git;
 mod repository_session;
 mod selection;

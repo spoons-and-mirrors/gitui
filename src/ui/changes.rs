@@ -1,9 +1,9 @@
 use ratatui::{
     Frame,
-    layout::{Margin, Rect},
+    layout::{Alignment, Margin, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{List, ListItem, Paragraph, Wrap},
+    widgets::{Block, List, ListItem, Paragraph, Wrap},
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -586,6 +586,20 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
     } else {
         "FILES".to_owned()
     };
+    let add_width = 5.min(header.width);
+    let add_button = Rect::new(
+        header.right().saturating_sub(add_width),
+        header.y,
+        add_width,
+        1,
+    );
+    let root_target = Rect::new(
+        header.x,
+        header.y,
+        header.width.saturating_sub(add_width),
+        1,
+    );
+    let drop_target = app.file_drop_target().map(str::to_owned);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("WORKTREE", Style::default().fg(palette().faint)),
@@ -597,8 +611,25 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
                     .add_modifier(Modifier::BOLD),
             ),
         ])),
-        header,
+        root_target,
     );
+    frame.render_widget(
+        Paragraph::new(" + ")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(palette().accent).bg(palette().raised)),
+        add_button,
+    );
+    if drop_target.as_deref() == Some("") {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(palette().inactive_selected)),
+            root_target,
+        );
+        frame.render_widget(
+            Paragraph::new(format!("WORKTREE  {files_title}"))
+                .style(Style::default().fg(palette().ink)),
+            root_target,
+        );
+    }
     app.regions.worktree_tab = Some(Rect::new(header.x, header.y, 8, 1));
     app.regions.files_tab = Some(Rect::new(
         header.x.saturating_add(10),
@@ -607,6 +638,8 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
         1,
     ));
     app.regions.explorer_list = Some(list_area);
+    app.regions.files_add = Some(add_button);
+    app.regions.files_root = Some(root_target);
 
     let viewport = usize::from(list_area.height);
     let row_count = app.changes.explorer_rows().len();
@@ -634,6 +667,12 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
                 let item = explorer_item(row, code, usize::from(list_area.width));
                 if app.changes.explorer_state.selected() == Some(index) {
                     item.style(Style::default().bg(palette().selected))
+                } else if drop_target.as_deref().is_some_and(|target| {
+                    row.directory_path
+                        .as_deref()
+                        .is_some_and(|path| path == target)
+                }) {
+                    item.style(Style::default().bg(palette().inactive_selected))
                 } else {
                     item
                 }

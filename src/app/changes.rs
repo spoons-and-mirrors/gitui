@@ -18,6 +18,12 @@ pub enum LeftPane {
     Files,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ExplorerEntry {
+    pub(super) path: String,
+    pub(super) is_directory: bool,
+}
+
 pub struct ChangesState {
     pub(crate) pane: LeftPane,
     pub(crate) worktree_state: ListState,
@@ -97,7 +103,7 @@ pub(super) struct ChangesSelection {
 impl ChangesState {
     pub(super) fn new(repo: Option<&RepositoryData>) -> Self {
         let (preview_tx, preview_rx) = preview_worker();
-        let file_tree = repo.map(|repo| FileTree::new(&repo.files));
+        let file_tree = repo.map(|repo| FileTree::new(&repo.files, &repo.directories));
         let collapsed_explorer_directories = file_tree
             .as_ref()
             .map_or_else(HashSet::new, FileTree::default_collapsed_directories);
@@ -286,6 +292,57 @@ impl ChangesState {
     pub(super) fn selected_explorer_directory_path(&self) -> Option<String> {
         let selected = self.explorer_state.selected()?;
         self.explorer_rows().get(selected)?.directory_path.clone()
+    }
+
+    pub(super) fn selected_explorer_entry(&self, repo: &RepositoryData) -> Option<ExplorerEntry> {
+        let selected = self.explorer_state.selected()?;
+        self.explorer_entry(repo, selected)
+    }
+
+    pub(super) fn explorer_entry(
+        &self,
+        repo: &RepositoryData,
+        index: usize,
+    ) -> Option<ExplorerEntry> {
+        let row = self.explorer_rows().get(index)?;
+        if let Some(file_index) = row.file_index {
+            return Some(ExplorerEntry {
+                path: repo.files.get(file_index)?.clone(),
+                is_directory: false,
+            });
+        }
+        Some(ExplorerEntry {
+            path: row.directory_path.clone()?,
+            is_directory: true,
+        })
+    }
+
+    pub(super) fn select_explorer_path(
+        &mut self,
+        repo: &RepositoryData,
+        path: &str,
+        viewport: usize,
+    ) -> bool {
+        self.collapsed_explorer_directories.retain(|directory| {
+            !path
+                .strip_prefix(directory)
+                .is_some_and(|rest| rest.starts_with('/'))
+        });
+        self.rebuild_explorer_rows(Some(repo));
+        let row = self.explorer_rows().iter().position(|row| {
+            row.directory_path.as_deref() == Some(path)
+                || row
+                    .file_index
+                    .and_then(|index| repo.files.get(index))
+                    .is_some_and(|candidate| candidate == path)
+        });
+        let Some(row) = row else {
+            return false;
+        };
+        self.explorer_state.select(Some(row));
+        ensure_selection_visible(&mut self.explorer_scroll, Some(row), viewport);
+        self.refresh_diff(Some(repo));
+        true
     }
 
     pub(super) fn set_pane(&mut self, pane: LeftPane, repo: Option<&RepositoryData>) -> bool {
@@ -862,7 +919,7 @@ impl ChangesState {
     fn sync_repository_caches(&mut self, repo: Option<&RepositoryData>) {
         let files_fingerprint = repo.map(|repo| repo.files_fingerprint);
         if self.file_tree_fingerprint != files_fingerprint {
-            self.file_tree = repo.map(|repo| FileTree::new(&repo.files));
+            self.file_tree = repo.map(|repo| FileTree::new(&repo.files, &repo.directories));
             self.file_tree_fingerprint = files_fingerprint;
         }
         let changes_fingerprint = repo.map(|repo| repo.changes_fingerprint);
@@ -1096,6 +1153,7 @@ mod tests {
                 "src/main.rs".to_owned(),
                 "README.md".to_owned(),
             ],
+            directories: Vec::new(),
             history: Vec::new(),
             commits: Vec::new(),
             files_fingerprint: 1,

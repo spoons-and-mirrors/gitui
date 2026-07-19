@@ -37,6 +37,7 @@ struct Node {
     children: BTreeMap<String, Node>,
     entries: Vec<usize>,
     descendant_count: usize,
+    explicit_directory: bool,
 }
 
 pub(crate) struct FileTree {
@@ -44,10 +45,13 @@ pub(crate) struct FileTree {
 }
 
 impl FileTree {
-    pub(crate) fn new(files: &[String]) -> Self {
+    pub(crate) fn new(files: &[String], directories: &[String]) -> Self {
         let mut root = Node::default();
         for (index, path) in files.iter().enumerate() {
             insert_path(&mut root, path, index);
+        }
+        for path in directories {
+            insert_directory(&mut root, path);
         }
         Self { root }
     }
@@ -158,14 +162,25 @@ fn insert_path(root: &mut Node, path: &str, entry_index: usize) {
     node.entries.push(entry_index);
 }
 
+fn insert_directory(root: &mut Node, path: &str) {
+    let mut node = root;
+    for component in path.split('/').filter(|component| !component.is_empty()) {
+        node = node.children.entry(component.to_owned()).or_default();
+    }
+    node.explicit_directory = true;
+}
+
 fn collect_directory_paths(node: &Node, parent_path: &str, paths: &mut HashSet<String>) {
     for (name, child) in sorted_children(node) {
-        if child.children.is_empty() {
+        if child.children.is_empty() && !child.explicit_directory {
             continue;
         }
         let mut path = join_path(parent_path, name);
         let mut directory = child;
-        while directory.entries.is_empty() && directory.children.len() == 1 {
+        while !directory.explicit_directory
+            && directory.entries.is_empty()
+            && directory.children.len() == 1
+        {
             let (next_name, next) = directory.children.first_key_value().expect("one child");
             if next.children.is_empty() {
                 break;
@@ -180,7 +195,12 @@ fn collect_directory_paths(node: &Node, parent_path: &str, paths: &mut HashSet<S
 
 fn sorted_children(node: &Node) -> Vec<(&String, &Node)> {
     let mut children: Vec<_> = node.children.iter().collect();
-    children.sort_by_key(|(name, child)| (child.children.is_empty(), name.as_str()));
+    children.sort_by_key(|(name, child)| {
+        (
+            child.children.is_empty() && !child.explicit_directory,
+            name.as_str(),
+        )
+    });
     children
 }
 
@@ -199,7 +219,7 @@ fn flatten_file_tree(
         let first_root = top_level && position == 0;
         let mut path = join_path(parent_path, name);
         let prefix = tree_prefix(lineage, is_last, first_root);
-        if child.children.is_empty() {
+        if child.children.is_empty() && !child.explicit_directory {
             if let Some(file_index) = child.entries.first() {
                 rows.push(ExplorerRow {
                     prefix,
@@ -216,7 +236,10 @@ fn flatten_file_tree(
 
         let mut label = name.clone();
         let mut directory = child;
-        while directory.entries.is_empty() && directory.children.len() == 1 {
+        while !directory.explicit_directory
+            && directory.entries.is_empty()
+            && directory.children.len() == 1
+        {
             let (next_name, next) = directory.children.first_key_value().expect("one child");
             if next.children.is_empty() {
                 break;
@@ -334,7 +357,7 @@ fn build_worktree(changes: &[Change], collapsed: &HashSet<String>) -> Vec<Worktr
 
 #[cfg(test)]
 fn build_file_tree(files: &[String], collapsed: &HashSet<String>) -> Vec<ExplorerRow> {
-    FileTree::new(files).rows(collapsed)
+    FileTree::new(files, &[]).rows(collapsed)
 }
 
 fn join_path(parent: &str, name: &str) -> String {
@@ -461,6 +484,33 @@ mod tests {
                 && row.directory_expanded == Some(false)
         }));
         assert!(!rows.iter().any(|row| row.label == "mod.rs"));
+    }
+
+    #[test]
+    fn keeps_explicit_empty_directories_in_the_file_tree() {
+        let tree = FileTree::new(
+            &["src/main.rs".to_owned()],
+            &[
+                "empty".to_owned(),
+                "src/nested/empty".to_owned(),
+                "a".to_owned(),
+                "a/b".to_owned(),
+                "a/b/c".to_owned(),
+            ],
+        );
+        let rows = tree.rows(&HashSet::new());
+
+        assert!(rows.iter().any(|row| {
+            row.directory_path.as_deref() == Some("empty") && row.file_index.is_none()
+        }));
+        assert!(rows.iter().any(|row| {
+            row.directory_path.as_deref() == Some("src/nested/empty") && row.file_index.is_none()
+        }));
+        for path in ["a", "a/b", "a/b/c"] {
+            assert!(rows.iter().any(|row| {
+                row.directory_path.as_deref() == Some(path) && row.file_index.is_none()
+            }));
+        }
     }
 
     fn change(path: &str) -> Change {

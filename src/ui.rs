@@ -127,6 +127,15 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 app.editor_configure_only,
             ));
         }
+        Mode::Files => {
+            dim(frame);
+            if let Some(dialog) = &app.file_dialog {
+                let regions = overlays::draw_file_dialog(frame, dialog);
+                app.regions.file_dialog_overlay = Some(regions.overlay);
+                app.regions.file_dialog_primary = Some(regions.primary);
+                app.regions.file_dialog_secondary = Some(regions.secondary);
+            }
+        }
         Mode::Help => overlays::draw_help(frame),
         _ => {}
     }

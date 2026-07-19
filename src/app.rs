@@ -24,6 +24,7 @@ use ratatui::{
 };
 
 use crate::{
+    filesystem::{FileOperation, validate_name},
     git::RepositoryData,
     repository_session::{LoadKind, Mutation, RepositorySession, WorkerCompletion},
     selection::{SelectionOutcome, SelectionState},
@@ -50,6 +51,7 @@ pub enum Mode {
     ActionMenu,
     Command,
     Editor,
+    Files,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,6 +124,11 @@ pub struct Regions {
     pub editor_overlay: Option<Rect>,
     pub file_search_overlay: Option<Rect>,
     pub file_search_list: Option<Rect>,
+    pub files_add: Option<Rect>,
+    pub files_root: Option<Rect>,
+    pub file_dialog_overlay: Option<Rect>,
+    pub file_dialog_primary: Option<Rect>,
+    pub file_dialog_secondary: Option<Rect>,
     pub editor_setting: Option<Rect>,
     pub auto_fetch: Option<Rect>,
     pub fetch_interval: Option<Rect>,
@@ -162,12 +169,52 @@ pub struct App {
     pub(crate) editor_error: Option<String>,
     pub(crate) editor_configure_only: bool,
     editor_request: Option<EditorRequest>,
+    pub(crate) file_dialog: Option<FileDialog>,
+    file_drag: Option<FileDrag>,
+    pending_file_selection: Option<String>,
 }
 
 pub(crate) struct EditorRequest {
     pub(crate) command: Vec<String>,
     pub(crate) file: PathBuf,
     pub(crate) repository: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum FileDialogKind {
+    Add {
+        parent: String,
+    },
+    Name {
+        action: FileNameAction,
+        parent: String,
+        source: Option<String>,
+    },
+    Delete {
+        path: String,
+        is_directory: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FileNameAction {
+    CreateFile,
+    CreateDirectory,
+    Rename,
+}
+
+pub(crate) struct FileDialog {
+    pub(crate) kind: FileDialogKind,
+    pub(crate) input: TextInput,
+    pub(crate) choice: usize,
+    pub(crate) error: Option<String>,
+}
+
+struct FileDrag {
+    source: changes::ExplorerEntry,
+    start: Position,
+    active: bool,
+    target: Option<String>,
 }
 
 impl App {
@@ -239,6 +286,9 @@ impl App {
             editor_error: None,
             editor_configure_only: false,
             editor_request: None,
+            file_dialog: None,
+            file_drag: None,
+            pending_file_selection: None,
         }
     }
 
@@ -285,7 +335,7 @@ impl App {
             self.should_quit = true;
             return;
         }
-        if key.code == KeyCode::F(3) && self.mode != Mode::FileSearch {
+        if key.code == KeyCode::F(3) && self.mode == Mode::Normal {
             self.open_file_search();
             return;
         }
@@ -298,6 +348,7 @@ impl App {
             Mode::ActionMenu => self.handle_action_menu(key),
             Mode::Command => self.handle_command(key),
             Mode::Editor => self.handle_editor(key),
+            Mode::Files => self.handle_file_dialog(key),
             Mode::Help => {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
                     self.mode = Mode::Normal;
@@ -324,6 +375,14 @@ impl App {
             Mode::Editor => {
                 self.editor_input.push_str(text);
                 self.editor_error = None;
+            }
+            Mode::Files => {
+                if let Some(dialog) = &mut self.file_dialog
+                    && matches!(dialog.kind, FileDialogKind::Name { .. })
+                {
+                    dialog.input.insert(text);
+                    dialog.error = None;
+                }
             }
             _ => {}
         }
@@ -367,6 +426,21 @@ impl App {
             return;
         }
 
+        if self.file_drag.is_some() {
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left) => self.update_file_drag(point),
+                MouseEventKind::Up(MouseButton::Left) => self.finish_file_drag(point),
+                _ => {}
+            }
+            return;
+        }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && !mouse.modifiers.contains(KeyModifiers::SHIFT)
+            && self.begin_file_drag(point)
+        {
+            return;
+        }
+
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.selection.clear();
@@ -401,6 +475,9 @@ impl App {
             return;
         }
         if self.mode == Mode::Editor {
+            return;
+        }
+        if self.mode == Mode::Files {
             return;
         }
         if self.mode == Mode::Picker {
@@ -516,6 +593,7 @@ impl App {
             self.regions.command_overlay,
             self.regions.editor_overlay,
             self.regions.file_search_overlay,
+            self.regions.file_dialog_overlay,
             self.regions.picker_overlay,
             self.regions.settings_overlay,
             self.regions.action_menu,
@@ -546,6 +624,7 @@ impl App {
             Mode::Settings => self.handle_settings_mouse(mouse),
             Mode::Help => self.mode = Mode::Normal,
             Mode::Editor => {}
+            Mode::Files => self.handle_file_dialog_click(point),
             Mode::Normal | Mode::Commit => self.handle_primary_left_click(point),
         }
     }
@@ -564,6 +643,14 @@ impl App {
             .copied()
         {
             self.stage_hunk(hunk.index, false);
+            return;
+        }
+        if self
+            .regions
+            .files_add
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.open_add_dialog();
             return;
         }
         if self
@@ -1016,6 +1103,11 @@ impl App {
     pub fn poll_worker(&mut self) -> bool {
         let mut changed = self.mode == Mode::Picker && self.picker.poll_index();
         changed |= self.commit_input.poll_blink(self.mode == Mode::Commit);
+        if let Some(dialog) = &mut self.file_dialog {
+            changed |= dialog.input.poll_blink(
+                self.mode == Mode::Files && matches!(dialog.kind, FileDialogKind::Name { .. }),
+            );
+        }
         let interval = fetch_interval(&self.settings);
         self.session
             .maybe_start_fetch(self.settings.auto_fetch, interval);
@@ -1070,6 +1162,14 @@ impl App {
                         self.notice = Some(error);
                     }
                 },
+                WorkerCompletion::FileOperation(done) => match done.result {
+                    Ok(selection) => {
+                        self.pending_file_selection = selection;
+                        self.reload();
+                        self.notice = Some(done.message);
+                    }
+                    Err(error) => self.notice = Some(error),
+                },
             }
         }
         while self.session.next_worktree_change() {
@@ -1082,6 +1182,7 @@ impl App {
             match (done.kind, done.result) {
                 (LoadKind::Open, Ok(())) => {
                     self.pending_reload = None;
+                    self.pending_file_selection = None;
                     self.reload_queued = false;
                     self.mode = Mode::Normal;
                     self.actions = ActionsState::default();
@@ -1123,6 +1224,13 @@ impl App {
                             .select(commit_index.or_else(|| repo.commits.first().map(|_| 0)));
                         self.graph_scroll_to_selection = true;
                         self.changes.restore_selection(repo, selection);
+                        if let Some(path) = self.pending_file_selection.take() {
+                            let viewport = self
+                                .regions
+                                .explorer_list
+                                .map_or(0, |rect| usize::from(rect.height));
+                            self.changes.select_explorer_path(repo, &path, viewport);
+                        }
                     }
                     if let Some(repo) = self.session.data() {
                         self.file_search
@@ -1226,6 +1334,16 @@ impl App {
                     }
                     .to_owned(),
                 );
+            }
+            KeyCode::F(2) if self.view == View::Changes && self.changes.pane == LeftPane::Files => {
+                self.open_rename_dialog();
+            }
+            KeyCode::Delete
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.view == View::Changes
+                    && self.changes.pane == LeftPane::Files =>
+            {
+                self.open_delete_dialog();
             }
             KeyCode::Char('e') if self.view == View::Changes => self.open_selected_file(false),
             KeyCode::Char('E') if self.view == View::Changes => self.open_selected_file(true),
@@ -1563,6 +1681,348 @@ impl App {
         }
     }
 
+    fn handle_file_dialog(&mut self, key: KeyEvent) {
+        let Some(kind) = self.file_dialog.as_ref().map(|dialog| dialog.kind.clone()) else {
+            self.mode = Mode::Normal;
+            return;
+        };
+        match kind {
+            FileDialogKind::Add { parent } => match key.code {
+                KeyCode::Esc => self.close_file_dialog(),
+                KeyCode::Left | KeyCode::Up | KeyCode::BackTab => {
+                    if let Some(dialog) = &mut self.file_dialog {
+                        dialog.choice = 0;
+                    }
+                }
+                KeyCode::Right | KeyCode::Down | KeyCode::Tab => {
+                    if let Some(dialog) = &mut self.file_dialog {
+                        dialog.choice = 1;
+                    }
+                }
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    let action = if self
+                        .file_dialog
+                        .as_ref()
+                        .is_some_and(|dialog| dialog.choice == 1)
+                    {
+                        FileNameAction::CreateDirectory
+                    } else {
+                        FileNameAction::CreateFile
+                    };
+                    self.open_name_dialog(action, parent, None);
+                }
+                _ => {}
+            },
+            FileDialogKind::Name { .. } => {
+                let Some(dialog) = &mut self.file_dialog else {
+                    return;
+                };
+                dialog.input.focus();
+                match key.code {
+                    KeyCode::Esc => self.close_file_dialog(),
+                    KeyCode::Enter => self.submit_file_name(),
+                    KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        dialog.input.select_all();
+                    }
+                    KeyCode::Backspace
+                        if key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    {
+                        dialog.input.delete_word();
+                        dialog.error = None;
+                    }
+                    KeyCode::Left => dialog.input.move_left(),
+                    KeyCode::Right => dialog.input.move_right(),
+                    KeyCode::Home => dialog.input.move_home(),
+                    KeyCode::End => dialog.input.move_end(),
+                    KeyCode::Delete => dialog.input.delete(),
+                    KeyCode::Backspace => dialog.input.backspace(),
+                    KeyCode::Char(character)
+                        if !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    {
+                        dialog.input.insert_char(character);
+                        dialog.error = None;
+                    }
+                    _ => {}
+                }
+            }
+            FileDialogKind::Delete { .. } => match key.code {
+                KeyCode::Esc | KeyCode::Char('n') => self.close_file_dialog(),
+                KeyCode::Enter | KeyCode::Char('y') => self.confirm_delete(),
+                _ => {}
+            },
+        }
+    }
+
+    fn open_add_dialog(&mut self) {
+        let parent = self
+            .session
+            .data()
+            .and_then(|repo| self.changes.selected_explorer_entry(repo))
+            .map_or_else(String::new, |entry| {
+                if entry.is_directory {
+                    entry.path
+                } else {
+                    relative_parent(&entry.path)
+                }
+            });
+        self.file_dialog = Some(FileDialog {
+            kind: FileDialogKind::Add { parent },
+            input: TextInput::default(),
+            choice: 0,
+            error: None,
+        });
+        self.mode = Mode::Files;
+    }
+
+    fn open_rename_dialog(&mut self) {
+        let Some(entry) = self
+            .session
+            .data()
+            .and_then(|repo| self.changes.selected_explorer_entry(repo))
+        else {
+            self.notice = Some("Select a file or folder to rename".to_owned());
+            return;
+        };
+        let name = Path::new(&entry.path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&entry.path)
+            .to_owned();
+        self.open_name_dialog(
+            FileNameAction::Rename,
+            relative_parent(&entry.path),
+            Some(entry.path),
+        );
+        if let Some(dialog) = &mut self.file_dialog {
+            dialog.input.insert(&name);
+            dialog.input.select_all();
+        }
+    }
+
+    fn open_delete_dialog(&mut self) {
+        let Some(entry) = self
+            .session
+            .data()
+            .and_then(|repo| self.changes.selected_explorer_entry(repo))
+        else {
+            self.notice = Some("Select a file or folder to delete".to_owned());
+            return;
+        };
+        self.file_dialog = Some(FileDialog {
+            kind: FileDialogKind::Delete {
+                path: entry.path,
+                is_directory: entry.is_directory,
+            },
+            input: TextInput::default(),
+            choice: 0,
+            error: None,
+        });
+        self.mode = Mode::Files;
+    }
+
+    fn open_name_dialog(&mut self, action: FileNameAction, parent: String, source: Option<String>) {
+        let mut input = TextInput::default();
+        input.focus();
+        self.file_dialog = Some(FileDialog {
+            kind: FileDialogKind::Name {
+                action,
+                parent,
+                source,
+            },
+            input,
+            choice: 0,
+            error: None,
+        });
+        self.mode = Mode::Files;
+    }
+
+    fn submit_file_name(&mut self) {
+        let Some(dialog) = &self.file_dialog else {
+            return;
+        };
+        let FileDialogKind::Name {
+            action,
+            parent,
+            source,
+        } = dialog.kind.clone()
+        else {
+            return;
+        };
+        let name = dialog.input.text().to_owned();
+        if let Err(error) = validate_name(&name) {
+            if let Some(dialog) = &mut self.file_dialog {
+                dialog.error = Some(error.to_string());
+            }
+            return;
+        }
+        let destination = join_relative(&parent, &name);
+        let operation = match action {
+            FileNameAction::CreateFile => FileOperation::CreateFile { path: destination },
+            FileNameAction::CreateDirectory => FileOperation::CreateDirectory { path: destination },
+            FileNameAction::Rename => {
+                let Some(source) = source else { return };
+                if source == destination {
+                    self.close_file_dialog();
+                    return;
+                }
+                FileOperation::Rename {
+                    from: source,
+                    to: destination,
+                }
+            }
+        };
+        self.close_file_dialog();
+        self.start_file_operation(operation);
+    }
+
+    fn confirm_delete(&mut self) {
+        let Some(FileDialogKind::Delete { path, .. }) =
+            self.file_dialog.as_ref().map(|dialog| dialog.kind.clone())
+        else {
+            return;
+        };
+        self.close_file_dialog();
+        self.start_file_operation(FileOperation::Delete { path });
+    }
+
+    fn close_file_dialog(&mut self) {
+        self.file_dialog = None;
+        self.mode = Mode::Normal;
+    }
+
+    fn start_file_operation(&mut self, operation: FileOperation) {
+        if !self.session.start_file_operation(operation) {
+            self.notice = Some("Another repository operation is running".to_owned());
+        }
+    }
+
+    fn handle_file_dialog_click(&mut self, point: Position) {
+        if self
+            .regions
+            .file_dialog_primary
+            .is_some_and(|rect| rect.contains(point))
+        {
+            match self.file_dialog.as_ref().map(|dialog| dialog.kind.clone()) {
+                Some(FileDialogKind::Add { parent }) => {
+                    self.open_name_dialog(FileNameAction::CreateFile, parent, None);
+                }
+                Some(FileDialogKind::Name { .. }) => self.submit_file_name(),
+                Some(FileDialogKind::Delete { .. }) => self.confirm_delete(),
+                None => {}
+            }
+        } else if self
+            .regions
+            .file_dialog_secondary
+            .is_some_and(|rect| rect.contains(point))
+        {
+            match self.file_dialog.as_ref().map(|dialog| dialog.kind.clone()) {
+                Some(FileDialogKind::Add { parent }) => {
+                    self.open_name_dialog(FileNameAction::CreateDirectory, parent, None);
+                }
+                _ => self.close_file_dialog(),
+            }
+        }
+    }
+
+    fn begin_file_drag(&mut self, point: Position) -> bool {
+        if self.mode != Mode::Normal
+            || self.view != View::Changes
+            || self.changes.pane != LeftPane::Files
+        {
+            return false;
+        }
+        let Some(rect) = self
+            .regions
+            .explorer_list
+            .filter(|rect| rect.contains(point))
+        else {
+            return false;
+        };
+        let index = self.changes.explorer_scroll + usize::from(point.y - rect.y);
+        let Some(repo) = self.session.data() else {
+            return false;
+        };
+        let Some(source) = self.changes.explorer_entry(repo, index) else {
+            return false;
+        };
+        self.file_drag = Some(FileDrag {
+            source,
+            start: point,
+            active: false,
+            target: None,
+        });
+        true
+    }
+
+    fn update_file_drag(&mut self, point: Position) {
+        let mut target = self.file_drop_target_at(point);
+        if let Some(drag) = &mut self.file_drag {
+            drag.active |= drag.start != point;
+            if drag.source.is_directory && target.as_deref() == Some(&drag.source.path) {
+                target = None;
+            }
+            drag.target = target;
+        }
+    }
+
+    fn finish_file_drag(&mut self, point: Position) {
+        self.update_file_drag(point);
+        let Some(drag) = self.file_drag.take() else {
+            return;
+        };
+        if !drag.active {
+            self.handle_primary_left_click(point);
+            return;
+        }
+        let Some(target) = drag.target else {
+            return;
+        };
+        let Some(name) = Path::new(&drag.source.path)
+            .file_name()
+            .and_then(|name| name.to_str())
+        else {
+            self.notice = Some("Could not determine the entry name".to_owned());
+            return;
+        };
+        let destination = join_relative(&target, name);
+        if destination == drag.source.path {
+            return;
+        }
+        self.start_file_operation(FileOperation::Move {
+            from: drag.source.path,
+            to: destination,
+        });
+    }
+
+    fn file_drop_target_at(&self, point: Position) -> Option<String> {
+        if self
+            .regions
+            .files_root
+            .is_some_and(|rect| rect.contains(point))
+        {
+            return Some(String::new());
+        }
+        let rect = self
+            .regions
+            .explorer_list
+            .filter(|rect| rect.contains(point))?;
+        let index = self.changes.explorer_scroll + usize::from(point.y - rect.y);
+        let repo = self.session.data()?;
+        let entry = self.changes.explorer_entry(repo, index)?;
+        entry.is_directory.then_some(entry.path)
+    }
+
+    pub(crate) fn file_drop_target(&self) -> Option<&str> {
+        self.file_drag
+            .as_ref()
+            .filter(|drag| drag.active)
+            .and_then(|drag| drag.target.as_deref())
+    }
+
     fn open_selected_file(&mut self, configure: bool) {
         let Some((repository, file)) = self.selected_file_to_edit() else {
             self.notice = Some("Select a file to edit".to_owned());
@@ -1746,6 +2206,8 @@ impl App {
         {
             self.picker.error = None;
             self.notice = Some("Opening repository…".to_owned());
+        } else {
+            self.picker.error = Some("Another workspace operation is running".to_owned());
         }
     }
 
@@ -2124,6 +2586,22 @@ fn move_table(state: &mut TableState, len: usize, delta: isize) {
     state.select(Some(next));
 }
 
+fn relative_parent(path: &str) -> String {
+    Path::new(path)
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(|parent| parent.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default()
+}
+
+fn join_relative(parent: &str, name: &str) -> String {
+    if parent.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{parent}/{name}")
+    }
+}
+
 fn scroll_table(state: &mut TableState, len: usize, viewport: usize, delta: isize) {
     let maximum = len.saturating_sub(viewport);
     *state.offset_mut() = state.offset().saturating_add_signed(delta).min(maximum);
@@ -2159,7 +2637,7 @@ mod tests {
 
         let app = App::new(nested.clone());
 
-        let repo = app.repository().unwrap();
+        let repo = app.session.data().unwrap();
         assert!(repo.is_local());
         assert_eq!(repo.root, fs::canonicalize(&nested).unwrap());
         assert_eq!(repo.branch, "local");
@@ -2194,6 +2672,81 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(app.repository().unwrap().files, ["one.txt", "two.txt"]);
+    }
+
+    #[test]
+    fn creates_renames_drags_and_deletes_files_from_the_files_pane() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::write(root.join("old.txt"), "content\n").unwrap();
+        fs::create_dir(root.join("destination")).unwrap();
+        let mut app = App::new(root.to_path_buf());
+        app.view = View::Changes;
+        app.changes.pane = LeftPane::Files;
+
+        app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Files);
+        app.handle_paste(" renamed.txt ");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        wait_for_state(&mut app, |app| {
+            app.repository()
+                .is_some_and(|repo| repo.files.iter().any(|path| path == " renamed.txt "))
+        });
+        assert!(root.join(" renamed.txt ").is_file());
+        assert_eq!(app.selected_explorer_file_path(), Some(" renamed.txt "));
+
+        app.open_add_dialog();
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_paste("created");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        wait_for_state(&mut app, |app| {
+            app.repository()
+                .is_some_and(|repo| repo.directories.iter().any(|path| path == "created"))
+        });
+        assert!(root.join("created").is_dir());
+
+        let repo = app.session.data().unwrap();
+        assert!(app.changes.select_explorer_path(repo, " renamed.txt ", 20));
+        app.regions.explorer_list = Some(Rect::new(0, 10, 30, 20));
+        let source = app
+            .changes
+            .explorer_rows()
+            .iter()
+            .position(|row| {
+                row.file_index
+                    .and_then(|index| app.repository().unwrap().files.get(index))
+                    .is_some_and(|path| path == " renamed.txt ")
+            })
+            .unwrap();
+        let target = app
+            .changes
+            .explorer_rows()
+            .iter()
+            .position(|row| row.directory_path.as_deref() == Some("created"))
+            .unwrap();
+        assert!(app.begin_file_drag(Position::new(1, 10 + source as u16)));
+        app.update_file_drag(Position::new(1, 10 + target as u16));
+        app.finish_file_drag(Position::new(1, 10 + target as u16));
+        wait_for_state(&mut app, |app| {
+            app.repository().is_some_and(|repo| {
+                repo.files
+                    .iter()
+                    .any(|path| path == "created/ renamed.txt ")
+            })
+        });
+        assert!(root.join("created/ renamed.txt ").is_file());
+
+        app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::CONTROL));
+        assert!(matches!(
+            app.file_dialog.as_ref().map(|dialog| &dialog.kind),
+            Some(FileDialogKind::Delete { .. })
+        ));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(root.join("created/ renamed.txt ").is_file());
+        app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::CONTROL));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        wait_for_state(&mut app, |_| !root.join("created/ renamed.txt ").exists());
     }
 
     #[test]
@@ -2592,6 +3145,17 @@ mod tests {
         fs::write(root.join("tracked.txt"), "base\n").unwrap();
         run_git(root, &["add", "tracked.txt"]);
         run_git(root, &["commit", "-m", "initial"]);
+    }
+
+    fn wait_for_state(app: &mut App, predicate: impl Fn(&App) -> bool) {
+        for _ in 0..200 {
+            let _ = app.poll_worker();
+            if predicate(app) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("application state did not update");
     }
 
     fn run_git(root: &Path, args: &[&str]) {

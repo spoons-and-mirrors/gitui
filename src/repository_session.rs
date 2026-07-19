@@ -7,7 +7,10 @@ use std::{
 
 use anyhow::Result;
 
-use crate::git::{self, Change, CommandOutput, RepositoryData};
+use crate::{
+    filesystem::{self, FileOperation},
+    git::{self, Change, CommandOutput, RepositoryData},
+};
 
 const MIN_STATUS_INTERVAL: Duration = Duration::from_millis(800);
 const MAX_STATUS_INTERVAL: Duration = Duration::from_secs(10);
@@ -17,6 +20,7 @@ pub(crate) enum WorkerCompletion {
     Fetch(Result<CommandOutput, String>),
     Command(CommandCompletion),
     Mutation(Result<(), String>),
+    FileOperation(FileOperationCompletion),
 }
 
 pub(crate) enum Mutation {
@@ -41,6 +45,11 @@ pub(crate) struct LoadCompletion {
 pub(crate) struct CommandCompletion {
     pub(crate) label: String,
     pub(crate) result: Result<CommandOutput, String>,
+}
+
+pub(crate) struct FileOperationCompletion {
+    pub(crate) result: Result<Option<String>, String>,
+    pub(crate) message: String,
 }
 
 #[derive(Debug)]
@@ -69,8 +78,14 @@ struct LoadResult {
 enum WorkerKind {
     Commit,
     Fetch,
-    Command { label: String },
+    Command {
+        label: String,
+    },
     Mutation,
+    FileOperation {
+        selection: Option<String>,
+        message: String,
+    },
 }
 
 pub(crate) struct RepositorySession {
@@ -153,6 +168,9 @@ impl RepositorySession {
     }
 
     pub(crate) fn start_open(&mut self, path: PathBuf, fetch_interval: Duration) -> bool {
+        if self.mutation_running {
+            return false;
+        }
         self.start_load(path, LoadKind::Open, fetch_interval)
     }
 
@@ -274,6 +292,41 @@ impl RepositorySession {
         true
     }
 
+    pub(crate) fn start_file_operation(&mut self, operation: FileOperation) -> bool {
+        if self.mutation_running
+            || self.commit_running
+            || self.fetch_running
+            || self.command_running
+            || self.load_running
+        {
+            return false;
+        }
+        let Some(root) = self.data.as_ref().map(|repository| repository.root.clone()) else {
+            return false;
+        };
+
+        self.mutation_running = true;
+        let selection = operation.selection_after();
+        let message = operation.success_message();
+        let sender = self.worker_tx.clone();
+        thread::spawn(move || {
+            let result = filesystem::perform(&root, &operation)
+                .map(|()| CommandOutput {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    success: true,
+                    exit_code: Some(0),
+                })
+                .map_err(|error| error.to_string());
+            let _ = sender.send(WorkerResult {
+                kind: WorkerKind::FileOperation { selection, message },
+                root,
+                result,
+            });
+        });
+        true
+    }
+
     pub(crate) fn maybe_start_fetch(&mut self, enabled: bool, fetch_interval: Duration) {
         if !enabled
             || self.load_running
@@ -367,6 +420,15 @@ impl RepositorySession {
                     self.mutation_running = false;
                     if active {
                         return Some(WorkerCompletion::Mutation(done.result.map(|_| ())));
+                    }
+                }
+                WorkerKind::FileOperation { selection, message } => {
+                    self.mutation_running = false;
+                    if active {
+                        return Some(WorkerCompletion::FileOperation(FileOperationCompletion {
+                            result: done.result.map(|_| selection),
+                            message,
+                        }));
                     }
                 }
             }
@@ -614,6 +676,7 @@ mod tests {
                 branch: "main".to_owned(),
                 changes: Vec::new(),
                 files: Vec::new(),
+                directories: Vec::new(),
                 history: Vec::new(),
                 commits: Vec::new(),
                 files_fingerprint: 0,

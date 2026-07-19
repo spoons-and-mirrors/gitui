@@ -859,6 +859,50 @@ fn colors_changed_files_in_the_files_view() {
 }
 
 #[test]
+fn files_click_waits_for_release_without_styling_every_file_as_a_drop_target() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    fs::write(root.join("first.txt"), "first\n").unwrap();
+    fs::write(root.join("second.txt"), "second\n").unwrap();
+
+    let mut app = App::new(root.to_path_buf());
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let list = app.regions.explorer_list.unwrap();
+    let selected_before = app.changes.explorer_state.selected();
+    let target = app
+        .changes
+        .explorer_rows()
+        .iter()
+        .enumerate()
+        .find_map(|(index, row)| {
+            (row.file_index.is_some() && Some(index) != selected_before).then_some(index)
+        })
+        .unwrap();
+    let y = list.y + target.saturating_sub(app.changes.explorer_scroll) as u16;
+
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        list.x + 1,
+        y,
+    ));
+    assert_eq!(app.changes.explorer_state.selected(), selected_before);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    for (index, row) in app.changes.explorer_rows().iter().enumerate() {
+        if row.file_index.is_some() && Some(index) != selected_before {
+            let y = list.y + index.saturating_sub(app.changes.explorer_scroll) as u16;
+            assert_ne!(
+                terminal.backend().buffer()[(list.x, y)].bg,
+                super::palette().inactive_selected
+            );
+        }
+    }
+
+    app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), list.x + 1, y));
+    assert_eq!(app.changes.explorer_state.selected(), Some(target));
+}
+
+#[test]
 fn opens_plain_directories_as_file_workspaces() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
@@ -886,6 +930,20 @@ fn opens_plain_directories_as_file_workspaces() {
     assert!(screen.contains("FILES"));
     assert!(screen.contains("README.md"));
     assert!(screen.contains("local workspace"));
+
+    let add = app.regions.files_add.unwrap();
+    click(&mut app, add.x, add.y);
+    assert_eq!(app.mode, Mode::Files);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(screen.contains("ADD TO FILES"));
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
     let worktree_tab = app.regions.worktree_tab.unwrap();
     click(&mut app, worktree_tab.x, worktree_tab.y);

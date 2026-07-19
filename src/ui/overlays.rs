@@ -8,8 +8,8 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
-    ACTION_ITEMS, ActionsState, CommandStatus, FileSearch, PickerAction, PickerEntry,
-    RepositoryPicker, Settings,
+    ACTION_ITEMS, ActionsState, CommandStatus, FileDialog, FileDialogKind, FileNameAction,
+    FileSearch, PickerAction, PickerEntry, RepositoryPicker, Settings,
 };
 
 use super::{fill, palette, truncate_width};
@@ -42,6 +42,153 @@ pub(super) struct ActionMenuRegions {
 pub(super) struct CommandRegions {
     pub(super) overlay: Rect,
     pub(super) output: Rect,
+}
+
+pub(super) struct FileDialogRegions {
+    pub(super) overlay: Rect,
+    pub(super) primary: Rect,
+    pub(super) secondary: Rect,
+}
+
+pub(super) fn draw_file_dialog(frame: &mut Frame<'_>, dialog: &FileDialog) -> FileDialogRegions {
+    let area = centered_min(frame.area(), 62, 0, 48, 13);
+    frame.render_widget(Clear, area);
+    fill(frame, area, palette().panel);
+    fill(
+        frame,
+        Rect::new(area.x, area.y, area.width, 3),
+        palette().surface_alt,
+    );
+    let inner = area.inner(ratatui::layout::Margin::new(2, 1));
+    let (title, prompt, primary_label, secondary_label, destructive) = match &dialog.kind {
+        FileDialogKind::Add { parent } => (
+            "ADD TO FILES",
+            if parent.is_empty() {
+                "Create in the repository root".to_owned()
+            } else {
+                format!("Create inside {parent}")
+            },
+            "File",
+            "Folder",
+            false,
+        ),
+        FileDialogKind::Name {
+            action,
+            parent,
+            source,
+        } => {
+            let (title, verb) = match action {
+                FileNameAction::CreateFile => ("NEW FILE", "Create"),
+                FileNameAction::CreateDirectory => ("NEW FOLDER", "Create"),
+                FileNameAction::Rename => ("RENAME", "Rename"),
+            };
+            let prompt = source.as_ref().map_or_else(
+                || {
+                    if parent.is_empty() {
+                        "Name in repository root".to_owned()
+                    } else {
+                        format!("Name inside {parent}")
+                    }
+                },
+                |source| format!("Rename {source}"),
+            );
+            (title, prompt, verb, "Cancel", false)
+        }
+        FileDialogKind::Delete { path, is_directory } => (
+            "CONFIRM DELETE",
+            if *is_directory {
+                format!(
+                    "Permanently delete folder {path} and everything inside it, including ignored files?"
+                )
+            } else {
+                format!("Permanently delete file {path}?")
+            },
+            "Delete",
+            "Cancel",
+            true,
+        ),
+    };
+    frame.render_widget(
+        Paragraph::new(title).style(
+            Style::default()
+                .fg(if destructive {
+                    palette().red
+                } else {
+                    palette().ink
+                })
+                .add_modifier(Modifier::BOLD),
+        ),
+        Rect::new(inner.x, area.y.saturating_add(1), inner.width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new(prompt).style(Style::default().fg(palette().ink)),
+        Rect::new(inner.x, area.y.saturating_add(4), inner.width, 2),
+    );
+    if matches!(dialog.kind, FileDialogKind::Name { .. }) {
+        let mut input = dialog.input.text().to_owned();
+        if dialog.input.cursor_visible() {
+            input.insert(dialog.input.cursor(), '▌');
+        }
+        frame.render_widget(
+            Paragraph::new(truncate_start_width(&input, usize::from(inner.width)))
+                .style(Style::default().fg(palette().ink).bg(palette().selected)),
+            Rect::new(inner.x, area.y.saturating_add(7), inner.width, 1),
+        );
+        if let Some(error) = &dialog.error {
+            frame.render_widget(
+                Paragraph::new(truncate_width(error, usize::from(inner.width)))
+                    .style(Style::default().fg(palette().red)),
+                Rect::new(inner.x, area.y.saturating_add(8), inner.width, 1),
+            );
+        }
+    }
+    let button_width = 12_u16.min(inner.width.saturating_sub(1) / 2);
+    let secondary = Rect::new(
+        inner.right().saturating_sub(button_width),
+        area.bottom().saturating_sub(2),
+        button_width,
+        1,
+    );
+    let primary = Rect::new(
+        secondary.x.saturating_sub(button_width.saturating_add(1)),
+        secondary.y,
+        button_width,
+        1,
+    );
+    let primary_selected = !matches!(dialog.kind, FileDialogKind::Add { .. }) || dialog.choice == 0;
+    frame.render_widget(
+        Paragraph::new(primary_label)
+            .alignment(Alignment::Center)
+            .style(
+                Style::default()
+                    .fg(if destructive {
+                        palette().red
+                    } else {
+                        palette().ink
+                    })
+                    .bg(if primary_selected {
+                        palette().selected
+                    } else {
+                        palette().raised
+                    }),
+            ),
+        primary,
+    );
+    frame.render_widget(
+        Paragraph::new(secondary_label)
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(palette().ink).bg(if !primary_selected {
+                palette().selected
+            } else {
+                palette().raised
+            })),
+        secondary,
+    );
+    FileDialogRegions {
+        overlay: area,
+        primary,
+        secondary,
+    }
 }
 
 pub(super) fn draw_action_menu(
@@ -1088,7 +1235,7 @@ pub(super) fn draw_editor(
 }
 
 pub(super) fn draw_help(frame: &mut Frame<'_>) {
-    let area = centered_min(frame.area(), 72, 0, 58, 17);
+    let area = centered_min(frame.area(), 72, 0, 58, 20);
     frame.render_widget(Clear, area);
     fill(frame, area, palette().panel);
     fill(
@@ -1152,7 +1299,7 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
     ];
     let worktree = vec![
         Line::styled(
-            "WORKTREE",
+            "WORKTREE / FILES",
             Style::default()
                 .fg(palette().muted)
                 .add_modifier(Modifier::BOLD),
@@ -1162,6 +1309,9 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
         help_line("Enter", "Toggle folder"),
         help_line("Space", "Stage file / hunk"),
         help_line("a / u", "Stage / unstage all"),
+        help_line("F2", "Rename file / folder"),
+        help_line("Ctrl+Delete", "Delete file / folder"),
+        help_line("Drag", "Move file / folder"),
         help_line("c", "Commit editor"),
         help_line("← / →", "Commit cursor"),
         help_line("C-A / C-⌫", "Select all / del word"),

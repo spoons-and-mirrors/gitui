@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, hash_map::DefaultHasher},
+    collections::{HashMap, HashSet, hash_map::DefaultHasher},
     fs,
     hash::{Hash, Hasher},
     io::{BufRead, BufReader, Read, Write},
@@ -24,6 +24,7 @@ pub struct RepositoryData {
     pub branch: String,
     pub changes: Vec<Change>,
     pub files: Vec<String>,
+    pub directories: Vec<String>,
     pub history: Vec<Commit>,
     pub commits: Vec<Commit>,
     pub files_fingerprint: u64,
@@ -123,7 +124,7 @@ fn load_git_root(root: PathBuf) -> Result<RepositoryData> {
             populate_diff_stats(&root, &mut changes)?;
             Ok(changes)
         });
-        let files = scope.spawn(|| git_repository_files(&root));
+        let files = scope.spawn(|| git_repository_entries(&root));
         let history = scope.spawn(|| branch_history(&root));
         let commits = scope.spawn(|| -> Result<(Vec<Commit>, bool)> {
             let (mut commits, truncated) = log(&root)?;
@@ -151,7 +152,8 @@ fn load_git_root(root: PathBuf) -> Result<RepositoryData> {
     })?;
 
     let (commits, graph_truncated) = commits;
-    let files_fingerprint = fingerprint(&files);
+    let (files, directories) = files;
+    let files_fingerprint = fingerprint(&(&files, &directories));
     let changes_fingerprint = fingerprint(&changes);
     let change_counts = change_counts(&changes);
     let graph_width = graph_width(&commits);
@@ -162,6 +164,7 @@ fn load_git_root(root: PathBuf) -> Result<RepositoryData> {
         branch,
         changes,
         files,
+        directories,
         history,
         commits,
         files_fingerprint,
@@ -177,14 +180,15 @@ fn local_workspace(path: &Path) -> Result<RepositoryData> {
     if !root.is_dir() {
         bail!("{} is not a directory", root.display());
     }
-    let files = local_files(&root)?;
-    let files_fingerprint = fingerprint(&files);
+    let (files, directories) = local_entries(&root)?;
+    let files_fingerprint = fingerprint(&(&files, &directories));
     Ok(RepositoryData {
         root,
         kind: RepositoryKind::Local,
         branch: "local".to_owned(),
         changes: Vec::new(),
         files,
+        directories,
         history: Vec::new(),
         commits: Vec::new(),
         files_fingerprint,
@@ -195,7 +199,7 @@ fn local_workspace(path: &Path) -> Result<RepositoryData> {
     })
 }
 
-fn git_repository_files(root: &Path) -> Result<Vec<String>> {
+fn git_repository_entries(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
     let output = run(
         root,
         &[
@@ -233,13 +237,173 @@ fn git_repository_files(root: &Path) -> Result<Vec<String>> {
         .into_iter()
         .filter_map(|(path, (present, deleted))| (present && !deleted).then_some(path))
         .collect();
+    files.extend(ignored_environment_files(root)?);
     files.sort_unstable();
     files.dedup();
-    Ok(files)
+    let output = run(
+        root,
+        &[
+            "ls-files",
+            "-z",
+            "--others",
+            "--directory",
+            "--empty-directory",
+            "--exclude-standard",
+        ],
+    )?;
+    if !output.status.success() {
+        bail!("{}", clean_stderr(&output));
+    }
+    let directory_roots: Vec<String> = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter_map(|path| path.strip_suffix(b"/"))
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .filter(|path| !path.is_empty())
+        .collect();
+    let mut directories = expand_git_directories(root, directory_roots)?;
+    let output = run(root, &["ls-files", "-z", "--stage"])?;
+    if !output.status.success() {
+        bail!("{}", clean_stderr(&output));
+    }
+    let submodules: HashSet<String> = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter_map(|entry| {
+            let separator = entry.iter().position(|byte| *byte == b'\t')?;
+            let (metadata, path) = entry.split_at(separator);
+            let path = path.get(1..)?;
+            metadata
+                .starts_with(b"160000 ")
+                .then(|| String::from_utf8_lossy(path).into_owned())
+        })
+        .filter(|path| {
+            root.join(path)
+                .symlink_metadata()
+                .is_ok_and(|metadata| metadata.is_dir())
+        })
+        .collect();
+    files.retain(|path| !submodules.contains(path));
+    directories.extend(submodules);
+    directories.sort_unstable();
+    directories.dedup();
+    Ok((files, directories))
 }
 
-fn local_files(root: &Path) -> Result<Vec<String>> {
+fn ignored_environment_files(root: &Path) -> Result<Vec<String>> {
+    let output = run(
+        root,
+        &[
+            "ls-files",
+            "-z",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--",
+            ":(glob).env",
+            ":(glob).env.*",
+            ":(glob)**/.env",
+            ":(glob)**/.env.*",
+        ],
+    )?;
+    if !output.status.success() {
+        bail!("{}", clean_stderr(&output));
+    }
+    Ok(output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect())
+}
+
+fn expand_git_directories(root: &Path, roots: Vec<String>) -> Result<Vec<String>> {
+    let mut directories: HashSet<String> = roots.iter().cloned().collect();
+    let mut frontier = roots;
+    while !frontier.is_empty() {
+        let mut candidates = Vec::new();
+        for relative in frontier {
+            let path = root.join(&relative);
+            let Ok(entries) = fs::read_dir(path) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                if entry.file_name() == ".git" {
+                    continue;
+                }
+                let path = entry.path();
+                let Ok(metadata) = fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                    continue;
+                }
+                if let Ok(path) = path.strip_prefix(root) {
+                    let path = path.to_string_lossy();
+                    candidates.push(if cfg!(windows) {
+                        path.replace('\\', "/")
+                    } else {
+                        path.into_owned()
+                    });
+                }
+            }
+        }
+        candidates.sort_unstable();
+        candidates.dedup();
+        let ignored = git_ignored_paths(root, &candidates)?;
+        frontier = candidates
+            .into_iter()
+            .filter(|path| !ignored.contains(path))
+            .filter(|path| directories.insert(path.clone()))
+            .collect();
+    }
+    Ok(directories.into_iter().collect())
+}
+
+fn git_ignored_paths(root: &Path, paths: &[String]) -> Result<HashSet<String>> {
+    if paths.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let mut command = base_command(root);
+    command
+        .args(["check-ignore", "-z", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().context("could not run git check-ignore")?;
+    let input = paths.to_vec();
+    let writer = child.stdin.take().map(|mut stdin| {
+        std::thread::spawn(move || -> std::io::Result<()> {
+            for path in input {
+                stdin.write_all(path.as_bytes())?;
+                stdin.write_all(&[0])?;
+            }
+            Ok(())
+        })
+    });
+    let output = child
+        .wait_with_output()
+        .context("could not read git check-ignore")?;
+    if let Some(writer) = writer {
+        writer
+            .join()
+            .map_err(|_| anyhow!("git check-ignore input writer panicked"))?
+            .context("could not write git check-ignore input")?;
+    }
+    if !output.status.success() && output.status.code() != Some(1) {
+        bail!("{}", clean_stderr(&output));
+    }
+    Ok(output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect())
+}
+
+fn local_entries(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
     let mut files = Vec::new();
+    let mut directory_paths = Vec::new();
     let mut directories = vec![root.to_owned()];
     while let Some(directory) = directories.pop() {
         let entries = match fs::read_dir(&directory) {
@@ -256,6 +420,9 @@ fn local_files(root: &Path) -> Result<Vec<String>> {
                 continue;
             };
             if metadata.is_dir() {
+                if let Ok(relative) = path.strip_prefix(root) {
+                    directory_paths.push(relative.to_string_lossy().into_owned());
+                }
                 directories.push(path);
             } else if let Ok(relative) = path.strip_prefix(root) {
                 files.push(relative.to_string_lossy().into_owned());
@@ -264,7 +431,9 @@ fn local_files(root: &Path) -> Result<Vec<String>> {
     }
     files.sort();
     files.dedup();
-    Ok(files)
+    directory_paths.sort();
+    directory_paths.dedup();
+    Ok((files, directory_paths))
 }
 
 fn fingerprint<T: Hash>(value: &T) -> u64 {
@@ -1292,10 +1461,53 @@ mod tests {
         fs::write(root.join("tracked.txt"), "tracked\n").unwrap();
         git(root, &["add", "tracked.txt"]);
         fs::write(root.join("untracked.txt"), "new\n").unwrap();
+        fs::create_dir_all(root.join("empty/nested")).unwrap();
+        fs::create_dir_all(root.join("empty/ignored")).unwrap();
+        fs::create_dir(root.join("config")).unwrap();
+        fs::write(root.join(".gitignore"), "empty/ignored/\n.env*\nconfig/\n").unwrap();
+        fs::write(root.join(".env"), "SECRET=value\n").unwrap();
+        fs::write(root.join(".env.local"), "SECRET=local\n").unwrap();
+        fs::write(root.join(".envrc"), "not an env file\n").unwrap();
+        fs::write(root.join("config/.env.production"), "SECRET=prod\n").unwrap();
         fs::remove_file(root.join("tracked.txt")).unwrap();
 
-        let files = git_repository_files(root).unwrap();
-        assert_eq!(files, ["untracked.txt"]);
+        assert_eq!(
+            super::ignored_environment_files(root).unwrap(),
+            [".env", ".env.local", "config/.env.production"]
+        );
+        let (files, directories) = git_repository_entries(root).unwrap();
+        assert_eq!(
+            files,
+            [
+                ".env",
+                ".env.local",
+                ".gitignore",
+                "config/.env.production",
+                "untracked.txt"
+            ]
+        );
+        assert_eq!(directories, ["empty", "empty/nested"]);
+    }
+
+    #[test]
+    fn gitlinks_are_exposed_as_directories() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "-b", "main"]);
+        git(root, &["config", "user.name", "Test"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        fs::write(root.join("tracked"), "content").unwrap();
+        git(root, &["add", "tracked"]);
+        git(root, &["commit", "-m", "initial"]);
+        let oid_output = run(root, &["rev-parse", "HEAD"]).unwrap();
+        let oid = String::from_utf8_lossy(&oid_output.stdout);
+        let cache_info = format!("160000,{},{path}", oid.trim(), path = "module");
+        git(root, &["update-index", "--add", "--cacheinfo", &cache_info]);
+        fs::create_dir(root.join("module")).unwrap();
+
+        let (files, directories) = git_repository_entries(root).unwrap();
+        assert!(!files.iter().any(|path| path == "module"));
+        assert!(directories.iter().any(|path| path == "module"));
     }
 
     #[test]
@@ -1308,7 +1520,7 @@ mod tests {
         git(root, &["update-index", "--skip-worktree", "sparse.txt"]);
         fs::remove_file(root.join("sparse.txt")).unwrap();
 
-        assert!(git_repository_files(root).unwrap().is_empty());
+        assert!(git_repository_entries(root).unwrap().0.is_empty());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # hunkle
 
 - A collapsible worktree tree with per-file added/deleted line counts for inspecting, staging, unstaging, and committing changes.
-- A switchable repository file tree that respects Git ignore rules, with read-only, syntax-colored previews.
+- A switchable repository file tree that respects Git ignore rules while retaining `.env` files, with read-only, syntax-colored previews.
 - Local workspaces for browsing, searching, and previewing directories that are not Git repositories.
 - A resizable current-branch history shelf with HEAD, branch, remote, and tag decorations; selecting a commit shows its patch.
 - A repository Actions menu for committing, pushing, fetching, pulling with rebase, and running non-interactive Git commands with captured output.
@@ -33,6 +33,8 @@ hunkle opens exactly the current or requested directory. When that directory is 
 | `e`, `E` | Open the selected file in your editor, or configure the editor |
 | `f` | Switch the left pane between Worktree and Files |
 | `F3` | Fuzzy-search repository files from anywhere |
+| `F2` | Rename the selected file or folder in Files |
+| `Ctrl+Delete` | Delete the selected file or folder after confirmation |
 | `h`, `l`, `Left`, `Right` | Navigate the tree; Right enters/stages in hunk mode and Left exits it |
 | `Enter` | Toggle the selected directory |
 | `Space` | Stage or unstage the selected entry, or stage the selected hunk |
@@ -62,13 +64,14 @@ In the repository explorer, start typing a folder name, press `p` to search from
 - Click or scroll History to inspect a commit's patch; click a Worktree file to return to its current diff.
 - Click a directory to expand or collapse it. Click a file's right-aligned checkbox or right-click its row to stage or unstage it.
 - Click `WORKTREE` or `FILES` in the left header to switch modes; clicking a repository file previews its contents.
+- Click `+` in the Files header to create a file or folder. Drag a Files entry onto a folder or the Files header to move it.
 - The wheel pans Worktree and Files as viewports without changing the selected file; click a visible row to select it.
 - Use the wheel over Diff or Graph to scroll that surface.
 - Drag the one-column Diff scrollbar or click its track to move quickly through large patches.
 - Click the Worktree `Stage all` checkbox to stage everything; click it again when checked to unstage everything.
 - Click the commit editor inside Worktree, type a message, and press `Ctrl+Enter` to commit.
 - Click the repository path field to type, or click a directory/repository entry to navigate or open it.
-- Drag across visible text to select it and automatically copy it to the clipboard. Selection stays within the panel where the drag starts.
+- Drag across visible text to select it and automatically copy it to the clipboard. In Files, hold `Shift` while dragging to select text instead of moving an entry. Selection stays within the panel where the drag starts.
 
 ## Settings
 
