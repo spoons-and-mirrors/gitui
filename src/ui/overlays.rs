@@ -26,6 +26,7 @@ pub(super) struct SettingsRegions {
     pub(super) fetch_interval: Rect,
     pub(super) fetch_interval_down: Rect,
     pub(super) fetch_interval_up: Rect,
+    pub(super) editor: Rect,
 }
 
 pub(super) struct ActionMenuRegions {
@@ -612,7 +613,7 @@ pub(super) fn draw_settings(
     selection: usize,
     fetch_running: bool,
 ) -> SettingsRegions {
-    let area = centered_min(frame.area(), 58, 0, 48, 14);
+    let area = centered_min(frame.area(), 58, 0, 48, 17);
     frame.render_widget(Clear, area);
     fill(frame, area, palette().panel);
     fill(
@@ -634,7 +635,7 @@ pub(super) fn draw_settings(
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "  Repository preferences",
+                "  Application preferences",
                 Style::default().fg(palette().faint),
             ),
         ])),
@@ -646,7 +647,7 @@ pub(super) fn draw_settings(
         ),
     );
     frame.render_widget(
-        Paragraph::new("Space toggle   ←/→ interval   Esc close")
+        Paragraph::new("Space toggle   ←/→ interval   Enter edit   Esc close")
             .style(Style::default().fg(palette().muted))
             .alignment(Alignment::Right),
         Rect::new(
@@ -665,6 +666,7 @@ pub(super) fn draw_settings(
     );
     let auto_row = Rect::new(inner.x, area.y.saturating_add(7), inner.width, 1);
     let interval_row = Rect::new(inner.x, area.y.saturating_add(9), inner.width, 1);
+    let editor_row = Rect::new(inner.x, area.y.saturating_add(14), inner.width, 1);
     let interval_down = Rect::new(
         interval_row.right().saturating_sub(15),
         interval_row.y,
@@ -758,17 +760,138 @@ pub(super) fn draw_settings(
         Rect::new(inner.x, area.y.saturating_add(11), inner.width, 1),
     );
 
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            "EDITOR",
+            Style::default()
+                .fg(palette().muted)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Rect::new(inner.x, area.y.saturating_add(13), inner.width, 1),
+    );
+    let editor = settings
+        .editor_command
+        .as_deref()
+        .unwrap_or("Not configured");
+    let editor = truncate_width(editor, usize::from(editor_row.width).saturating_sub(17));
+    let editor_padding =
+        usize::from(editor_row.width).saturating_sub("Editor command".len() + editor.len());
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Editor command", Style::default().fg(palette().ink)),
+            Span::raw(" ".repeat(editor_padding)),
+            Span::styled(
+                editor,
+                Style::default().fg(if settings.editor_command.is_some() {
+                    palette().accent
+                } else {
+                    palette().muted
+                }),
+            ),
+        ]))
+        .style(Style::default().bg(if selection == 2 {
+            palette().selected
+        } else {
+            palette().surface_alt
+        })),
+        editor_row,
+    );
+
     SettingsRegions {
         overlay: area,
         auto_fetch: auto_row,
         fetch_interval: interval_row,
         fetch_interval_down: interval_down,
         fetch_interval_up: interval_up,
+        editor: editor_row,
     }
 }
 
+pub(super) fn draw_editor(
+    frame: &mut Frame<'_>,
+    input: &str,
+    error: Option<&str>,
+    configure_only: bool,
+) -> Rect {
+    let area = centered_min(frame.area(), 64, 0, 52, 12);
+    frame.render_widget(Clear, area);
+    fill(frame, area, palette().panel);
+    fill(
+        frame,
+        Rect::new(area.x, area.y, area.width, 3),
+        palette().surface_alt,
+    );
+    fill(
+        frame,
+        Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
+        palette().surface_alt,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "EDITOR COMMAND",
+                Style::default()
+                    .fg(palette().ink)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  Saved for next time",
+                Style::default().fg(palette().faint),
+            ),
+        ])),
+        Rect::new(
+            area.x.saturating_add(2),
+            area.y.saturating_add(1),
+            area.width.saturating_sub(4),
+            1,
+        ),
+    );
+    let inner = Rect::new(
+        area.x.saturating_add(2),
+        area.y.saturating_add(4),
+        area.width.saturating_sub(4),
+        area.height.saturating_sub(5),
+    );
+    frame.render_widget(
+        Paragraph::new("Choose the interactive editor used for selected files.")
+            .style(Style::default().fg(palette().ink)),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new(format!("{input}▌"))
+            .style(Style::default().fg(palette().ink).bg(palette().selected)),
+        Rect::new(inner.x, inner.y.saturating_add(2), inner.width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new(error.unwrap_or("Examples: nvim · micro · code --wait")).style(
+            Style::default().fg(if error.is_some() {
+                palette().red
+            } else {
+                palette().faint
+            }),
+        ),
+        Rect::new(inner.x, inner.y.saturating_add(4), inner.width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new(if configure_only {
+            "Enter save   Ctrl+U clear   Esc back"
+        } else {
+            "Enter save & open   Ctrl+U clear   Esc cancel"
+        })
+        .style(Style::default().fg(palette().muted))
+        .alignment(Alignment::Right),
+        Rect::new(
+            area.x.saturating_add(2),
+            area.bottom().saturating_sub(1),
+            area.width.saturating_sub(4),
+            1,
+        ),
+    );
+    area
+}
+
 pub(super) fn draw_help(frame: &mut Frame<'_>) {
-    let area = centered_min(frame.area(), 72, 0, 58, 15);
+    let area = centered_min(frame.area(), 72, 0, 58, 16);
     frame.render_widget(Clear, area);
     fill(frame, area, palette().panel);
     fill(
@@ -825,7 +948,8 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
         help_line("s", "Settings"),
         help_line("x", "Git actions"),
         help_line("g", "Git command"),
-        help_line("e", "Worktree / files"),
+        help_line("e / E", "Edit / configure editor"),
+        help_line("f", "Worktree / files"),
         help_line("w", "Wrap diff"),
     ];
     let worktree = vec![

@@ -24,7 +24,7 @@ use crate::{
     selection::{SelectionOutcome, SelectionState},
 };
 
-use actions::{ActionId, action_command, display_git_command, parse_git_args};
+use actions::{ActionId, action_command, display_git_command, parse_command_args, parse_git_args};
 use repository_picker::PickerCommand;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +42,7 @@ pub enum Mode {
     Help,
     ActionMenu,
     Command,
+    Editor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +51,7 @@ pub struct Settings {
     pub fetch_interval_minutes: u16,
     pub worktree_width: u16,
     pub history_height: u16,
+    pub editor_command: Option<String>,
 }
 
 impl Default for Settings {
@@ -59,6 +61,7 @@ impl Default for Settings {
             fetch_interval_minutes: 5,
             worktree_width: 38,
             history_height: 7,
+            editor_command: None,
         }
     }
 }
@@ -104,6 +107,8 @@ pub struct Regions {
     pub action_list: Option<Rect>,
     pub command_overlay: Option<Rect>,
     pub command_output: Option<Rect>,
+    pub editor_overlay: Option<Rect>,
+    pub editor_setting: Option<Rect>,
     pub auto_fetch: Option<Rect>,
     pub fetch_interval: Option<Rect>,
     pub fetch_interval_down: Option<Rect>,
@@ -136,6 +141,16 @@ pub struct App {
     pub(crate) settings_path: Option<PathBuf>,
     pending_reload: Option<(changes::ChangesSelection, Option<String>)>,
     reload_queued: bool,
+    pub(crate) editor_input: String,
+    pub(crate) editor_error: Option<String>,
+    pub(crate) editor_configure_only: bool,
+    editor_request: Option<EditorRequest>,
+}
+
+pub(crate) struct EditorRequest {
+    pub(crate) command: Vec<String>,
+    pub(crate) file: PathBuf,
+    pub(crate) repository: PathBuf,
 }
 
 impl App {
@@ -187,6 +202,10 @@ impl App {
             settings_path,
             pending_reload: None,
             reload_queued: false,
+            editor_input: String::new(),
+            editor_error: None,
+            editor_configure_only: false,
+            editor_request: None,
         }
     }
 
@@ -220,6 +239,7 @@ impl App {
             Mode::Settings => self.handle_settings(key),
             Mode::ActionMenu => self.handle_action_menu(key),
             Mode::Command => self.handle_command(key),
+            Mode::Editor => self.handle_editor(key),
             Mode::Help => {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
                     self.mode = Mode::Normal;
@@ -237,6 +257,10 @@ impl App {
                 if self.actions.status == CommandStatus::Input {
                     self.actions.stderr.clear();
                 }
+            }
+            Mode::Editor => {
+                self.editor_input.push_str(text);
+                self.editor_error = None;
             }
             _ => {}
         }
@@ -311,6 +335,9 @@ impl App {
         }
         if self.mode == Mode::Command {
             self.handle_command_mouse(mouse);
+            return;
+        }
+        if self.mode == Mode::Editor {
             return;
         }
         if self.mode == Mode::Picker {
@@ -403,6 +430,7 @@ impl App {
     fn selection_region(&self, point: Position) -> Rect {
         [
             self.regions.command_overlay,
+            self.regions.editor_overlay,
             self.regions.picker_overlay,
             self.regions.settings_overlay,
             self.regions.action_menu,
@@ -431,6 +459,7 @@ impl App {
             Mode::Picker => self.handle_picker_mouse(mouse),
             Mode::Settings => self.handle_settings_mouse(mouse),
             Mode::Help => self.mode = Mode::Normal,
+            Mode::Editor => {}
             Mode::Normal | Mode::Commit => self.handle_primary_left_click(point),
         }
     }
@@ -685,6 +714,13 @@ impl App {
             .is_some_and(|rect| rect.contains(point))
         {
             self.settings_selection = 1;
+        } else if self
+            .regions
+            .editor_setting
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.settings_selection = 2;
+            self.open_editor_setting();
         }
     }
 
@@ -962,9 +998,11 @@ impl App {
     }
 
     pub fn requires_render_before_next_event(&self) -> bool {
-        self.regions
-            .screen
-            .is_some_and(|area| self.selection.needs_capture(area))
+        self.editor_request.is_some()
+            || self
+                .regions
+                .screen
+                .is_some_and(|area| self.selection.needs_capture(area))
     }
 
     pub fn change_counts(&self) -> (usize, usize) {
@@ -1007,7 +1045,9 @@ impl App {
                     .to_owned(),
                 );
             }
-            KeyCode::Char('e') if self.view == View::Changes => self.toggle_left_pane(),
+            KeyCode::Char('e') if self.view == View::Changes => self.open_selected_file(false),
+            KeyCode::Char('E') if self.view == View::Changes => self.open_selected_file(true),
+            KeyCode::Char('f') if self.view == View::Changes => self.toggle_left_pane(),
             KeyCode::Char('c') if self.view == View::Changes => {
                 self.set_left_pane(LeftPane::Worktree);
                 self.mode = Mode::Commit;
@@ -1110,10 +1150,10 @@ impl App {
         match key.code {
             KeyCode::Esc | KeyCode::Char('s') => self.mode = Mode::Normal,
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
-                self.settings_selection = (self.settings_selection + 1) % 2;
+                self.settings_selection = (self.settings_selection + 1) % 3;
             }
             KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
-                self.settings_selection = (self.settings_selection + 1) % 2;
+                self.settings_selection = (self.settings_selection + 2) % 3;
             }
             KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 0 => {
                 self.toggle_auto_fetch();
@@ -1125,6 +1165,9 @@ impl App {
                 if self.settings_selection == 1 =>
             {
                 self.change_fetch_interval(1);
+            }
+            KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 2 => {
+                self.open_editor_setting();
             }
             _ => {}
         }
@@ -1213,6 +1256,134 @@ impl App {
             KeyCode::Home | KeyCode::Char('g') => self.actions.scroll = 0,
             KeyCode::End | KeyCode::Char('G') => self.actions.scroll = self.actions.scroll_max,
             _ => {}
+        }
+    }
+
+    fn handle_editor(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.editor_error = None;
+                self.mode = if self.editor_configure_only {
+                    Mode::Settings
+                } else {
+                    Mode::Normal
+                };
+            }
+            KeyCode::Enter => self.queue_editor(),
+            KeyCode::Backspace => {
+                self.editor_input.pop();
+                self.editor_error = None;
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.editor_input.clear();
+                self.editor_error = None;
+            }
+            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.editor_input.push(character);
+                self.editor_error = None;
+            }
+            _ => {}
+        }
+    }
+
+    fn open_selected_file(&mut self, configure: bool) {
+        let Some((repository, file)) = self.selected_file_to_edit() else {
+            self.notice = Some("Select a file to edit".to_owned());
+            return;
+        };
+        let configured = self.settings.editor_command.clone();
+        if configure || configured.is_none() {
+            self.editor_configure_only = false;
+            self.editor_input = configured
+                .or_else(|| std::env::var("VISUAL").ok())
+                .or_else(|| std::env::var("EDITOR").ok())
+                .unwrap_or_default();
+            self.editor_error = None;
+            self.mode = Mode::Editor;
+            return;
+        }
+        self.prepare_editor_request(configured.expect("checked above"), repository, file);
+    }
+
+    fn queue_editor(&mut self) {
+        if self.editor_configure_only {
+            let command = self.editor_input.trim().to_owned();
+            match parse_command_args(&command) {
+                Ok(_) => {
+                    self.settings.editor_command = Some(command);
+                    self.persist_settings();
+                    self.editor_error = None;
+                    self.mode = Mode::Settings;
+                }
+                Err(error) => self.editor_error = Some(error),
+            }
+            return;
+        }
+        let Some((repository, file)) = self.selected_file_to_edit() else {
+            self.mode = Mode::Normal;
+            self.notice = Some("Select a file to edit".to_owned());
+            return;
+        };
+        self.prepare_editor_request(self.editor_input.trim().to_owned(), repository, file);
+    }
+
+    fn open_editor_setting(&mut self) {
+        self.editor_input = self
+            .settings
+            .editor_command
+            .clone()
+            .or_else(|| std::env::var("VISUAL").ok())
+            .or_else(|| std::env::var("EDITOR").ok())
+            .unwrap_or_default();
+        self.editor_error = None;
+        self.editor_configure_only = true;
+        self.mode = Mode::Editor;
+    }
+
+    fn prepare_editor_request(&mut self, command: String, repository: PathBuf, file: PathBuf) {
+        match parse_command_args(&command) {
+            Ok(command_args) => {
+                self.settings.editor_command = Some(command);
+                self.persist_settings();
+                self.editor_error = None;
+                self.editor_request = Some(EditorRequest {
+                    command: command_args,
+                    file: repository.join(file),
+                    repository,
+                });
+                self.mode = Mode::Normal;
+            }
+            Err(error) => {
+                self.editor_error = Some(error);
+                self.mode = Mode::Editor;
+            }
+        }
+    }
+
+    fn selected_file_to_edit(&self) -> Option<(PathBuf, PathBuf)> {
+        if self.view != View::Changes || self.changes.history_focused {
+            return None;
+        }
+        let repo = self.repository()?;
+        let path = match self.changes.pane {
+            LeftPane::Worktree => {
+                let index = self.changes.selected_change_index(repo)?;
+                repo.changes.get(index)?.path.as_str()
+            }
+            LeftPane::Files => self.changes.selected_explorer_file_path(repo)?,
+        };
+        Some((repo.root.clone(), PathBuf::from(path)))
+    }
+
+    pub(crate) fn take_editor_request(&mut self) -> Option<EditorRequest> {
+        self.editor_request.take()
+    }
+
+    pub(crate) fn editor_finished(&mut self, result: Result<(), String>) {
+        let error = result.err();
+        self.reload();
+        if let Some(error) = error {
+            self.notice = Some(error);
         }
     }
 
@@ -1543,6 +1714,10 @@ fn load_settings(path: &Path) -> Settings {
                     settings.history_height = height.clamp(3, 256);
                 }
             }
+            "editor_command" => {
+                let command = value.trim();
+                settings.editor_command = (!command.is_empty()).then(|| command.to_owned());
+            }
             _ => {}
         }
     }
@@ -1556,11 +1731,12 @@ fn save_settings(path: &Path, settings: &Settings) -> std::io::Result<()> {
     fs::write(
         path,
         format!(
-            "auto_fetch={}\nfetch_interval_minutes={}\nworktree_width={}\nhistory_height={}\n",
+            "auto_fetch={}\nfetch_interval_minutes={}\nworktree_width={}\nhistory_height={}\neditor_command={}\n",
             settings.auto_fetch,
             settings.fetch_interval_minutes,
             settings.worktree_width,
-            settings.history_height
+            settings.history_height,
+            settings.editor_command.as_deref().unwrap_or_default()
         ),
     )
 }
@@ -1604,6 +1780,7 @@ mod tests {
             fetch_interval_minutes: 17,
             worktree_width: 61,
             history_height: 9,
+            editor_command: Some("code --wait".to_owned()),
         };
 
         save_settings(&path, &settings).unwrap();
@@ -1633,6 +1810,10 @@ mod tests {
         assert_eq!(app.view, View::Graph);
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.view, View::Changes);
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert_eq!(app.changes.pane, LeftPane::Files);
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert_eq!(app.changes.pane, LeftPane::Worktree);
 
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
         assert_eq!(app.mode, Mode::Settings);
@@ -1646,8 +1827,19 @@ mod tests {
                 fetch_interval_minutes: 6,
                 worktree_width: 38,
                 history_height: 7,
+                editor_command: None,
             }
         );
+        assert_eq!(load_settings(&path), app.settings);
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Editor);
+        assert!(app.editor_configure_only);
+        app.editor_input.clear();
+        app.handle_paste("nvim");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Settings);
+        assert_eq!(app.settings.editor_command.as_deref(), Some("nvim"));
         assert_eq!(load_settings(&path), app.settings);
 
         app.mode = Mode::Normal;
@@ -1756,6 +1948,39 @@ mod tests {
         assert!(!app.commit_running());
         assert!(app.commit_message.is_empty());
         assert_eq!(app.repository().unwrap().commits.len(), 2);
+    }
+
+    #[test]
+    fn configures_and_requests_an_interactive_editor() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        initialize_repository(root);
+        fs::write(root.join("tracked.txt"), "edited\n").unwrap();
+        let settings_path = root.join(".git/gitui-editor-test-config");
+        let mut app = App::new(root.to_path_buf());
+        app.settings.editor_command = None;
+        app.settings_path = Some(settings_path.clone());
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Editor);
+        app.editor_input.clear();
+        app.handle_paste("code --wait");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let request = app.take_editor_request().unwrap();
+        assert_eq!(request.command, ["code", "--wait"]);
+        assert_eq!(request.file, root.join("tracked.txt"));
+        assert_eq!(request.repository, root);
+        assert_eq!(app.settings.editor_command.as_deref(), Some("code --wait"));
+        assert!(
+            fs::read_to_string(settings_path)
+                .unwrap()
+                .contains("editor_command=code --wait")
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('E'), KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Editor);
+        assert_eq!(app.editor_input, "code --wait");
     }
 
     #[test]

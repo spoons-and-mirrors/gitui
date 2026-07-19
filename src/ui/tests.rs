@@ -42,6 +42,20 @@ fn renders_every_primary_surface() {
     assert_eq!(app.regions.diff.unwrap().right(), 120);
     assert_eq!(app.regions.changes.unwrap().y, 35);
     assert_eq!(app.regions.help.unwrap().y, 35);
+    assert!(app.regions.changes.unwrap().x > 0);
+    assert_eq!(app.regions.help.unwrap().right(), 120);
+    let buffer = terminal.backend().buffer();
+    let history = app.regions.history_splitter.unwrap();
+    let history_offset = usize::from(history.y) * 120 + usize::from(history.x);
+    assert_eq!(buffer.content[0].bg, super::palette().surface_alt);
+    assert_eq!(
+        buffer.content[36 * 120 - 1].bg,
+        super::palette().surface_alt
+    );
+    assert_eq!(
+        buffer.content[history_offset].bg,
+        super::palette().surface_alt
+    );
     let header: String = terminal.backend().buffer().content[..120]
         .iter()
         .map(|cell| cell.symbol())
@@ -548,9 +562,26 @@ fn renders_every_primary_surface() {
         .collect();
     assert!(settings_screen.contains("Auto-fetch remotes"));
     assert!(settings_screen.contains("Fetch interval"));
+    assert!(settings_screen.contains("Editor command"));
+    assert!(app.regions.editor_setting.is_some());
     assert!(!settings_screen.contains('┌'));
     assert!(app.regions.auto_fetch.is_some());
     assert!(app.regions.fetch_interval_up.is_some());
+
+    app.mode = Mode::Editor;
+    app.editor_input = "nvim".to_owned();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let editor_screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(editor_screen.contains("EDITOR COMMAND"));
+    assert!(editor_screen.contains("nvim"));
+    assert!(editor_screen.contains("Saved for next time"));
+    assert!(app.regions.editor_overlay.is_some());
 
     app.mode = Mode::Help;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
