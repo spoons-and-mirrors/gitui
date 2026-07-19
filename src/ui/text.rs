@@ -134,29 +134,27 @@ pub(super) fn styled_diff_window(
                 );
             }
 
-            let (marker, payload, background, old_number, new_number) =
+            let (marker, payload, background, new_number) =
                 if let Some(payload) = line.strip_prefix('+') {
                     let number = new_line;
                     new_line = new_line.map(|value| value + 1);
-                    ("+", payload, palette().add_bg, None, number)
+                    ("+", payload, palette().add_bg, number)
                 } else if let Some(payload) = line.strip_prefix('-') {
-                    let number = old_line;
                     old_line = old_line.map(|value| value + 1);
-                    ("-", payload, palette().remove_bg, number, None)
+                    ("-", payload, palette().remove_bg, None)
                 } else if let Some(payload) = line.strip_prefix(' ')
                     && old_line.is_some()
                 {
-                    let old = old_line;
                     let new = new_line;
                     old_line = old_line.map(|value| value + 1);
                     new_line = new_line.map(|value| value + 1);
-                    (" ", payload, palette().panel, old, new)
+                    (" ", payload, palette().panel, new)
                 } else {
                     return finish_line(syntax_spans(line, path), width, palette().panel);
                 };
 
             let mut spans = if numbered {
-                line_numbers(old_number, new_number)
+                line_number(new_number)
             } else {
                 Vec::new()
             };
@@ -215,11 +213,10 @@ fn parse_hunk_lines(line: &str) -> Option<(u32, u32)> {
     Some((old, new))
 }
 
-fn line_numbers(old: Option<u32>, new: Option<u32>) -> Vec<Span<'static>> {
+fn line_number(new: Option<u32>) -> Vec<Span<'static>> {
     vec![Span::styled(
         format!(
-            "{:>4} {:>4} ",
-            old.map_or_else(String::new, |value| value.to_string()),
+            "{:>4} ",
             new.map_or_else(String::new, |value| value.to_string())
         ),
         Style::default().fg(palette().faint),
@@ -380,8 +377,8 @@ mod tests {
         assert_eq!(lines[0].style.bg, Some(palette().surface_alt));
         assert_eq!(lines[1].style.bg, Some(palette().remove_bg));
         assert_eq!(lines[2].style.bg, Some(palette().add_bg));
-        assert!(lines[1].spans[0].content.contains('1'));
-        assert!(lines[2].spans[0].content.contains('1'));
+        assert!(lines[1].spans[0].content.trim().is_empty());
+        assert_eq!(lines[2].spans[0].content.trim(), "1");
         assert!(
             lines[2]
                 .spans
