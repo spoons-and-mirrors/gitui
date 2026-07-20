@@ -8,8 +8,9 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
-    ACTION_ITEMS, ActionsState, CommandStatus, FileDialog, FileDialogKind, FileNameAction,
-    FileSearch, PickerAction, PickerEntry, RepositoryPicker, Settings,
+    ACTION_ITEMS, ActionsState, BrowserTab, CommandStatus, FileDialog, FileDialogKind,
+    FileNameAction, FileSearch, PickerAction, PickerEntry, RemoteItems, RepositoryBrowser,
+    RepositoryPicker, Settings,
 };
 
 use super::{fill, palette, truncate_width};
@@ -48,6 +49,257 @@ pub(super) struct FileDialogRegions {
     pub(super) overlay: Rect,
     pub(super) primary: Rect,
     pub(super) secondary: Rect,
+}
+
+pub(super) struct RepositoryBrowserRegions {
+    pub(super) overlay: Rect,
+    pub(super) list: Rect,
+    pub(super) tabs: [Rect; 3],
+}
+
+pub(super) fn draw_repository_browser(
+    frame: &mut Frame<'_>,
+    browser: &mut RepositoryBrowser,
+) -> RepositoryBrowserRegions {
+    let area = centered_min(frame.area(), 84, 72, 60, 18);
+    frame.render_widget(Clear, area);
+    fill(frame, area, palette().panel);
+    fill(
+        frame,
+        Rect::new(area.x, area.y, area.width, 3),
+        palette().surface_alt,
+    );
+    fill(
+        frame,
+        Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
+        palette().surface_alt,
+    );
+
+    let inner_x = area.x.saturating_add(2);
+    let inner_width = area.width.saturating_sub(4);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "REPOSITORY",
+                Style::default()
+                    .fg(palette().ink)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  Branches and GitHub work",
+                Style::default().fg(palette().faint),
+            ),
+        ])),
+        Rect::new(inner_x, area.y.saturating_add(1), inner_width, 1),
+    );
+
+    let tab_area = Rect::new(inner_x, area.y.saturating_add(4), inner_width, 1);
+    let tab_layout = Layout::horizontal([
+        Constraint::Percentage(34),
+        Constraint::Percentage(33),
+        Constraint::Percentage(33),
+    ])
+    .split(tab_area);
+    let tabs = [tab_layout[0], tab_layout[1], tab_layout[2]];
+    let tab_labels = [
+        format!("BRANCHES {}", browser.branches.len()),
+        remote_tab_label("PULL REQUESTS", &browser.pull_requests),
+        remote_tab_label("ISSUES", &browser.issues),
+    ];
+    for (index, rect) in tabs.iter().copied().enumerate() {
+        let active = BrowserTab::ALL[index] == browser.tab;
+        frame.render_widget(
+            Paragraph::new(tab_labels[index].as_str())
+                .alignment(Alignment::Center)
+                .style(
+                    Style::default()
+                        .fg(if active {
+                            palette().accent
+                        } else {
+                            palette().muted
+                        })
+                        .bg(if active {
+                            palette().raised
+                        } else {
+                            palette().panel
+                        })
+                        .add_modifier(if active {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+            rect,
+        );
+    }
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("FILTER  ", Style::default().fg(palette().muted)),
+            Span::styled(browser.query.as_str(), Style::default().fg(palette().ink)),
+            Span::styled("▌", Style::default().fg(palette().accent)),
+        ]))
+        .style(Style::default().bg(palette().selected)),
+        Rect::new(inner_x, area.y.saturating_add(6), inner_width, 1),
+    );
+
+    let result_count = browser.result_count();
+    let section_label = match browser.tab {
+        BrowserTab::Branches => "LOCAL & REMOTE",
+        BrowserTab::PullRequests => "OPEN PULL REQUESTS",
+        BrowserTab::Issues => "OPEN ISSUES",
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                section_label,
+                Style::default()
+                    .fg(palette().muted)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  {result_count} shown"),
+                Style::default().fg(palette().faint),
+            ),
+        ])),
+        Rect::new(inner_x, area.y.saturating_add(8), inner_width, 1),
+    );
+
+    let list = Rect::new(
+        inner_x,
+        area.y.saturating_add(9),
+        inner_width,
+        area.bottom()
+            .saturating_sub(1)
+            .saturating_sub(area.y.saturating_add(9)),
+    );
+    let items: Vec<ListItem<'_>> = match browser.tab {
+        BrowserTab::Branches => browser
+            .branch_indices()
+            .into_iter()
+            .filter_map(|index| browser.branches.get(index))
+            .map(|branch| {
+                let marker = if branch.current { "●" } else { " " };
+                let kind = if branch.remote { "remote" } else { "local" };
+                let detail = if branch.upstream.is_empty() {
+                    format!("{} · {}", branch.oid, branch.date)
+                } else {
+                    format!("{} → {} · {}", branch.oid, branch.upstream, branch.date)
+                };
+                browser_row(
+                    format!("{marker} {}", branch.name),
+                    format!("{kind} · {detail} · {}", branch.subject),
+                    usize::from(list.width),
+                    branch.current,
+                )
+            })
+            .collect(),
+        BrowserTab::PullRequests => match &browser.pull_requests {
+            RemoteItems::Ready(pull_requests) => browser
+                .pull_request_indices()
+                .into_iter()
+                .filter_map(|index| pull_requests.get(index))
+                .map(|pull_request| {
+                    browser_row(
+                        format!("#{}  {}", pull_request.number, pull_request.title),
+                        format!(
+                            "{} · {}{}",
+                            pull_request.branch,
+                            pull_request.author,
+                            if pull_request.draft { " · draft" } else { "" }
+                        ),
+                        usize::from(list.width),
+                        false,
+                    )
+                })
+                .collect(),
+            RemoteItems::NotLoaded => Vec::new(),
+            RemoteItems::Loading => vec![status_row("Loading pull requests…")],
+            RemoteItems::Error(error) => vec![status_row(error)],
+        },
+        BrowserTab::Issues => match &browser.issues {
+            RemoteItems::Ready(issues) => browser
+                .issue_indices()
+                .into_iter()
+                .filter_map(|index| issues.get(index))
+                .map(|issue| {
+                    let detail = if issue.labels.is_empty() {
+                        issue.author.clone()
+                    } else {
+                        format!("{} · {}", issue.author, issue.labels)
+                    };
+                    browser_row(
+                        format!("#{}  {}", issue.number, issue.title),
+                        detail,
+                        usize::from(list.width),
+                        false,
+                    )
+                })
+                .collect(),
+            RemoteItems::NotLoaded => Vec::new(),
+            RemoteItems::Loading => vec![status_row("Loading issues…")],
+            RemoteItems::Error(error) => vec![status_row(error)],
+        },
+    };
+    frame.render_stateful_widget(
+        List::new(items).highlight_style(Style::default().bg(palette().selected)),
+        list,
+        &mut browser.state,
+    );
+
+    frame.render_widget(
+        Paragraph::new("←→ / Tab switch   ↑↓ select   type to filter   Esc close")
+            .alignment(Alignment::Right)
+            .style(Style::default().fg(palette().muted)),
+        Rect::new(inner_x, area.bottom().saturating_sub(1), inner_width, 1),
+    );
+
+    RepositoryBrowserRegions {
+        overlay: area,
+        list,
+        tabs,
+    }
+}
+
+fn remote_tab_label<T>(label: &str, items: &RemoteItems<T>) -> String {
+    items.count().map_or_else(
+        || match items {
+            RemoteItems::NotLoaded => label.to_owned(),
+            RemoteItems::Loading => format!("{label} …"),
+            RemoteItems::Error(_) => format!("{label} !"),
+            RemoteItems::Ready(_) => unreachable!(),
+        },
+        |count| format!("{label} {count}"),
+    )
+}
+
+fn browser_row(label: String, detail: String, width: usize, current: bool) -> ListItem<'static> {
+    let detail = truncate_width(&detail, width / 2);
+    let detail_width = UnicodeWidthStr::width(detail.as_str());
+    let label = truncate_width(&label, width.saturating_sub(detail_width + 2));
+    let padding = width.saturating_sub(UnicodeWidthStr::width(label.as_str()) + detail_width);
+    ListItem::new(Line::from(vec![
+        Span::styled(
+            label,
+            Style::default()
+                .fg(if current {
+                    palette().accent
+                } else {
+                    palette().ink
+                })
+                .add_modifier(if current {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ),
+        Span::raw(" ".repeat(padding)),
+        Span::styled(detail, Style::default().fg(palette().faint)),
+    ]))
+}
+
+fn status_row(message: &str) -> ListItem<'_> {
+    ListItem::new(Line::styled(message, Style::default().fg(palette().faint)))
 }
 
 pub(super) fn draw_file_add_popover(
@@ -1339,6 +1591,7 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
         help_line("Home / G", "First / last"),
         help_line("r", "Refresh"),
         help_line("o", "Repository"),
+        help_line("b", "Branches / PRs / issues"),
         help_line("s", "Settings"),
         help_line("x", "Git actions"),
         help_line("g", "Git command"),

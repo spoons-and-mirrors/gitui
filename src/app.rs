@@ -2,6 +2,7 @@ mod actions;
 mod changes;
 mod file_search;
 mod fuzzy;
+mod repository_browser;
 mod repository_picker;
 mod text_input;
 
@@ -9,6 +10,7 @@ pub(crate) use actions::{ACTION_ITEMS, ActionsState, CommandStatus};
 pub(crate) use changes::PreviewRenderCache;
 pub use changes::{ChangesState, LeftPane};
 pub(crate) use file_search::FileSearch;
+pub(crate) use repository_browser::{BrowserTab, RemoteItems, RepositoryBrowser};
 pub use repository_picker::{PickerAction, PickerEntry, RepositoryPicker};
 
 use std::{
@@ -48,6 +50,7 @@ pub enum Mode {
     Picker,
     Settings,
     Help,
+    RepositoryBrowser,
     ActionMenu,
     Command,
     Editor,
@@ -119,6 +122,9 @@ pub struct Regions {
     pub settings_overlay: Option<Rect>,
     pub action_menu: Option<Rect>,
     pub action_list: Option<Rect>,
+    pub browser_overlay: Option<Rect>,
+    pub browser_list: Option<Rect>,
+    pub browser_tabs: [Option<Rect>; 3],
     pub command_overlay: Option<Rect>,
     pub command_output: Option<Rect>,
     pub editor_overlay: Option<Rect>,
@@ -155,6 +161,7 @@ pub struct App {
     pub picker: RepositoryPicker,
     pub(crate) file_search: FileSearch,
     pub(crate) actions: ActionsState,
+    pub(crate) repository_browser: RepositoryBrowser,
     pub settings: Settings,
     pub settings_selection: usize,
     pub notice: Option<String>,
@@ -272,6 +279,7 @@ impl App {
             picker: RepositoryPicker::new(start),
             file_search,
             actions: ActionsState::default(),
+            repository_browser: RepositoryBrowser::default(),
             settings,
             settings_selection: 0,
             notice: None,
@@ -345,6 +353,7 @@ impl App {
             Mode::FileSearch => self.handle_file_search(key),
             Mode::Picker => self.handle_picker(key),
             Mode::Settings => self.handle_settings(key),
+            Mode::RepositoryBrowser => self.handle_repository_browser(key),
             Mode::ActionMenu => self.handle_action_menu(key),
             Mode::Command => self.handle_command(key),
             Mode::Editor => self.handle_editor(key),
@@ -384,6 +393,7 @@ impl App {
                     dialog.error = None;
                 }
             }
+            Mode::RepositoryBrowser => self.repository_browser.paste(text),
             _ => {}
         }
     }
@@ -468,6 +478,10 @@ impl App {
 
         if self.mode == Mode::ActionMenu {
             self.handle_action_mouse(mouse);
+            return;
+        }
+        if self.mode == Mode::RepositoryBrowser {
+            self.handle_repository_browser_mouse(mouse);
             return;
         }
         if self.mode == Mode::Command {
@@ -597,6 +611,7 @@ impl App {
             self.regions.picker_overlay,
             self.regions.settings_overlay,
             self.regions.action_menu,
+            self.regions.browser_overlay,
             self.regions.diff,
             self.regions.worktree,
             self.regions.graph_table,
@@ -622,6 +637,7 @@ impl App {
             Mode::Picker => self.handle_picker_mouse(mouse),
             Mode::FileSearch => self.handle_file_search_mouse(mouse),
             Mode::Settings => self.handle_settings_mouse(mouse),
+            Mode::RepositoryBrowser => self.handle_repository_browser_mouse(mouse),
             Mode::Help => self.mode = Mode::Normal,
             Mode::Editor => {}
             Mode::Files => self.handle_file_dialog_click(point),
@@ -802,6 +818,43 @@ impl App {
         match mouse.kind {
             MouseEventKind::ScrollDown => self.actions.scroll_by(3),
             MouseEventKind::ScrollUp => self.actions.scroll_by(-3),
+            _ => {}
+        }
+    }
+
+    fn handle_repository_browser_mouse(&mut self, mouse: MouseEvent) {
+        let point = Position::new(mouse.column, mouse.row);
+        match mouse.kind {
+            MouseEventKind::ScrollDown => self.repository_browser.move_selection(1),
+            MouseEventKind::ScrollUp => self.repository_browser.move_selection(-1),
+            MouseEventKind::Down(MouseButton::Left) => {
+                if self
+                    .regions
+                    .browser_overlay
+                    .is_some_and(|rect| !rect.contains(point))
+                {
+                    self.mode = Mode::Normal;
+                    return;
+                }
+                if let Some(tab) = self
+                    .regions
+                    .browser_tabs
+                    .iter()
+                    .position(|rect| rect.is_some_and(|rect| rect.contains(point)))
+                {
+                    self.repository_browser.set_tab(BrowserTab::ALL[tab]);
+                    return;
+                }
+                let Some(list) = self
+                    .regions
+                    .browser_list
+                    .filter(|rect| rect.contains(point))
+                else {
+                    return;
+                };
+                let index = self.repository_browser.state.offset() + usize::from(point.y - list.y);
+                self.repository_browser.select(index);
+            }
             _ => {}
         }
     }
@@ -1102,6 +1155,7 @@ impl App {
 
     pub fn poll_worker(&mut self) -> bool {
         let mut changed = self.mode == Mode::Picker && self.picker.poll_index();
+        changed |= self.repository_browser.poll();
         changed |= self.commit_input.poll_blink(self.mode == Mode::Commit);
         if let Some(dialog) = &mut self.file_dialog {
             changed |= dialog.input.poll_blink(
@@ -1321,6 +1375,7 @@ impl App {
             KeyCode::Char('r') => self.reload(),
             KeyCode::Char('o') => self.open_picker(),
             KeyCode::Char('s') => self.mode = Mode::Settings,
+            KeyCode::Char('b') => self.open_repository_browser(),
             KeyCode::Char('x') => self.open_actions(),
             KeyCode::Char('g') => self.open_git_command(),
             KeyCode::Char('?') => self.mode = Mode::Help,
@@ -2155,6 +2210,44 @@ impl App {
         }
     }
 
+    fn open_repository_browser(&mut self) {
+        let Some(repo) = self.git_repository() else {
+            self.require_git_repository();
+            return;
+        };
+        let root = repo.root.clone();
+        let branches = repo.branches.clone();
+        self.repository_browser.open(&root, &branches);
+        self.mode = Mode::RepositoryBrowser;
+    }
+
+    fn handle_repository_browser(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Tab | KeyCode::Right => self.repository_browser.move_tab(1),
+            KeyCode::BackTab | KeyCode::Left => self.repository_browser.move_tab(-1),
+            KeyCode::Down => self.repository_browser.move_selection(1),
+            KeyCode::Up => self.repository_browser.move_selection(-1),
+            KeyCode::Home => self.repository_browser.state.select(Some(0)),
+            KeyCode::End => {
+                let count = self.repository_browser.result_count();
+                self.repository_browser.state.select(count.checked_sub(1));
+            }
+            KeyCode::Backspace => self.repository_browser.backspace(),
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.repository_browser.clear();
+            }
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.repository_browser.push(character);
+            }
+            _ => {}
+        }
+    }
+
     fn open_git_command(&mut self) {
         if self.require_git_repository() {
             self.actions.begin_input();
@@ -2664,7 +2757,7 @@ mod tests {
         let mut app = App::new(root.to_path_buf());
         assert!(app.repository().unwrap().is_local());
 
-        for key in ['x', 'g', 'c', 'a', 'u'] {
+        for key in ['x', 'g', 'c', 'a', 'u', 'b'] {
             app.mode = Mode::Normal;
             app.handle_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
             assert_eq!(app.mode, Mode::Normal, "{key}");

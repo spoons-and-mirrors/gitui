@@ -6,13 +6,14 @@
 - A resizable current-branch history shelf with HEAD, branch, remote, and tag decorations; selecting a commit shows its patch.
 - A repository Actions menu for committing, pushing, fetching, pulling with rebase, and running non-interactive Git commands with captured output.
 - An all-refs commit graph showing branches, remotes, tags, authors, dates, and hashes.
+- A filterable repository browser for local and remote branches plus open GitHub pull requests and issues.
 - Source-aware diffs with line numbers, syntax color, and tinted additions, deletions, and hunk headers.
 - Nonblocking worktree refresh when files, the index, branches, or HEAD change outside hunkle.
 - Automatic OpenCode theme matching, with Catppuccin Macchiato as the fallback.
 
 ## Run
 
-A recent Rust toolchain is required. Git is required for repository status, history, staging, and repository actions.
+A recent Rust toolchain is required. Git is required for repository status, history, staging, and repository actions. GitHub CLI (`gh`) is optional and supplies pull requests and issues in the repository browser when installed and authenticated.
 
 ```sh
 cargo run -p hunkle
@@ -47,6 +48,7 @@ hunkle opens exactly the current or requested directory. When that directory is 
 | `Ctrl+Backspace`, `Alt+Backspace` | Delete the previous commit-message word |
 | `r` | Refresh |
 | `o` | Choose another repository |
+| `b` | Browse branches, pull requests, and issues |
 | `s` | Open settings |
 | `x` | Open repository Actions |
 | `g` | Open Git command |

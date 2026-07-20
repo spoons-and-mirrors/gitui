@@ -1140,6 +1140,7 @@ mod tests {
             root: PathBuf::new(),
             kind: RepositoryKind::Git,
             branch: "main".to_owned(),
+            branches: Vec::new(),
             changes: vec![Change {
                 path: "src/main.rs".to_owned(),
                 original_path: None,

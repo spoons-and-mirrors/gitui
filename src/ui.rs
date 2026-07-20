@@ -101,6 +101,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             app.regions.fetch_interval_up = Some(regions.fetch_interval_up);
             app.regions.editor_setting = Some(regions.editor);
         }
+        Mode::RepositoryBrowser => {
+            dim(frame);
+            let regions = overlays::draw_repository_browser(frame, &mut app.repository_browser);
+            app.regions.browser_overlay = Some(regions.overlay);
+            app.regions.browser_list = Some(regions.list);
+            app.regions.browser_tabs = regions.tabs.map(Some);
+        }
         Mode::ActionMenu => {
             let anchor = app.regions.actions.unwrap_or(Rect::new(
                 content.x.saturating_add(1),

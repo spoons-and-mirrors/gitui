@@ -714,6 +714,26 @@ fn renders_every_primary_surface() {
     click(&mut app, path.x + 2, path.y + 1);
     assert!(app.picker.editing_path);
 
+    app.mode = Mode::Normal;
+    app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::RepositoryBrowser);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let browser_screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(browser_screen.contains("PULL REQUESTS"));
+    assert!(browser_screen.contains("LOCAL & REMOTE"));
+    assert!(browser_screen.contains("main"));
+    assert!(app.regions.browser_list.is_some());
+    app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+    assert_eq!(app.repository_browser.query, "m");
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::Normal);
+
     app.mode = Mode::Settings;
     app.settings = Settings::default();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();

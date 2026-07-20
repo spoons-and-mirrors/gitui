@@ -32,6 +32,18 @@ pub struct RepositoryData {
     pub change_counts: (usize, usize),
     pub graph_width: usize,
     pub graph_truncated: bool,
+    pub branches: Vec<Branch>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Branch {
+    pub name: String,
+    pub upstream: String,
+    pub oid: String,
+    pub date: String,
+    pub subject: String,
+    pub remote: bool,
+    pub current: bool,
 }
 
 impl RepositoryData {
@@ -117,7 +129,7 @@ pub fn load_or_local(path: &Path) -> Result<RepositoryData> {
 }
 
 fn load_git_root(root: PathBuf) -> Result<RepositoryData> {
-    let (branch, changes, files, history, commits) = thread::scope(|scope| {
+    let (branch, changes, files, history, commits, branches) = thread::scope(|scope| {
         let branch = scope.spawn(|| branch_name(&root));
         let changes = scope.spawn(|| -> Result<Vec<Change>> {
             let mut changes = status(&root)?;
@@ -131,6 +143,7 @@ fn load_git_root(root: PathBuf) -> Result<RepositoryData> {
             layout_graph(&mut commits);
             Ok((commits, truncated))
         });
+        let branches = scope.spawn(|| repository_branches(&root));
 
         Ok::<_, anyhow::Error>((
             branch
@@ -148,6 +161,9 @@ fn load_git_root(root: PathBuf) -> Result<RepositoryData> {
             commits
                 .join()
                 .map_err(|_| anyhow!("graph worker panicked"))??,
+            branches
+                .join()
+                .map_err(|_| anyhow!("branch list worker panicked"))??,
         ))
     })?;
 
@@ -172,6 +188,7 @@ fn load_git_root(root: PathBuf) -> Result<RepositoryData> {
         change_counts,
         graph_width,
         graph_truncated,
+        branches,
     })
 }
 
@@ -196,7 +213,60 @@ fn local_workspace(path: &Path) -> Result<RepositoryData> {
         change_counts: (0, 0),
         graph_width: 0,
         graph_truncated: false,
+        branches: Vec::new(),
     })
+}
+
+fn repository_branches(root: &Path) -> Result<Vec<Branch>> {
+    let output = run(
+        root,
+        &[
+            "for-each-ref",
+            "--format=%(HEAD)%1f%(refname)%1f%(refname:short)%1f%(objectname:short)%1f%(upstream:short)%1f%(committerdate:relative)%1f%(subject)%1e",
+            "refs/heads",
+            "refs/remotes",
+        ],
+    )?;
+    if !output.status.success() {
+        bail!("{}", clean_stderr(&output));
+    }
+    let mut branches = output
+        .stdout
+        .split(|byte| *byte == 0x1e)
+        .filter_map(|record| {
+            let record = trim_ascii(record);
+            if record.is_empty() {
+                return None;
+            }
+            let fields: Vec<_> = record.split(|byte| *byte == 0x1f).collect();
+            if fields.len() != 7 {
+                return None;
+            }
+            let text = |field: &[u8]| String::from_utf8_lossy(field).into_owned();
+            let refname = text(fields[1]);
+            let name = text(fields[2]);
+            if refname.starts_with("refs/remotes/") && name.ends_with("/HEAD") {
+                return None;
+            }
+            Some(Branch {
+                name,
+                upstream: text(fields[4]),
+                oid: text(fields[3]),
+                date: text(fields[5]),
+                subject: text(fields[6]),
+                remote: refname.starts_with("refs/remotes/"),
+                current: fields[0] == b"*",
+            })
+        })
+        .collect::<Vec<_>>();
+    branches.sort_by(|left, right| {
+        right
+            .current
+            .cmp(&left.current)
+            .then_with(|| left.remote.cmp(&right.remote))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    Ok(branches)
 }
 
 fn git_repository_entries(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
@@ -1397,6 +1467,13 @@ mod tests {
 
         let repo = load(root).unwrap();
         assert_eq!(repo.branch, "main");
+        assert_eq!(
+            repo.branches
+                .iter()
+                .map(|branch| (branch.name.as_str(), branch.current))
+                .collect::<Vec<_>>(),
+            [("main", true), ("feature", false)]
+        );
         assert_eq!(repo.commits.len(), 4);
         assert_eq!(repo.history.len(), 4);
         assert_eq!(repo.commits[0].date.len(), 16);
