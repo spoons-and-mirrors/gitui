@@ -709,6 +709,10 @@ fn renders_every_primary_surface() {
         .collect();
     assert!(commit_diff_screen.contains("DIFF"));
     assert!(commit_diff_screen.contains("initial commit"));
+    assert!(
+        commit_diff_screen.contains("diff --git a/fixtures/file-00"),
+        "the first file heading should be visible"
+    );
     assert!(app.regions.graph_table.is_none());
 
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));

@@ -82,6 +82,7 @@ pub(crate) struct PreviewRenderCache {
     pub(crate) generation: u64,
     pub(crate) path: String,
     pub(crate) is_diff: bool,
+    pub(crate) show_initial_diff_header: bool,
     pub(crate) width: usize,
     pub(crate) lines: Vec<Line<'static>>,
     pub(crate) fully_styled: bool,

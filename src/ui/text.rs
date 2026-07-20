@@ -41,15 +41,31 @@ pub(super) fn styled_source_window(
         .collect()
 }
 
-pub(super) fn styled_diff(diff: &str, path: &str, width: usize) -> Vec<Line<'static>> {
-    styled_diff_window(diff, path, width, 0, usize::MAX)
+pub(super) fn styled_diff(
+    diff: &str,
+    path: &str,
+    width: usize,
+    show_initial_header: bool,
+) -> Vec<Line<'static>> {
+    styled_diff_window(diff, path, width, 0, usize::MAX, show_initial_header)
 }
 
-pub(super) fn diff_display_line_count(diff: &str) -> usize {
+pub(super) fn diff_display_line_count(diff: &str, show_initial_header: bool) -> usize {
     let has_hunks = diff.lines().any(|line| line.starts_with("@@"));
     let mut in_hunk = false;
+    let mut seen_header = false;
     let mut count = 0;
     for line in diff.lines() {
+        let file_header = line.starts_with("diff --git");
+        if file_header {
+            in_hunk = false;
+            if show_initial_header {
+                count += usize::from(seen_header);
+                count += 1;
+                seen_header = true;
+                continue;
+            }
+        }
         let hunk_header = line.starts_with("@@");
         if has_hunks && !in_hunk && !hunk_header {
             continue;
@@ -67,15 +83,29 @@ pub(super) fn wrapped_preview_line_starts(
     content: &str,
     is_diff: bool,
     width: usize,
+    show_initial_diff_header: bool,
 ) -> Vec<usize> {
     let width = width.max(1);
     let numbered = width >= 72;
     let has_hunks = is_diff && content.lines().any(|line| line.starts_with("@@"));
     let mut in_hunk = false;
+    let mut seen_header = false;
     let mut starts = vec![0_usize];
     for line in content.lines() {
+        let file_header = is_diff && line.starts_with("diff --git");
+        if file_header {
+            in_hunk = false;
+            if show_initial_diff_header {
+                if seen_header {
+                    starts.push(starts.last().copied().unwrap_or(0).saturating_add(1));
+                }
+                seen_header = true;
+            } else if has_hunks {
+                continue;
+            }
+        }
         let hunk_header = line.starts_with("@@");
-        if has_hunks && !in_hunk && !hunk_header {
+        if has_hunks && !in_hunk && !hunk_header && !file_header {
             continue;
         }
         if hunk_header {
@@ -178,6 +208,7 @@ pub(super) fn styled_diff_window(
     width: usize,
     start: usize,
     count: usize,
+    show_initial_header: bool,
 ) -> Vec<Line<'static>> {
     let numbered = width >= 72;
     let mut old_line = None;
@@ -187,10 +218,28 @@ pub(super) fn styled_diff_window(
     let mut lines = Vec::new();
     let has_hunks = diff.lines().any(|line| line.starts_with("@@"));
     let mut in_hunk = false;
+    let mut seen_header = false;
 
     for line in diff.lines() {
+        let file_header = line.starts_with("diff --git");
+        if file_header {
+            in_hunk = false;
+            old_line = None;
+            new_line = None;
+            if show_initial_header {
+                if seen_header {
+                    if display_index >= start && display_index < end {
+                        lines.push(finish_line(Vec::new(), width, palette().panel));
+                    }
+                    display_index += 1;
+                }
+                seen_header = true;
+            } else if has_hunks {
+                continue;
+            }
+        }
         let hunk_header = line.starts_with("@@");
-        if has_hunks && !in_hunk && !hunk_header {
+        if has_hunks && !in_hunk && !hunk_header && !file_header {
             continue;
         }
         if hunk_header {
@@ -411,6 +460,7 @@ mod tests {
             ),
             "src/main.rs",
             100,
+            false,
         );
 
         assert_eq!(lines.len(), 3);
@@ -424,6 +474,74 @@ mod tests {
                 .spans
                 .iter()
                 .any(|span| span.content == "let" && span.style.fg == Some(palette().purple))
+        );
+    }
+
+    #[test]
+    fn keeps_the_initial_file_header_for_commit_diffs() {
+        let diff = concat!(
+            "diff --git a/src/main.rs b/src/main.rs\n",
+            "index 1234567..abcdef0 100644\n",
+            "--- a/src/main.rs\n",
+            "+++ b/src/main.rs\n",
+            "@@ -1 +1 @@\n",
+            "-let old_value = 1;\n",
+            "+let new_value = 2;",
+        );
+        let lines = styled_diff(diff, "", 100, true);
+
+        assert_eq!(lines.len(), 4);
+        assert!(lines[0].spans[0].content.starts_with("diff --git"));
+        assert_eq!(diff_display_line_count(diff, true), lines.len());
+        assert_eq!(
+            wrapped_preview_line_starts(diff, true, 100, true).len(),
+            lines.len() + 1
+        );
+    }
+
+    #[test]
+    fn separates_commit_files_without_git_metadata() {
+        let diff = concat!(
+            "diff --git a/first.rs b/first.rs\n",
+            "index 1111111..2222222 100644\n",
+            "--- a/first.rs\n",
+            "+++ b/first.rs\n",
+            "@@ -1 +1 @@\n",
+            " context\n",
+            "diff --git a/second.rs b/second.rs\n",
+            "index 3333333..4444444 100644\n",
+            "--- a/second.rs\n",
+            "+++ b/second.rs\n",
+            "\n",
+            "@@ -2 +2 @@\n",
+            "+change",
+        );
+        let lines = styled_diff(diff, "", 100, true);
+        let text = |index: usize| {
+            lines[index]
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+
+        assert_eq!(lines.len(), 7);
+        assert_eq!(text(0), "diff --git a/first.rs b/first.rs");
+        assert!(lines[3].spans.is_empty());
+        assert_eq!(text(4), "diff --git a/second.rs b/second.rs");
+        assert!(text(5).starts_with("@@"));
+        assert!(lines.iter().all(|line| {
+            let text = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            !text.starts_with("index ") && !text.starts_with("--- ") && !text.starts_with("+++ ")
+        }));
+        assert_eq!(diff_display_line_count(diff, true), lines.len());
+        assert_eq!(
+            wrapped_preview_line_starts(diff, true, 100, true).len(),
+            lines.len() + 1
         );
     }
 
@@ -442,8 +560,8 @@ mod tests {
             "+emoji 👩‍💻 line",
         );
         let width = 10;
-        let lines = styled_diff(diff, "src/main.rs", width);
-        let starts = wrapped_preview_line_starts(diff, true, width);
+        let lines = styled_diff(diff, "src/main.rs", width, false);
+        let starts = wrapped_preview_line_starts(diff, true, width, false);
 
         assert_eq!(starts.len(), lines.len() + 1);
         for (index, line) in lines.iter().enumerate() {

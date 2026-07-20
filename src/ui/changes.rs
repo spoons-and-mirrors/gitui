@@ -342,6 +342,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         },
         |_| "commit",
     );
+    let inspecting_commit = selected_commit.is_some();
     let wrap_label = if app.changes.diff_wrap {
         "  w:on"
     } else {
@@ -386,8 +387,8 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         diff_header,
     );
     let show_hunk_actions =
-        selected_commit.is_none() && selected_change.is_some_and(|change| !change.staged);
-    let mut preview = prepare_preview_lines(app, diff_body, &syntax_path, true);
+        !inspecting_commit && selected_change.is_some_and(|change| !change.staged);
+    let mut preview = prepare_preview_lines(app, diff_body, &syntax_path, true, inspecting_commit);
     let (hunk_rows, rendered_height) = if show_hunk_actions {
         cached_rendered_hunk_rows(app, preview.wrapped)
     } else {
@@ -401,7 +402,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         let old_scroll = app.changes.diff_scroll;
         app.changes.diff_scroll = scroll_to_row(*row, rendered_height);
         if app.changes.diff_scroll != old_scroll {
-            preview = prepare_preview_lines(app, diff_body, &syntax_path, true);
+            preview = prepare_preview_lines(app, diff_body, &syntax_path, true, inspecting_commit);
         }
     }
     let visible_hunks = visible_hunks(
@@ -739,7 +740,7 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
         .selected_explorer_file_path()
         .unwrap_or_default()
         .to_owned();
-    let preview = prepare_preview_lines(app, preview_body, &path, false);
+    let preview = prepare_preview_lines(app, preview_body, &path, false, false);
     render_scrollable_content(frame, app, columns[1], preview_body, preview);
 }
 
@@ -749,7 +750,13 @@ struct PreparedPreview {
     wrapped: bool,
 }
 
-fn prepare_preview_lines(app: &mut App, body: Rect, path: &str, is_diff: bool) -> PreparedPreview {
+fn prepare_preview_lines(
+    app: &mut App,
+    body: Rect,
+    path: &str,
+    is_diff: bool,
+    show_initial_diff_header: bool,
+) -> PreparedPreview {
     const MAX_CACHED_PREVIEW_LINES: usize = 30_000;
 
     let width = usize::from(body.width);
@@ -762,18 +769,19 @@ fn prepare_preview_lines(app: &mut App, body: Rect, path: &str, is_diff: bool) -
             cache.generation == generation
                 && cache.path == path
                 && cache.is_diff == is_diff
+                && cache.show_initial_diff_header == show_initial_diff_header
                 && cache.width == width
         });
     if !cache_matches {
         let display_count = if is_diff {
-            diff_display_line_count(&app.changes.diff)
+            diff_display_line_count(&app.changes.diff, show_initial_diff_header)
         } else {
             app.changes.diff.lines().count()
         };
         let fully_styled = display_count <= MAX_CACHED_PREVIEW_LINES;
         let lines = if fully_styled {
             if is_diff {
-                styled_diff(&app.changes.diff, path, width)
+                styled_diff(&app.changes.diff, path, width, show_initial_diff_header)
             } else {
                 styled_source(&app.changes.diff, path, width)
             }
@@ -784,6 +792,7 @@ fn prepare_preview_lines(app: &mut App, body: Rect, path: &str, is_diff: bool) -
             generation,
             path: path.to_owned(),
             is_diff,
+            show_initial_diff_header,
             width,
             lines,
             fully_styled,
@@ -803,7 +812,12 @@ fn prepare_preview_lines(app: &mut App, body: Rect, path: &str, is_diff: bool) -
             .as_ref()
             .is_some_and(|cache| cache.wrapped_line_starts.is_none())
         {
-            let starts = wrapped_preview_line_starts(&app.changes.diff, is_diff, width);
+            let starts = wrapped_preview_line_starts(
+                &app.changes.diff,
+                is_diff,
+                width,
+                show_initial_diff_header,
+            );
             app.changes
                 .preview_render_cache
                 .as_mut()
@@ -904,7 +918,14 @@ fn preview_line_window(
         let window_start = start.saturating_sub(margin);
         let window_count = count.saturating_add(margin.saturating_mul(2));
         let lines = if is_diff {
-            styled_diff_window(&app.changes.diff, path, width, window_start, window_count)
+            styled_diff_window(
+                &app.changes.diff,
+                path,
+                width,
+                window_start,
+                window_count,
+                cache.show_initial_diff_header,
+            )
         } else {
             styled_source_window(&app.changes.diff, path, width, window_start, window_count)
         };
