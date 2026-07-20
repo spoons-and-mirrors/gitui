@@ -13,12 +13,16 @@ use std::{io, path::PathBuf, process::Command, time::Duration};
 use anyhow::Result;
 use app::{App, EditorRequest};
 use crossterm::{
+    cursor::MoveTo,
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
         Event, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{
+        Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
+        enable_raw_mode,
+    },
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
@@ -129,18 +133,18 @@ fn run_editor(request: EditorRequest) -> Result<(), String> {
 
 fn start_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     enable_raw_mode()?;
-    let result = (|| {
+    let result = (|| -> Result<_> {
         let mut stdout = io::stdout();
         execute!(
             stdout,
             EnterAlternateScreen,
             EnableMouseCapture,
             EnableBracketedPaste,
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
+            Clear(ClearType::All),
+            MoveTo(0, 0)
         )?;
-        let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
-        terminal.clear()?;
-        Ok(terminal)
+        Ok(Terminal::new(CrosstermBackend::new(stdout))?)
     })();
     if result.is_err() {
         restore_terminal();

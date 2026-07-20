@@ -154,6 +154,9 @@ impl Explorer {
 
     pub(super) fn activate_selected(&mut self, open_repositories: bool) -> PickerCommand {
         let Some(entry) = self.selected().cloned() else {
+            if open_repositories && self.loading {
+                return PickerCommand::Open(self.directory.clone());
+            }
             return PickerCommand::None;
         };
         if open_repositories && entry.action == PickerAction::Navigate && entry.is_repo {
@@ -634,6 +637,20 @@ mod tests {
         assert!(!paths.contains(&&root.join("target")));
         assert!(paths.contains(&&root.join("archive.git")));
         assert!(!paths.contains(&&root.join("archive.git/objects")));
+    }
+
+    #[test]
+    fn enter_opens_the_current_directory_while_its_rows_load() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("workspace");
+        fs::create_dir(&directory).unwrap();
+        let mut picker = Explorer::new(temp.path().to_path_buf());
+        picker.navigate(directory.clone());
+
+        let PickerCommand::Open(opened) = picker.activate_selected(true) else {
+            panic!("Enter should open the directory being browsed");
+        };
+        assert_eq!(opened, directory);
     }
 
     #[test]
