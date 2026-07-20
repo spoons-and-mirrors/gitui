@@ -73,9 +73,10 @@ pub(super) fn draw_graph(
     let widths = if compact {
         vec![
             Constraint::Length(graph_width),
-            Constraint::Min(16),
+            Constraint::Min(8),
             Constraint::Length(11),
-            Constraint::Length(14),
+            Constraint::Length(12),
+            Constraint::Length(7),
         ]
     } else {
         vec![
@@ -107,7 +108,7 @@ pub(super) fn draw_graph(
         .take(viewport)
         .map(|commit| graph_row(commit, summaries.get(&commit.oid), compact));
     let headers = if compact {
-        Row::new(["GRAPH", "DESCRIPTION", "CHANGES", "AUTHOR"])
+        Row::new(["GRAPH", "DESCRIPTION", "CHANGES", "AUTHOR", "COMMIT"])
     } else {
         Row::new([
             "GRAPH",
@@ -294,6 +295,7 @@ fn graph_row(
             Cell::from(Line::from(description)),
             changes,
             Cell::from(commit.author.clone()).style(Style::default().fg(palette().muted)),
+            Cell::from(short_oid).style(Style::default().fg(palette().muted)),
         ])
     } else {
         Row::new([
