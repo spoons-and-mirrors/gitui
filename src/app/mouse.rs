@@ -1,0 +1,812 @@
+use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::{Position, Rect};
+
+use crate::{git::RefreshScope, selection::SelectionOutcome};
+
+use super::{
+    ACTION_ITEMS, App, GraphHitTarget, HitTarget, LeftPane, Mode, RepositoryBrowserEffect,
+    RepositoryBrowserHitTarget, View, scroll_table,
+};
+
+impl App {
+    pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        let point = Position::new(mouse.column, mouse.row);
+        if self.dragging_splitter {
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left) => self.resize_worktree(mouse.column),
+                MouseEventKind::Up(MouseButton::Left) => {
+                    self.resize_worktree(mouse.column);
+                    self.dragging_splitter = false;
+                    self.persist_settings();
+                }
+                _ => {}
+            }
+            return;
+        }
+        if self.dragging_history {
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left) => self.resize_history(mouse.row),
+                MouseEventKind::Up(MouseButton::Left) => {
+                    self.resize_history(mouse.row);
+                    self.dragging_history = false;
+                    self.persist_settings();
+                }
+                _ => {}
+            }
+            return;
+        }
+        if self.dragging_diff_scrollbar {
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left) => self.scroll_diff_to(mouse.row),
+                MouseEventKind::Up(MouseButton::Left) => {
+                    self.scroll_diff_to(mouse.row);
+                    self.dragging_diff_scrollbar = false;
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        if self.file_drag.is_some() {
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left) => self.update_file_drag(point),
+                MouseEventKind::Up(MouseButton::Left) => self.finish_file_drag(point),
+                _ => {}
+            }
+            return;
+        }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && !mouse.modifiers.contains(KeyModifiers::SHIFT)
+            && self.begin_file_drag(point)
+        {
+            return;
+        }
+
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.selection.clear();
+                if self.begin_mouse_control(point) {
+                    return;
+                }
+                let region = self.selection_region(point);
+                self.selection.begin(point, region);
+                return;
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.selection.is_active() => {
+                self.selection.update(point);
+                return;
+            }
+            MouseEventKind::Up(MouseButton::Left) if self.selection.is_active() => {
+                match self.selection.finish(point) {
+                    SelectionOutcome::Click => self.handle_left_click(point),
+                    SelectionOutcome::Selected(Some(text)) => self.copy_request = Some(text),
+                    SelectionOutcome::Selected(None) => {}
+                }
+                return;
+            }
+            _ => {}
+        }
+
+        if self.mode == Mode::ActionMenu {
+            self.handle_action_mouse(mouse);
+            return;
+        }
+        if self.mode == Mode::AuthorFilter {
+            self.handle_author_filter_mouse(mouse);
+            return;
+        }
+        if self.mode == Mode::RepositoryBrowser {
+            self.handle_repository_browser_mouse(mouse);
+            return;
+        }
+        if self.mode == Mode::Command {
+            self.handle_command_mouse(mouse);
+            return;
+        }
+        if self.mode == Mode::Editor {
+            return;
+        }
+        if self.mode == Mode::Files {
+            return;
+        }
+        if self.mode == Mode::Explorer {
+            self.handle_explorer_mouse(mouse);
+            return;
+        }
+        if self.mode == Mode::FileSearch {
+            self.handle_file_search_mouse(mouse);
+            return;
+        }
+        if self.mode == Mode::Settings {
+            self.handle_settings_mouse(mouse);
+            return;
+        }
+        if self.mode == Mode::Help {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                self.mode = Mode::Normal;
+            }
+            return;
+        }
+
+        if mouse.kind == MouseEventKind::Moved {
+            if self.select_graph_row(point) {
+                return;
+            }
+            if self.changes.hunk_selection.is_some() {
+                if let Some(hunk) = self
+                    .regions
+                    .diff_hunks
+                    .iter()
+                    .find(|hunk| hunk.rect.contains(point))
+                {
+                    self.changes.select_hunk(hunk.index);
+                }
+                return;
+            }
+        }
+
+        if self.mode == Mode::Commit
+            && mouse.kind == MouseEventKind::Down(MouseButton::Right)
+            && !self.regions.commit.is_some_and(|rect| rect.contains(point))
+        {
+            self.mode = Mode::Normal;
+            self.flush_commit_draft();
+        }
+
+        match mouse.kind {
+            MouseEventKind::ScrollDown => self.scroll_at(point, 1),
+            MouseEventKind::ScrollUp => self.scroll_at(point, -1),
+            MouseEventKind::Down(MouseButton::Right) if self.select_worktree_row(point) => {
+                self.toggle_stage();
+            }
+            _ => {}
+        }
+    }
+
+    fn begin_mouse_control(&mut self, point: Position) -> bool {
+        if !matches!(self.mode, Mode::Normal | Mode::Commit) {
+            return false;
+        }
+        if self
+            .regions
+            .splitter
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.mode = Mode::Normal;
+            self.dragging_splitter = true;
+            self.resize_worktree(point.x);
+            return true;
+        }
+        if self
+            .regions
+            .history_splitter
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.mode = Mode::Normal;
+            self.dragging_history = true;
+            self.changes.history_focused = true;
+            self.resize_history(point.y);
+            return true;
+        }
+        if self
+            .regions
+            .diff_scrollbar
+            .is_some_and(|rect| rect.contains(point))
+            && self.regions.diff_scroll_max > 0
+        {
+            self.mode = Mode::Normal;
+            self.dragging_diff_scrollbar = true;
+            self.diff_scroll_drag_offset = self
+                .regions
+                .diff_scroll_thumb
+                .filter(|thumb| thumb.contains(point))
+                .map_or_else(
+                    || {
+                        self.regions
+                            .diff_scroll_thumb
+                            .map_or(0, |thumb| thumb.height / 2)
+                    },
+                    |thumb| point.y.saturating_sub(thumb.y),
+                );
+            self.scroll_diff_to(point.y);
+            return true;
+        }
+        false
+    }
+
+    fn selection_region(&self, point: Position) -> Rect {
+        [
+            self.regions.command_overlay,
+            self.regions.editor_overlay,
+            self.regions.file_search_overlay,
+            self.regions.file_dialog_overlay,
+            self.regions.workspace_explorer_overlay,
+            self.regions.settings_overlay,
+            self.regions.action_menu,
+            self.regions
+                .hit_target_rect(HitTarget::Graph(GraphHitTarget::FilterOverlay)),
+            self.regions.hit_target_rect(HitTarget::RepositoryBrowser(
+                RepositoryBrowserHitTarget::Overlay,
+            )),
+            self.regions.diff,
+            self.regions.worktree,
+            self.regions.graph_table,
+        ]
+        .into_iter()
+        .flatten()
+        .find(|region| region.contains(point))
+        .or(self.regions.screen)
+        .or_else(|| self.selection.screen_area())
+        .unwrap_or(Rect::new(point.x, point.y, 1, 1))
+    }
+
+    pub(super) fn handle_left_click(&mut self, point: Position) {
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: point.x,
+            row: point.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        match self.mode {
+            Mode::ActionMenu => self.handle_action_mouse(mouse),
+            Mode::Command => self.handle_command_mouse(mouse),
+            Mode::Explorer => self.handle_explorer_mouse(mouse),
+            Mode::FileSearch => self.handle_file_search_mouse(mouse),
+            Mode::Settings => self.handle_settings_mouse(mouse),
+            Mode::RepositoryBrowser => self.handle_repository_browser_mouse(mouse),
+            Mode::AuthorFilter => self.handle_author_filter_mouse(mouse),
+            Mode::Help => self.mode = Mode::Normal,
+            Mode::Editor => {}
+            Mode::Files => self.handle_file_dialog_click(point),
+            Mode::Normal | Mode::Commit => self.handle_primary_left_click(point),
+        }
+    }
+
+    pub(super) fn handle_primary_left_click(&mut self, point: Position) {
+        if self.mode == Mode::Commit
+            && !self.regions.commit.is_some_and(|rect| rect.contains(point))
+        {
+            self.mode = Mode::Normal;
+            self.flush_commit_draft();
+        }
+        if self.regions.hit_target_at(point) == Some(HitTarget::Graph(GraphHitTarget::AuthorHeader))
+        {
+            self.open_author_filter();
+            return;
+        }
+        if let Some(hunk) = self
+            .regions
+            .diff_hunks
+            .iter()
+            .find(|hunk| hunk.action.is_some_and(|rect| rect.contains(point)))
+            .copied()
+        {
+            self.stage_hunk(hunk.index, false);
+            return;
+        }
+        if self
+            .regions
+            .files_add
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.open_add_dialog();
+            return;
+        }
+        if self
+            .regions
+            .actions
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.open_actions();
+            return;
+        }
+        if self
+            .regions
+            .worktree_tab
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.set_left_pane(LeftPane::Worktree);
+            self.show_graph_if_diff_empty();
+            return;
+        }
+        if self
+            .regions
+            .files_tab
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.set_left_pane(LeftPane::Files);
+            self.show_graph_if_diff_empty();
+            return;
+        }
+        if self
+            .regions
+            .stage_all
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.changes.clear_history_selection();
+            self.toggle_all_staging();
+            return;
+        }
+        if self
+            .regions
+            .unstage_all
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.unstage_all();
+            return;
+        }
+        if self
+            .regions
+            .changes
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.view = View::Changes;
+            self.graph_commit_open = false;
+            self.show_graph_if_diff_empty();
+        } else if self.regions.graph.is_some_and(|rect| rect.contains(point)) {
+            self.view = View::Graph;
+            self.graph_commit_open = false;
+        } else if self
+            .regions
+            .refresh
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.reload(RefreshScope::ALL);
+        } else if self
+            .regions
+            .explorer
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.open_explorer();
+        } else if self
+            .regions
+            .repository_browser
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.open_repository_browser();
+        } else if self
+            .regions
+            .settings
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.mode = Mode::Settings;
+        } else if self.regions.help.is_some_and(|rect| rect.contains(point)) {
+            self.mode = Mode::Help;
+        } else if self.select_explorer_row(point) {
+            if self.changes.selected_explorer_directory_path().is_some() {
+                let repo = self.session.data();
+                self.changes.toggle_selected_explorer_directory(repo);
+            }
+        } else if self.select_worktree_row(point) {
+            if self
+                .repository()
+                .and_then(|repo| self.changes.selected_directory_path(repo))
+                .is_some()
+            {
+                let repo = self.session.data();
+                self.changes.toggle_selected_directory(repo);
+            } else if self
+                .regions
+                .worktree_status
+                .is_some_and(|rect| rect.contains(point))
+            {
+                self.toggle_stage();
+            }
+        } else if self
+            .regions
+            .worktree_list
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.changes.clear_history_selection();
+            self.changes.refresh_diff(self.session.data());
+        } else if self.select_history_row(point) {
+        } else if self.select_graph_row(point) {
+            self.open_selected_graph_commit();
+        } else if self.regions.commit.is_some_and(|rect| rect.contains(point)) {
+            self.focus_commit();
+        }
+    }
+
+    fn handle_action_mouse(&mut self, mouse: MouseEvent) {
+        let point = Position::new(mouse.column, mouse.row);
+        match mouse.kind {
+            MouseEventKind::ScrollDown => self.actions.move_selection(1),
+            MouseEventKind::ScrollUp => self.actions.move_selection(-1),
+            MouseEventKind::Moved => {
+                if let Some(index) = self.action_at(point) {
+                    self.actions.selection = index;
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if self
+                    .regions
+                    .actions
+                    .is_some_and(|rect| rect.contains(point))
+                {
+                    self.mode = Mode::Normal;
+                    return;
+                }
+                let Some(index) = self.action_at(point) else {
+                    self.mode = Mode::Normal;
+                    return;
+                };
+                self.actions.selection = index;
+                self.activate_action();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_author_filter_mouse(&mut self, mouse: MouseEvent) {
+        let point = Position::new(mouse.column, mouse.row);
+        match mouse.kind {
+            MouseEventKind::ScrollDown => self.author_filter.move_selection(1),
+            MouseEventKind::ScrollUp => self.author_filter.move_selection(-1),
+            MouseEventKind::Moved => {
+                if let Some(HitTarget::Graph(GraphHitTarget::FilterItem(index))) =
+                    self.regions.hit_target_at(point)
+                {
+                    self.author_filter.select(index);
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => match self.regions.hit_target_at(point) {
+                Some(HitTarget::Graph(GraphHitTarget::FilterItem(index))) => {
+                    self.author_filter.select(index);
+                    if self.author_filter.toggle(index) {
+                        self.reconcile_graph_selection();
+                    }
+                }
+                Some(HitTarget::Graph(GraphHitTarget::FilterOverlay)) => {}
+                _ => self.mode = Mode::Normal,
+            },
+            _ => {}
+        }
+    }
+
+    fn action_at(&self, point: Position) -> Option<usize> {
+        let list = self
+            .regions
+            .action_list
+            .filter(|rect| rect.contains(point))?;
+        let index = usize::from(point.y.saturating_sub(list.y));
+        (index < ACTION_ITEMS.len()).then_some(index)
+    }
+
+    fn handle_command_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::ScrollDown => self.actions.scroll_by(3),
+            MouseEventKind::ScrollUp => self.actions.scroll_by(-3),
+            _ => {}
+        }
+    }
+
+    fn handle_repository_browser_mouse(&mut self, mouse: MouseEvent) {
+        let point = Position::new(mouse.column, mouse.row);
+        match mouse.kind {
+            MouseEventKind::ScrollDown => self.repository_browser.move_selection(1),
+            MouseEventKind::ScrollUp => self.repository_browser.move_selection(-1),
+            MouseEventKind::Moved => {
+                if let Some(HitTarget::RepositoryBrowser(RepositoryBrowserHitTarget::Item(index))) =
+                    self.regions.hit_target_at(point)
+                {
+                    self.repository_browser.select(index);
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => match self.regions.hit_target_at(point) {
+                None => self.apply_repository_browser_effect(RepositoryBrowserEffect::Close),
+                Some(HitTarget::RepositoryBrowser(RepositoryBrowserHitTarget::Tab(tab))) => {
+                    self.repository_browser.set_tab(tab);
+                }
+                Some(HitTarget::RepositoryBrowser(RepositoryBrowserHitTarget::Item(index))) => {
+                    let effect = self.repository_browser.activate(index);
+                    self.apply_repository_browser_effect_option(effect);
+                }
+                Some(HitTarget::RepositoryBrowser(
+                    RepositoryBrowserHitTarget::Overlay | RepositoryBrowserHitTarget::List,
+                )) => {}
+                Some(HitTarget::Graph(_)) => {}
+            },
+            _ => {}
+        }
+    }
+
+    fn handle_explorer_mouse(&mut self, mouse: MouseEvent) {
+        let point = Position::new(mouse.column, mouse.row);
+        match mouse.kind {
+            MouseEventKind::ScrollDown => self.workspace_explorer.move_selection(1),
+            MouseEventKind::ScrollUp => self.workspace_explorer.move_selection(-1),
+            MouseEventKind::Down(MouseButton::Left) => {
+                if self
+                    .regions
+                    .workspace_explorer_overlay
+                    .is_some_and(|rect| !rect.contains(point))
+                    && self.repository().is_some()
+                {
+                    self.mode = Mode::Normal;
+                    return;
+                }
+                if self
+                    .regions
+                    .workspace_explorer_path
+                    .is_some_and(|rect| rect.contains(point))
+                {
+                    self.workspace_explorer.begin_search(None);
+                    return;
+                }
+                let Some(rect) = self
+                    .regions
+                    .workspace_explorer_list
+                    .filter(|rect| rect.contains(point))
+                else {
+                    return;
+                };
+                let index =
+                    self.workspace_explorer.state.offset() + usize::from(mouse.row - rect.y);
+                if self.workspace_explorer.editing_path {
+                    let index = self.workspace_explorer.match_state.offset()
+                        + usize::from(mouse.row - rect.y);
+                    if index < self.workspace_explorer.matches.len() {
+                        self.workspace_explorer.match_state.select(Some(index));
+                        let command = self.workspace_explorer.confirm_path();
+                        self.apply_explorer_command(command);
+                    }
+                } else if index < self.workspace_explorer.entries.len() {
+                    self.workspace_explorer.state.select(Some(index));
+                    let command = self.workspace_explorer.activate_selected(true);
+                    self.apply_explorer_command(command);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_file_search_mouse(&mut self, mouse: MouseEvent) {
+        let point = Position::new(mouse.column, mouse.row);
+        match mouse.kind {
+            MouseEventKind::ScrollDown => self.file_search.move_selection(1),
+            MouseEventKind::ScrollUp => self.file_search.move_selection(-1),
+            MouseEventKind::Down(MouseButton::Left) => {
+                if self
+                    .regions
+                    .file_search_overlay
+                    .is_some_and(|rect| !rect.contains(point))
+                {
+                    self.mode = Mode::Normal;
+                    return;
+                }
+                let Some(list) = self
+                    .regions
+                    .file_search_list
+                    .filter(|rect| rect.contains(point))
+                else {
+                    return;
+                };
+                let index = self.file_search.state.offset() + usize::from(point.y - list.y);
+                if self.file_search.select(index) {
+                    self.activate_file_search_result();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_settings_mouse(&mut self, mouse: MouseEvent) {
+        let point = Position::new(mouse.column, mouse.row);
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            return;
+        }
+        if self
+            .regions
+            .settings_overlay
+            .is_some_and(|rect| !rect.contains(point))
+        {
+            self.mode = Mode::Normal;
+        } else if self
+            .regions
+            .auto_fetch
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.settings_selection = 0;
+            self.toggle_auto_fetch();
+        } else if self
+            .regions
+            .fetch_interval_down
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.settings_selection = 1;
+            self.change_fetch_interval(-1);
+        } else if self
+            .regions
+            .fetch_interval_up
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.settings_selection = 1;
+            self.change_fetch_interval(1);
+        } else if self
+            .regions
+            .fetch_interval
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.settings_selection = 1;
+        } else if self
+            .regions
+            .editor_setting
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.settings_selection = 2;
+            self.open_editor_setting();
+        }
+    }
+
+    fn select_worktree_row(&mut self, point: Position) -> bool {
+        if self.changes.pane != LeftPane::Worktree {
+            return false;
+        }
+        let Some(rect) = self
+            .regions
+            .worktree_list
+            .filter(|rect| rect.contains(point))
+        else {
+            return false;
+        };
+        let index = self.changes.worktree_scroll + usize::from(point.y - rect.y);
+        let Some(repo) = self.session.data() else {
+            return false;
+        };
+        self.changes.select_worktree_row(repo, index)
+    }
+
+    fn select_explorer_row(&mut self, point: Position) -> bool {
+        if self.view != View::Changes || self.changes.pane != LeftPane::Files {
+            return false;
+        }
+        let Some(rect) = self
+            .regions
+            .explorer_list
+            .filter(|rect| rect.contains(point))
+        else {
+            return false;
+        };
+        let index = self.changes.explorer_scroll + usize::from(point.y - rect.y);
+        let Some(repo) = self.session.data() else {
+            return false;
+        };
+        self.changes.select_explorer_row(repo, index)
+    }
+
+    fn select_history_row(&mut self, point: Position) -> bool {
+        let Some(rect) = self
+            .regions
+            .history_list
+            .filter(|rect| rect.contains(point))
+        else {
+            return false;
+        };
+        let Some(repo) = self.session.data() else {
+            return false;
+        };
+        let relative_row = usize::from(point.y - rect.y);
+        let selected = self.changes.select_history_row(repo, relative_row);
+        if selected && self.view == View::Graph {
+            self.graph_commit_open = true;
+        }
+        selected
+    }
+
+    fn select_graph_row(&mut self, point: Position) -> bool {
+        if self.view != View::Graph {
+            return false;
+        }
+        let Some(rect) = self.regions.graph_table.filter(|rect| rect.contains(point)) else {
+            return false;
+        };
+        let index = self.graph_state.offset() + usize::from(point.y - rect.y);
+        let len = self.visible_graph_len();
+        if index >= len {
+            return false;
+        }
+        self.graph_state.select(Some(index));
+        self.graph_scroll_to_selection = false;
+        true
+    }
+
+    fn scroll_at(&mut self, point: Position, delta: isize) {
+        if self.regions.diff.is_some_and(|rect| rect.contains(point)) {
+            self.changes
+                .scroll_diff_by(self.regions.diff_scroll_max, delta.saturating_mul(3));
+        } else if self
+            .regions
+            .explorer_list
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.scroll_explorer(delta.saturating_mul(3));
+        } else if self
+            .regions
+            .history_list
+            .is_some_and(|rect| rect.contains(point))
+        {
+            if let Some(repo) = self.session.data() {
+                self.changes.move_history_selection(repo, delta);
+            }
+        } else if self
+            .regions
+            .worktree_list
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.scroll_worktree(delta.saturating_mul(3));
+        } else if self
+            .regions
+            .graph_table
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.scroll_graph(delta.saturating_mul(3));
+        }
+    }
+
+    fn scroll_graph(&mut self, delta: isize) {
+        let viewport = self
+            .regions
+            .graph_table
+            .map_or(0, |rect| usize::from(rect.height));
+        let len = self.visible_graph_len();
+        scroll_table(&mut self.graph_state, len, viewport, delta);
+        self.graph_scroll_to_selection = false;
+    }
+
+    fn scroll_worktree(&mut self, delta: isize) {
+        let viewport = self
+            .regions
+            .worktree_list
+            .map_or(0, |rect| usize::from(rect.height));
+        self.changes
+            .scroll_worktree(self.session.data(), viewport, delta);
+    }
+
+    fn scroll_explorer(&mut self, delta: isize) {
+        let viewport = self
+            .regions
+            .explorer_list
+            .map_or(0, |rect| usize::from(rect.height));
+        self.changes.scroll_explorer(viewport, delta);
+    }
+
+    pub(super) fn scroll_diff_by(&mut self, delta: isize) {
+        self.changes
+            .scroll_diff_by(self.regions.diff_scroll_max, delta);
+    }
+
+    fn scroll_diff_to(&mut self, row: u16) {
+        let Some(track) = self.regions.diff_scrollbar else {
+            return;
+        };
+        let Some(thumb) = self.regions.diff_scroll_thumb else {
+            return;
+        };
+        self.changes.set_diff_scroll_from_track(
+            row,
+            track.y,
+            track.height,
+            thumb.height,
+            self.diff_scroll_drag_offset,
+            self.regions.diff_scroll_max,
+        );
+    }
+
+    fn resize_worktree(&mut self, column: u16) {
+        let Some(bounds) = self.regions.split_bounds else {
+            return;
+        };
+        let minimum = bounds.x.saturating_add(24);
+        let maximum = bounds.right().saturating_sub(25).max(minimum);
+        let position = column.clamp(minimum, maximum);
+        self.settings.worktree_width = position.saturating_sub(bounds.x);
+    }
+
+    fn resize_history(&mut self, row: u16) {
+        let Some(bounds) = self.regions.history_bounds else {
+            return;
+        };
+        let top = row.clamp(bounds.y, bounds.bottom().saturating_sub(3));
+        self.settings.history_height = bounds.bottom().saturating_sub(top).max(3);
+    }
+}
