@@ -307,7 +307,8 @@ fn git_repository_entries(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
         .into_iter()
         .filter_map(|(path, (present, deleted))| (present && !deleted).then_some(path))
         .collect();
-    files.extend(ignored_environment_files(root)?);
+    let (ignored_files, ignored_directories) = ignored_repository_entries(root)?;
+    files.extend(ignored_files);
     files.sort_unstable();
     files.dedup();
     let output = run(
@@ -332,6 +333,7 @@ fn git_repository_entries(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
         .filter(|path| !path.is_empty())
         .collect();
     let mut directories = expand_git_directories(root, directory_roots)?;
+    directories.extend(ignored_directories);
     let output = run(root, &["ls-files", "-z", "--stage"])?;
     if !output.status.success() {
         bail!("{}", clean_stderr(&output));
@@ -360,7 +362,7 @@ fn git_repository_entries(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
     Ok((files, directories))
 }
 
-fn ignored_environment_files(root: &Path) -> Result<Vec<String>> {
+fn ignored_repository_entries(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
     let output = run(
         root,
         &[
@@ -369,22 +371,39 @@ fn ignored_environment_files(root: &Path) -> Result<Vec<String>> {
             "--others",
             "--ignored",
             "--exclude-standard",
-            "--",
-            ":(glob).env",
-            ":(glob).env.*",
-            ":(glob)**/.env",
-            ":(glob)**/.env.*",
         ],
     )?;
     if !output.status.success() {
         bail!("{}", clean_stderr(&output));
     }
-    Ok(output
+    let files = output
         .stdout
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
         .map(|path| String::from_utf8_lossy(path).into_owned())
-        .collect())
+        .collect();
+    let output = run(
+        root,
+        &[
+            "ls-files",
+            "-z",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+        ],
+    )?;
+    if !output.status.success() {
+        bail!("{}", clean_stderr(&output));
+    }
+    let directories = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter_map(|path| path.strip_suffix(b"/"))
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .filter(|path| !path.is_empty())
+        .collect();
+    Ok((files, directories))
 }
 
 fn expand_git_directories(root: &Path, roots: Vec<String>) -> Result<Vec<String>> {
@@ -1495,7 +1514,7 @@ mod tests {
         );
         assert!(repo.files.iter().any(|path| path == "base.txt"));
         assert!(repo.files.iter().any(|path| path == "feature.txt"));
-        assert!(!repo.files.iter().any(|path| path == "ignored/cache.txt"));
+        assert!(repo.files.iter().any(|path| path == "ignored/cache.txt"));
         assert!(
             !repo
                 .changes
@@ -1531,7 +1550,7 @@ mod tests {
     }
 
     #[test]
-    fn git_files_include_untracked_files_and_exclude_deleted_tracked_files() {
+    fn git_files_include_untracked_and_ignored_files_but_exclude_deleted_tracked_files() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         git(root, &["init", "-b", "main"]);
@@ -1548,22 +1567,22 @@ mod tests {
         fs::write(root.join("config/.env.production"), "SECRET=prod\n").unwrap();
         fs::remove_file(root.join("tracked.txt")).unwrap();
 
-        assert_eq!(
-            super::ignored_environment_files(root).unwrap(),
-            [".env", ".env.local", "config/.env.production"]
-        );
         let (files, directories) = git_repository_entries(root).unwrap();
         assert_eq!(
             files,
             [
                 ".env",
                 ".env.local",
+                ".envrc",
                 ".gitignore",
                 "config/.env.production",
                 "untracked.txt"
             ]
         );
-        assert_eq!(directories, ["empty", "empty/nested"]);
+        assert_eq!(
+            directories,
+            ["config", "empty", "empty/ignored", "empty/nested"]
+        );
     }
 
     #[test]

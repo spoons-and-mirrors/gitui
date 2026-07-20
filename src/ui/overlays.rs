@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Clear, List, ListItem, Paragraph, Wrap},
 };
@@ -9,8 +9,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
     ACTION_ITEMS, ActionsState, BrowserTab, CommandStatus, FileDialog, FileDialogKind,
-    FileNameAction, FileSearch, PickerAction, PickerEntry, RemoteItems, RepositoryBrowser,
-    RepositoryPicker, Settings,
+    FileNameAction, FileSearch, PickerAction, PickerEntry, PullRequest, RemoteItems,
+    RepositoryBrowser, RepositoryPicker, Settings,
 };
 
 use super::{fill, palette, truncate_width};
@@ -173,12 +173,14 @@ pub(super) fn draw_repository_browser(
             .saturating_sub(1)
             .saturating_sub(area.y.saturating_add(9)),
     );
+    let selected = browser.state.selected();
     let items: Vec<ListItem<'_>> = match browser.tab {
         BrowserTab::Branches => browser
             .branch_indices()
             .into_iter()
             .filter_map(|index| browser.branches.get(index))
-            .map(|branch| {
+            .enumerate()
+            .map(|(row, branch)| {
                 let marker = if branch.current { "●" } else { " " };
                 let kind = if branch.remote { "remote" } else { "local" };
                 let detail = if branch.upstream.is_empty() {
@@ -191,6 +193,12 @@ pub(super) fn draw_repository_browser(
                     format!("{kind} · {detail} · {}", branch.subject),
                     usize::from(list.width),
                     branch.current,
+                    selected == Some(row),
+                    if branch.remote {
+                        palette().purple
+                    } else {
+                        palette().green
+                    },
                 )
             })
             .collect(),
@@ -199,30 +207,20 @@ pub(super) fn draw_repository_browser(
                 .pull_request_indices()
                 .into_iter()
                 .filter_map(|index| pull_requests.get(index))
-                .map(|pull_request| {
-                    browser_row(
-                        format!("#{}  {}", pull_request.number, pull_request.title),
-                        format!(
-                            "{} · {}{}",
-                            pull_request.branch,
-                            pull_request.author,
-                            if pull_request.draft { " · draft" } else { "" }
-                        ),
-                        usize::from(list.width),
-                        false,
-                    )
-                })
+                .enumerate()
+                .map(|(row, pull_request)| pull_request_row(pull_request, selected == Some(row)))
                 .collect(),
             RemoteItems::NotLoaded => Vec::new(),
-            RemoteItems::Loading => vec![status_row("Loading pull requests…")],
-            RemoteItems::Error(error) => vec![status_row(error)],
+            RemoteItems::Loading => vec![status_row("Loading pull requests…", palette().muted)],
+            RemoteItems::Error(error) => vec![status_row(error, palette().red)],
         },
         BrowserTab::Issues => match &browser.issues {
             RemoteItems::Ready(issues) => browser
                 .issue_indices()
                 .into_iter()
                 .filter_map(|index| issues.get(index))
-                .map(|issue| {
+                .enumerate()
+                .map(|(row, issue)| {
                     let detail = if issue.labels.is_empty() {
                         issue.author.clone()
                     } else {
@@ -233,12 +231,14 @@ pub(super) fn draw_repository_browser(
                         detail,
                         usize::from(list.width),
                         false,
+                        selected == Some(row),
+                        palette().purple,
                     )
                 })
                 .collect(),
             RemoteItems::NotLoaded => Vec::new(),
-            RemoteItems::Loading => vec![status_row("Loading issues…")],
-            RemoteItems::Error(error) => vec![status_row(error)],
+            RemoteItems::Loading => vec![status_row("Loading issues…", palette().muted)],
+            RemoteItems::Error(error) => vec![status_row(error, palette().red)],
         },
     };
     frame.render_stateful_widget(
@@ -273,7 +273,14 @@ fn remote_tab_label<T>(label: &str, items: &RemoteItems<T>) -> String {
     )
 }
 
-fn browser_row(label: String, detail: String, width: usize, current: bool) -> ListItem<'static> {
+fn browser_row(
+    label: String,
+    detail: String,
+    width: usize,
+    current: bool,
+    selected: bool,
+    detail_color: Color,
+) -> ListItem<'static> {
     let detail = truncate_width(&detail, width / 2);
     let detail_width = UnicodeWidthStr::width(detail.as_str());
     let label = truncate_width(&label, width.saturating_sub(detail_width + 2));
@@ -282,7 +289,9 @@ fn browser_row(label: String, detail: String, width: usize, current: bool) -> Li
         Span::styled(
             label,
             Style::default()
-                .fg(if current {
+                .fg(if selected {
+                    palette().ink
+                } else if current {
                     palette().accent
                 } else {
                     palette().ink
@@ -294,12 +303,58 @@ fn browser_row(label: String, detail: String, width: usize, current: bool) -> Li
                 }),
         ),
         Span::raw(" ".repeat(padding)),
-        Span::styled(detail, Style::default().fg(palette().faint)),
+        Span::styled(
+            detail,
+            Style::default().fg(if selected {
+                palette().ink
+            } else {
+                detail_color
+            }),
+        ),
     ]))
 }
 
-fn status_row(message: &str) -> ListItem<'_> {
-    ListItem::new(Line::styled(message, Style::default().fg(palette().faint)))
+fn pull_request_row(pull_request: &PullRequest, selected: bool) -> ListItem<'static> {
+    let color = |default| if selected { palette().ink } else { default };
+    let mut metadata = vec![
+        Span::raw("    "),
+        Span::styled(
+            pull_request.branch.clone(),
+            Style::default().fg(color(palette().cyan)),
+        ),
+        Span::styled("  by  ", Style::default().fg(color(palette().faint))),
+        Span::styled(
+            pull_request.author.clone(),
+            Style::default().fg(color(palette().purple)),
+        ),
+    ];
+    if pull_request.draft {
+        metadata.push(Span::styled(
+            "  DRAFT",
+            Style::default()
+                .fg(color(palette().yellow))
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    ListItem::new(vec![
+        Line::from(vec![
+            Span::styled(
+                format!("#{:<4}", pull_request.number),
+                Style::default()
+                    .fg(color(palette().accent))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                pull_request.title.clone(),
+                Style::default().fg(palette().ink),
+            ),
+        ]),
+        Line::from(metadata),
+    ])
+}
+
+fn status_row(message: &str, color: Color) -> ListItem<'_> {
+    ListItem::new(Line::styled(message, Style::default().fg(color)))
 }
 
 pub(super) fn draw_file_add_popover(

@@ -10,7 +10,7 @@ pub(crate) use actions::{ACTION_ITEMS, ActionsState, CommandStatus};
 pub(crate) use changes::PreviewRenderCache;
 pub use changes::{ChangesState, LeftPane};
 pub(crate) use file_search::FileSearch;
-pub(crate) use repository_browser::{BrowserTab, RemoteItems, RepositoryBrowser};
+pub(crate) use repository_browser::{BrowserTab, PullRequest, RemoteItems, RepositoryBrowser};
 pub use repository_picker::{PickerAction, PickerEntry, RepositoryPicker};
 
 use std::{
@@ -96,6 +96,7 @@ pub struct Regions {
     pub graph: Option<Rect>,
     pub refresh: Option<Rect>,
     pub repository: Option<Rect>,
+    pub repository_browser: Option<Rect>,
     pub settings: Option<Rect>,
     pub help: Option<Rect>,
     pub actions: Option<Rect>,
@@ -734,6 +735,12 @@ impl App {
             self.open_picker();
         } else if self
             .regions
+            .repository_browser
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.open_repository_browser();
+        } else if self
+            .regions
             .settings
             .is_some_and(|rect| rect.contains(point))
         {
@@ -852,7 +859,13 @@ impl App {
                 else {
                     return;
                 };
-                let index = self.repository_browser.state.offset() + usize::from(point.y - list.y);
+                let row_height = if self.repository_browser.tab == BrowserTab::PullRequests {
+                    2
+                } else {
+                    1
+                };
+                let index = self.repository_browser.state.offset()
+                    + usize::from(point.y - list.y) / row_height;
                 self.repository_browser.select(index);
             }
             _ => {}

@@ -7,7 +7,7 @@ use ratatui::{
     style::{Color, Modifier},
 };
 
-use crate::app::{App, LeftPane, Mode, Settings, View};
+use crate::app::{App, BrowserTab, LeftPane, Mode, PullRequest, RemoteItems, Settings, View};
 
 use super::draw;
 
@@ -54,6 +54,7 @@ fn renders_every_primary_surface() {
     assert_eq!(app.regions.help.unwrap().y, 35);
     assert!(app.regions.changes.unwrap().x > 0);
     assert_eq!(app.regions.help.unwrap().right(), 120);
+    assert!(app.regions.repository_browser.is_some());
     let buffer = terminal.backend().buffer();
     let history = app.regions.history_splitter.unwrap();
     let history_offset = usize::from(history.y) * 120 + usize::from(history.x);
@@ -71,6 +72,11 @@ fn renders_every_primary_surface() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(header.trim_end().ends_with("main"));
+    let footer: String = terminal.backend().buffer().content[35 * 120..]
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(footer.contains("b Branches"));
 
     let files_tab = app.regions.files_tab.unwrap();
     click(&mut app, files_tab.x, files_tab.y);
@@ -748,6 +754,31 @@ fn renders_every_primary_surface() {
     assert!(background.modifier.contains(Modifier::DIM));
     assert_eq!(modal.bg, super::palette().surface_alt);
     assert!(!modal.modifier.contains(Modifier::DIM));
+
+    app.repository_browser.pull_requests = RemoteItems::Ready(vec![
+        PullRequest {
+            number: 42,
+            title: "Improve browser readability".to_owned(),
+            branch: "feature/browser".to_owned(),
+            author: "octocat".to_owned(),
+            draft: true,
+        },
+        PullRequest {
+            number: 43,
+            title: "Polish metadata colors".to_owned(),
+            branch: "feature/colors".to_owned(),
+            author: "hubot".to_owned(),
+            draft: false,
+        },
+    ]);
+    app.repository_browser.set_tab(BrowserTab::PullRequests);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let list = app.regions.browser_list.unwrap();
+    let buffer = terminal.backend().buffer();
+    assert_eq!(buffer[(list.x + 4, list.y + 1)].fg, super::palette().ink);
+    assert_eq!(buffer[(list.x + 4, list.y + 3)].fg, super::palette().cyan);
+    click(&mut app, list.x + 4, list.y + 2);
+    assert_eq!(app.repository_browser.state.selected(), Some(1));
     app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
     assert_eq!(app.repository_browser.query, "m");
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));

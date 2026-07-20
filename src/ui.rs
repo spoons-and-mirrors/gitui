@@ -263,9 +263,10 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     let changes_label = format!(" 1 Changes {}/{} ", staged, unstaged);
     let graph_label = format!(" 2 Graph {commits} ");
-    let compact = area.width < 72;
+    let compact = area.width < 88;
     let refresh_label = if compact { " r " } else { " r Refresh " };
     let repository_label = if compact { " o " } else { " o Repository " };
+    let browser_label = if compact { " b " } else { " b Branches " };
     let settings_label = if compact { " s " } else { " s Settings " };
     let help_label = if compact { " ? " } else { " ? Help " };
     let labels = [
@@ -273,6 +274,7 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         graph_label.as_str(),
         refresh_label,
         repository_label,
+        browser_label,
         settings_label,
         help_label,
     ];
@@ -307,8 +309,9 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     app.regions.graph = rects.get(1).copied();
     app.regions.refresh = rects.get(2).copied();
     app.regions.repository = rects.get(3).copied();
-    app.regions.settings = rects.get(4).copied();
-    app.regions.help = rects.get(5).copied();
+    app.regions.repository_browser = rects.get(4).copied();
+    app.regions.settings = rects.get(5).copied();
+    app.regions.help = rects.get(6).copied();
 
     frame.render_widget(
         Paragraph::new(Line::from(spans)),
