@@ -88,9 +88,7 @@ pub(super) fn draw_graph(
 
     let viewport = usize::from(graph_region.height);
     let selected = state.selected();
-    let mut offset = state
-        .offset()
-        .min(repo.commits.len().saturating_sub(viewport));
+    let mut offset = state.offset().min(repo.commits.len().saturating_sub(1));
     if *scroll_to_selection && let Some(selected) = selected {
         if selected < offset {
             offset = selected;

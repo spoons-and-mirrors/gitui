@@ -843,6 +843,11 @@ impl App {
         match mouse.kind {
             MouseEventKind::ScrollDown => self.repository_browser.move_selection(1),
             MouseEventKind::ScrollUp => self.repository_browser.move_selection(-1),
+            MouseEventKind::Moved => {
+                if let Some(index) = self.repository_browser_row_at(point) {
+                    self.repository_browser.select(index);
+                }
+            }
             MouseEventKind::Down(MouseButton::Left) => {
                 if self
                     .regions
@@ -861,24 +866,30 @@ impl App {
                     self.repository_browser.set_tab(BrowserTab::ALL[tab]);
                     return;
                 }
-                let Some(list) = self
-                    .regions
-                    .browser_list
-                    .filter(|rect| rect.contains(point))
-                else {
+                let Some(index) = self.repository_browser_row_at(point) else {
                     return;
                 };
-                let row_height = if self.repository_browser.tab == BrowserTab::PullRequests {
-                    2
-                } else {
-                    1
-                };
-                let index = self.repository_browser.state.offset()
-                    + usize::from(point.y - list.y) / row_height;
-                self.repository_browser.select(index);
+                if self.repository_browser.select(index)
+                    && self.repository_browser.tab == BrowserTab::Branches
+                {
+                    self.open_selected_browser_branch();
+                }
             }
             _ => {}
         }
+    }
+
+    fn repository_browser_row_at(&self, point: Position) -> Option<usize> {
+        let list = self
+            .regions
+            .browser_list
+            .filter(|rect| rect.contains(point))?;
+        let row_height = if self.repository_browser.tab == BrowserTab::PullRequests {
+            2
+        } else {
+            1
+        };
+        Some(self.repository_browser.state.offset() + usize::from(point.y - list.y) / row_height)
     }
 
     fn handle_explorer_mouse(&mut self, mouse: MouseEvent) {
@@ -2160,6 +2171,31 @@ impl App {
         self.graph_commit_open = true;
     }
 
+    fn open_selected_browser_branch(&mut self) {
+        let Some(oid) = self
+            .repository_browser
+            .selected_branch()
+            .map(|branch| branch.oid.clone())
+        else {
+            return;
+        };
+        let Some(index) = self.repository().and_then(|repo| {
+            repo.commits
+                .iter()
+                .position(|commit| commit.oid.starts_with(&oid))
+        }) else {
+            self.mode = Mode::Normal;
+            self.notice = Some("Branch tip is outside the loaded graph".to_owned());
+            return;
+        };
+        self.graph_state.select(Some(index));
+        *self.graph_state.offset_mut() = index.saturating_sub(5);
+        self.graph_scroll_to_selection = false;
+        self.graph_commit_open = false;
+        self.view = View::Graph;
+        self.mode = Mode::Normal;
+    }
+
     fn queue_editor(&mut self) {
         if self.editor_configure_only {
             let command = self.editor_input.trim().to_owned();
@@ -2273,6 +2309,9 @@ impl App {
     fn handle_repository_browser(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Enter if self.repository_browser.tab == BrowserTab::Branches => {
+                self.open_selected_browser_branch();
+            }
             KeyCode::Tab | KeyCode::Right => self.repository_browser.move_tab(1),
             KeyCode::BackTab | KeyCode::Left => self.repository_browser.move_tab(-1),
             KeyCode::Down => self.repository_browser.move_selection(1),

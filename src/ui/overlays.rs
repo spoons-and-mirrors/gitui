@@ -264,8 +264,13 @@ pub(super) fn draw_repository_browser(
         &mut browser.state,
     );
 
+    let footer = if browser.tab == BrowserTab::Branches {
+        "Enter open in Graph   ←→ / Tab switch   ↑↓ select   type to filter   Esc close"
+    } else {
+        "←→ / Tab switch   ↑↓ select   type to filter   Esc close"
+    };
     frame.render_widget(
-        Paragraph::new("←→ / Tab switch   ↑↓ select   type to filter   Esc close")
+        Paragraph::new(footer)
             .alignment(Alignment::Right)
             .style(Style::default().fg(palette().muted)),
         Rect::new(inner_x, area.bottom().saturating_sub(1), inner_width, 1),

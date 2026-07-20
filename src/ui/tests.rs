@@ -774,6 +774,54 @@ fn renders_every_primary_surface() {
     assert_eq!(modal.bg, super::palette().surface_alt);
     assert!(!modal.modifier.contains(Modifier::DIM));
 
+    let target_oid = app.repository().unwrap().commits[1].oid.clone();
+    let mut target_branch = app.repository_browser.branches[0].clone();
+    target_branch.name = "test/hover-target".to_owned();
+    target_branch.oid = target_oid;
+    target_branch.current = false;
+    app.repository_browser.branches.push(target_branch);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let list = app.regions.browser_list.unwrap();
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: list.x + 4,
+        row: list.y + 1,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert_eq!(app.repository_browser.state.selected(), Some(1));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(
+        terminal.backend().buffer()[(list.x + 4, list.y + 1)].bg,
+        super::palette().selected
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.view, View::Graph);
+    assert_eq!(app.graph_state.selected(), Some(1));
+    assert_eq!(app.graph_state.offset(), 0);
+    assert!(!app.graph_scroll_to_selection);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let list = app.regions.browser_list.unwrap();
+    let branch_oid = app.repository_browser.branches[0].oid.clone();
+    let branch_tip = app
+        .repository()
+        .unwrap()
+        .commits
+        .iter()
+        .position(|commit| commit.oid.starts_with(&branch_oid))
+        .unwrap();
+    app.graph_state
+        .select(Some(usize::from(branch_tip == 0).min(1)));
+    click(&mut app, list.x + 4, list.y);
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.view, View::Graph);
+    assert_eq!(app.graph_state.selected(), Some(branch_tip));
+    assert_eq!(app.graph_state.offset(), branch_tip.saturating_sub(5));
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+
     app.repository_browser.pull_requests = RemoteItems::ready(vec![
         PullRequest {
             number: 42,

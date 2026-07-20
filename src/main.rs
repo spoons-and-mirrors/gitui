@@ -53,6 +53,7 @@ fn main() -> Result<()> {
                         app.changes.hunk_selection,
                         app.actions.selection,
                         app.graph_state.selected(),
+                        app.repository_browser.state.selected(),
                     );
                     app.handle_mouse(mouse);
                     let changed = !matches!(mouse.kind, event::MouseEventKind::Moved)
@@ -61,6 +62,7 @@ fn main() -> Result<()> {
                                 app.changes.hunk_selection,
                                 app.actions.selection,
                                 app.graph_state.selected(),
+                                app.repository_browser.state.selected(),
                             );
                     (changed, false)
                 }

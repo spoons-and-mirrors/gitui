@@ -324,6 +324,15 @@ impl RepositoryBrowser {
         })
     }
 
+    pub(crate) fn selected_branch(&self) -> Option<&Branch> {
+        if self.tab != BrowserTab::Branches {
+            return None;
+        }
+        let filtered_index = self.state.selected()?;
+        let branch_index = *self.branch_indices().get(filtered_index)?;
+        self.branches.get(branch_index)
+    }
+
     pub(crate) fn pull_request_indices(&self) -> Vec<usize> {
         self.pull_requests.items().map_or_else(Vec::new, |items| {
             matching_indices(&self.query, items, |item| {
