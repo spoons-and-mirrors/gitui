@@ -8,9 +8,9 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
-    ACTION_ITEMS, ActionsState, BrowserTab, CommandStatus, FileDialog, FileDialogKind,
+    ACTION_ITEMS, ActionsState, BrowserTab, CommandStatus, Explorer, FileDialog, FileDialogKind,
     FileNameAction, FileSearch, PickerAction, PickerEntry, PullRequest, RemoteItems,
-    RepositoryBrowser, RepositoryPicker, Settings,
+    RepositoryBrowser, Settings,
 };
 
 use super::{fill, palette, truncate_width};
@@ -20,7 +20,7 @@ pub(super) struct FileSearchRegions {
     pub(super) list: Rect,
 }
 
-pub(super) struct PickerRegions {
+pub(super) struct ExplorerRegions {
     pub(super) overlay: Rect,
     pub(super) path: Rect,
     pub(super) list: Rect,
@@ -921,11 +921,11 @@ fn rendered_height(lines: &[Line<'_>], width: usize) -> usize {
         .sum()
 }
 
-pub(super) fn draw_picker(frame: &mut Frame<'_>, picker: &mut RepositoryPicker) -> PickerRegions {
-    let row_count = if picker.editing_path {
-        picker.matches.len()
+pub(super) fn draw_explorer(frame: &mut Frame<'_>, explorer: &mut Explorer) -> ExplorerRegions {
+    let row_count = if explorer.editing_path {
+        explorer.matches.len()
     } else {
-        picker.entries.len()
+        explorer.entries.len()
     };
     let desired_height = (11 + row_count.min(11) as u16).clamp(14, 22);
     let area = centered_min(frame.area(), 82, 0, 56, desired_height);
@@ -944,19 +944,19 @@ pub(super) fn draw_picker(frame: &mut Frame<'_>, picker: &mut RepositoryPicker) 
 
     let inner_x = area.x.saturating_add(2);
     let inner_width = area.width.saturating_sub(4);
-    let current_is_repo = picker.entries.first().is_some_and(|entry| entry.is_repo);
+    let current_is_repo = explorer.entries.first().is_some_and(|entry| entry.is_repo);
     let location_kind = if current_is_repo {
         "GIT REPOSITORY"
     } else {
         "DIRECTORY"
     };
-    let title_width = "REPOSITORY  Switch working directory".len();
+    let title_width = "EXPLORER  Switch working directory".len();
     let title_padding = usize::from(inner_width)
         .saturating_sub(title_width + UnicodeWidthStr::width(location_kind));
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                "REPOSITORY",
+                "EXPLORER",
                 Style::default()
                     .fg(palette().ink)
                     .add_modifier(Modifier::BOLD),
@@ -984,13 +984,13 @@ pub(super) fn draw_picker(frame: &mut Frame<'_>, picker: &mut RepositoryPicker) 
     fill(
         frame,
         path_area,
-        if picker.editing_path {
+        if explorer.editing_path {
             palette().selected
         } else {
             palette().raised
         },
     );
-    if picker.editing_path {
+    if explorer.editing_path {
         fill(
             frame,
             Rect::new(path_area.x, path_area.y, 1, path_area.height),
@@ -1012,21 +1012,21 @@ pub(super) fn draw_picker(frame: &mut Frame<'_>, picker: &mut RepositoryPicker) 
         ),
     );
     let path_text = truncate_start_width(
-        &picker.path_input,
+        &explorer.path_input,
         usize::from(path_area.width.saturating_sub(4)),
     );
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
                 path_text,
-                Style::default().fg(if picker.editing_path {
+                Style::default().fg(if explorer.editing_path {
                     palette().ink
                 } else {
                     palette().muted
                 }),
             ),
             Span::styled(
-                if picker.editing_path { "▌" } else { "" },
+                if explorer.editing_path { "▌" } else { "" },
                 Style::default().fg(palette().accent),
             ),
         ])),
@@ -1038,14 +1038,14 @@ pub(super) fn draw_picker(frame: &mut Frame<'_>, picker: &mut RepositoryPicker) 
         ),
     );
 
-    let section_title = if picker.editing_path {
+    let section_title = if explorer.editing_path {
         "MATCHES"
     } else {
         "BROWSE"
     };
-    let section_detail = if !picker.editing_path && picker.loading {
+    let section_detail = if !explorer.editing_path && explorer.loading {
         "loading…".to_owned()
-    } else if picker.editing_path && picker.searching {
+    } else if explorer.editing_path && explorer.searching {
         "indexing…".to_owned()
     } else {
         format!("{} entries", row_count)
@@ -1072,37 +1072,37 @@ pub(super) fn draw_picker(frame: &mut Frame<'_>, picker: &mut RepositoryPicker) 
         inner_width,
         area.bottom().saturating_sub(1).saturating_sub(list_y),
     );
-    if picker.editing_path {
-        let items = picker
+    if explorer.editing_path {
+        let items = explorer
             .matches
             .iter()
-            .map(|entry| picker_item(entry, usize::from(list_area.width)));
+            .map(|entry| explorer_item(entry, usize::from(list_area.width)));
         frame.render_stateful_widget(
             List::new(items).highlight_style(Style::default().bg(palette().selected)),
             list_area,
-            &mut picker.match_state,
+            &mut explorer.match_state,
         );
     } else {
-        let items = picker
+        let items = explorer
             .entries
             .iter()
-            .map(|entry| picker_item(entry, usize::from(list_area.width)));
+            .map(|entry| explorer_item(entry, usize::from(list_area.width)));
         frame.render_stateful_widget(
             List::new(items).highlight_style(Style::default().bg(palette().selected)),
             list_area,
-            &mut picker.state,
+            &mut explorer.state,
         );
     }
 
     let footer = Rect::new(inner_x, area.bottom().saturating_sub(1), inner_width, 1);
-    if let Some(error) = &picker.error {
+    if let Some(error) = &explorer.error {
         frame.render_widget(
             Paragraph::new(truncate_width(error, usize::from(footer.width)))
                 .style(Style::default().fg(palette().red)),
             footer,
         );
     } else {
-        let hint = if picker.editing_path {
+        let hint = if explorer.editing_path {
             "Tab complete   Enter open   ↑↓ matches   Esc browse"
         } else {
             "Enter open   h parent   / search   Esc close"
@@ -1115,7 +1115,7 @@ pub(super) fn draw_picker(frame: &mut Frame<'_>, picker: &mut RepositoryPicker) 
         );
     }
 
-    PickerRegions {
+    ExplorerRegions {
         overlay: area,
         path: path_area,
         list: list_area,
@@ -1311,7 +1311,7 @@ fn file_search_item(path: &str, width: usize) -> ListItem<'static> {
     ListItem::new(Line::from(spans))
 }
 
-fn picker_item(entry: &PickerEntry, width: usize) -> ListItem<'static> {
+fn explorer_item(entry: &PickerEntry, width: usize) -> ListItem<'static> {
     let (marker, label, detail, color) = match entry.action {
         PickerAction::Open if entry.is_repo => ("● ", entry.label.clone(), "open", palette().green),
         PickerAction::Open => ("○ ", entry.label.clone(), "check", palette().muted),
@@ -1679,7 +1679,7 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
         help_line("j / k", "Move / scroll hunk ×10"),
         help_line("Home / G", "First / last"),
         help_line("r", "Refresh"),
-        help_line("o", "Repository"),
+        help_line("o", "Explorer"),
         help_line("b", "Branches / PRs / issues"),
         help_line("s", "Settings"),
         help_line("x", "Git actions"),

@@ -26,7 +26,7 @@ pub enum PickerAction {
 }
 
 #[derive(Debug)]
-pub struct RepositoryPicker {
+pub struct Explorer {
     pub(crate) directory: PathBuf,
     pub(crate) path_input: String,
     pub(crate) editing_path: bool,
@@ -57,7 +57,7 @@ pub(super) enum PickerCommand {
     Open(PathBuf),
 }
 
-impl RepositoryPicker {
+impl Explorer {
     pub(super) fn new(directory: PathBuf) -> Self {
         let mut picker = Self {
             path_input: directory.display().to_string(),
@@ -607,7 +607,7 @@ mod tests {
 
         assert_eq!(resolve_fuzzy_path("cod/hunk", root), Some(hunkle.clone()));
 
-        let mut picker = RepositoryPicker::new(root.to_path_buf());
+        let mut picker = Explorer::new(root.to_path_buf());
         picker.directory_index = index_directories(&[root.to_path_buf()]);
         picker.begin_search(Some("hnk"));
         assert_eq!(picker.matches[0].path, hunkle);
@@ -638,7 +638,7 @@ mod tests {
 
     #[test]
     fn fuzzy_search_keeps_only_the_best_twelve_matches() {
-        let mut picker = RepositoryPicker::new(PathBuf::from("/"));
+        let mut picker = Explorer::new(PathBuf::from("/"));
         picker.directory_index = (0..30)
             .map(|index| {
                 let name = if index == 29 {

@@ -664,6 +664,7 @@ fn renders_every_primary_surface() {
     assert!(screen.contains("HEAD"));
     assert!(screen.contains("Render Test"));
     assert!(screen.contains("WORKTREE"));
+    assert!(screen.contains("o Explorer"));
     assert!(!screen.contains("scrollbar line"));
     let worktree = app.regions.worktree.unwrap();
     let graph = app.regions.graph_table.unwrap();
@@ -711,25 +712,25 @@ fn renders_every_primary_surface() {
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
     app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
-    assert_eq!(app.picker.directory, root);
+    assert_eq!(app.workspace_explorer.directory, root);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_black_underlay(&terminal);
-    let picker_screen: String = terminal
+    let explorer_screen: String = terminal
         .backend()
         .buffer()
         .content
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(picker_screen.contains("REPOSITORY"));
-    assert!(picker_screen.contains("Switch working directory"));
-    assert!(picker_screen.contains("BROWSE"));
-    assert!(!picker_screen.contains("OPEN REPOSITORY"));
-    assert!(!picker_screen.contains('┌'));
-    assert!(app.regions.picker_list.is_some());
-    let path = app.regions.picker_path.unwrap();
+    assert!(explorer_screen.contains("EXPLORER"));
+    assert!(explorer_screen.contains("Switch working directory"));
+    assert!(explorer_screen.contains("BROWSE"));
+    assert!(!explorer_screen.contains("OPEN REPOSITORY"));
+    assert!(!explorer_screen.contains('┌'));
+    assert!(app.regions.workspace_explorer_list.is_some());
+    let path = app.regions.workspace_explorer_path.unwrap();
     click(&mut app, path.x + 2, path.y + 1);
-    assert!(app.picker.editing_path);
+    assert!(app.workspace_explorer.editing_path);
 
     app.mode = Mode::Normal;
     app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
@@ -831,6 +832,7 @@ fn renders_every_primary_surface() {
         .collect();
     assert!(help_screen.contains("KEYBOARD"));
     assert!(help_screen.contains("Ctrl+Enter"));
+    assert!(help_screen.contains("Explorer"));
     assert!(!help_screen.contains('┌'));
 
     let mut narrow = Terminal::new(TestBackend::new(50, 12)).unwrap();

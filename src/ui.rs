@@ -82,12 +82,12 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             app.regions.file_search_overlay = Some(regions.overlay);
             app.regions.file_search_list = Some(regions.list);
         }
-        Mode::Picker => {
+        Mode::Explorer => {
             dim(frame);
-            let regions = overlays::draw_picker(frame, &mut app.picker);
-            app.regions.picker_overlay = Some(regions.overlay);
-            app.regions.picker_path = Some(regions.path);
-            app.regions.picker_list = Some(regions.list);
+            let regions = overlays::draw_explorer(frame, &mut app.workspace_explorer);
+            app.regions.workspace_explorer_overlay = Some(regions.overlay);
+            app.regions.workspace_explorer_path = Some(regions.path);
+            app.regions.workspace_explorer_list = Some(regions.list);
         }
         Mode::Settings => {
             dim(frame);
@@ -265,7 +265,7 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let graph_label = format!(" 2 Graph {commits} ");
     let compact = area.width < 88;
     let refresh_label = if compact { " r " } else { " r Refresh " };
-    let repository_label = if compact { " o " } else { " o Repository " };
+    let explorer_label = if compact { " o " } else { " o Explorer " };
     let browser_label = if compact { " b " } else { " b Branches " };
     let settings_label = if compact { " s " } else { " s Settings " };
     let help_label = if compact { " ? " } else { " ? Help " };
@@ -273,7 +273,7 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         changes_label.as_str(),
         graph_label.as_str(),
         refresh_label,
-        repository_label,
+        explorer_label,
         browser_label,
         settings_label,
         help_label,
@@ -308,7 +308,7 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     app.regions.changes = rects.first().copied();
     app.regions.graph = rects.get(1).copied();
     app.regions.refresh = rects.get(2).copied();
-    app.regions.repository = rects.get(3).copied();
+    app.regions.explorer = rects.get(3).copied();
     app.regions.repository_browser = rects.get(4).copied();
     app.regions.settings = rects.get(5).copied();
     app.regions.help = rects.get(6).copied();

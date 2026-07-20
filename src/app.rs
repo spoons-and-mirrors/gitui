@@ -1,17 +1,17 @@
 mod actions;
 mod changes;
+mod explorer;
 mod file_search;
 mod fuzzy;
 mod repository_browser;
-mod repository_picker;
 mod text_input;
 
 pub(crate) use actions::{ACTION_ITEMS, ActionsState, CommandStatus};
 pub(crate) use changes::PreviewRenderCache;
 pub use changes::{ChangesState, LeftPane};
+pub use explorer::{Explorer, PickerAction, PickerEntry};
 pub(crate) use file_search::FileSearch;
 pub(crate) use repository_browser::{BrowserTab, PullRequest, RemoteItems, RepositoryBrowser};
-pub use repository_picker::{PickerAction, PickerEntry, RepositoryPicker};
 
 use std::{
     fs,
@@ -33,7 +33,7 @@ use crate::{
 };
 
 use actions::{ActionId, action_command, display_git_command, parse_command_args, parse_git_args};
-use repository_picker::PickerCommand;
+use explorer::PickerCommand;
 pub(crate) use text_input::TextInput;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,7 +47,7 @@ pub enum Mode {
     Normal,
     Commit,
     FileSearch,
-    Picker,
+    Explorer,
     Settings,
     Help,
     RepositoryBrowser,
@@ -95,7 +95,7 @@ pub struct Regions {
     pub changes: Option<Rect>,
     pub graph: Option<Rect>,
     pub refresh: Option<Rect>,
-    pub repository: Option<Rect>,
+    pub explorer: Option<Rect>,
     pub repository_browser: Option<Rect>,
     pub settings: Option<Rect>,
     pub help: Option<Rect>,
@@ -117,9 +117,9 @@ pub struct Regions {
     pub split_bounds: Option<Rect>,
     pub commit: Option<Rect>,
     pub graph_table: Option<Rect>,
-    pub picker_path: Option<Rect>,
-    pub picker_list: Option<Rect>,
-    pub picker_overlay: Option<Rect>,
+    pub workspace_explorer_path: Option<Rect>,
+    pub workspace_explorer_list: Option<Rect>,
+    pub workspace_explorer_overlay: Option<Rect>,
     pub settings_overlay: Option<Rect>,
     pub action_menu: Option<Rect>,
     pub action_list: Option<Rect>,
@@ -159,7 +159,7 @@ pub struct App {
     pub dragging_history: bool,
     pub dragging_diff_scrollbar: bool,
     diff_scroll_drag_offset: u16,
-    pub picker: RepositoryPicker,
+    pub workspace_explorer: Explorer,
     pub(crate) file_search: FileSearch,
     pub(crate) actions: ActionsState,
     pub(crate) repository_browser: RepositoryBrowser,
@@ -245,7 +245,7 @@ impl App {
         let mode = if session.data().is_some() {
             Mode::Normal
         } else {
-            Mode::Picker
+            Mode::Explorer
         };
         let start = session
             .data()
@@ -281,7 +281,7 @@ impl App {
             dragging_history: false,
             dragging_diff_scrollbar: false,
             diff_scroll_drag_offset: 0,
-            picker: RepositoryPicker::new(start),
+            workspace_explorer: Explorer::new(start),
             file_search,
             actions: ActionsState::default(),
             repository_browser,
@@ -356,7 +356,7 @@ impl App {
             Mode::Normal => self.handle_normal(key),
             Mode::Commit => self.handle_commit_input(key),
             Mode::FileSearch => self.handle_file_search(key),
-            Mode::Picker => self.handle_picker(key),
+            Mode::Explorer => self.handle_explorer(key),
             Mode::Settings => self.handle_settings(key),
             Mode::RepositoryBrowser => self.handle_repository_browser(key),
             Mode::ActionMenu => self.handle_action_menu(key),
@@ -379,7 +379,7 @@ impl App {
                     self.file_search.paste(text, &repo.files);
                 }
             }
-            Mode::Picker => self.picker.paste(text),
+            Mode::Explorer => self.workspace_explorer.paste(text),
             Mode::Command if self.actions.status != CommandStatus::Running => {
                 self.actions.input.push_str(text);
                 if self.actions.status == CommandStatus::Input {
@@ -499,8 +499,8 @@ impl App {
         if self.mode == Mode::Files {
             return;
         }
-        if self.mode == Mode::Picker {
-            self.handle_picker_mouse(mouse);
+        if self.mode == Mode::Explorer {
+            self.handle_explorer_mouse(mouse);
             return;
         }
         if self.mode == Mode::FileSearch {
@@ -613,7 +613,7 @@ impl App {
             self.regions.editor_overlay,
             self.regions.file_search_overlay,
             self.regions.file_dialog_overlay,
-            self.regions.picker_overlay,
+            self.regions.workspace_explorer_overlay,
             self.regions.settings_overlay,
             self.regions.action_menu,
             self.regions.browser_overlay,
@@ -639,7 +639,7 @@ impl App {
         match self.mode {
             Mode::ActionMenu => self.handle_action_mouse(mouse),
             Mode::Command => self.handle_command_mouse(mouse),
-            Mode::Picker => self.handle_picker_mouse(mouse),
+            Mode::Explorer => self.handle_explorer_mouse(mouse),
             Mode::FileSearch => self.handle_file_search_mouse(mouse),
             Mode::Settings => self.handle_settings_mouse(mouse),
             Mode::RepositoryBrowser => self.handle_repository_browser_mouse(mouse),
@@ -733,10 +733,10 @@ impl App {
             self.reload();
         } else if self
             .regions
-            .repository
+            .explorer
             .is_some_and(|rect| rect.contains(point))
         {
-            self.open_picker();
+            self.open_explorer();
         } else if self
             .regions
             .repository_browser
@@ -876,15 +876,15 @@ impl App {
         }
     }
 
-    fn handle_picker_mouse(&mut self, mouse: MouseEvent) {
+    fn handle_explorer_mouse(&mut self, mouse: MouseEvent) {
         let point = Position::new(mouse.column, mouse.row);
         match mouse.kind {
-            MouseEventKind::ScrollDown => self.picker.move_selection(1),
-            MouseEventKind::ScrollUp => self.picker.move_selection(-1),
+            MouseEventKind::ScrollDown => self.workspace_explorer.move_selection(1),
+            MouseEventKind::ScrollUp => self.workspace_explorer.move_selection(-1),
             MouseEventKind::Down(MouseButton::Left) => {
                 if self
                     .regions
-                    .picker_overlay
+                    .workspace_explorer_overlay
                     .is_some_and(|rect| !rect.contains(point))
                     && self.repository().is_some()
                 {
@@ -893,28 +893,33 @@ impl App {
                 }
                 if self
                     .regions
-                    .picker_path
+                    .workspace_explorer_path
                     .is_some_and(|rect| rect.contains(point))
                 {
-                    self.picker.begin_search(None);
+                    self.workspace_explorer.begin_search(None);
                     return;
                 }
-                let Some(rect) = self.regions.picker_list.filter(|rect| rect.contains(point))
+                let Some(rect) = self
+                    .regions
+                    .workspace_explorer_list
+                    .filter(|rect| rect.contains(point))
                 else {
                     return;
                 };
-                let index = self.picker.state.offset() + usize::from(mouse.row - rect.y);
-                if self.picker.editing_path {
-                    let index = self.picker.match_state.offset() + usize::from(mouse.row - rect.y);
-                    if index < self.picker.matches.len() {
-                        self.picker.match_state.select(Some(index));
-                        let command = self.picker.confirm_path();
-                        self.apply_picker_command(command);
+                let index =
+                    self.workspace_explorer.state.offset() + usize::from(mouse.row - rect.y);
+                if self.workspace_explorer.editing_path {
+                    let index = self.workspace_explorer.match_state.offset()
+                        + usize::from(mouse.row - rect.y);
+                    if index < self.workspace_explorer.matches.len() {
+                        self.workspace_explorer.match_state.select(Some(index));
+                        let command = self.workspace_explorer.confirm_path();
+                        self.apply_explorer_command(command);
                     }
-                } else if index < self.picker.entries.len() {
-                    self.picker.state.select(Some(index));
-                    let command = self.picker.activate_selected(true);
-                    self.apply_picker_command(command);
+                } else if index < self.workspace_explorer.entries.len() {
+                    self.workspace_explorer.state.select(Some(index));
+                    let command = self.workspace_explorer.activate_selected(true);
+                    self.apply_explorer_command(command);
                 }
             }
             _ => {}
@@ -1171,7 +1176,7 @@ impl App {
     }
 
     pub fn poll_worker(&mut self) -> bool {
-        let mut changed = self.mode == Mode::Picker && self.picker.poll_index();
+        let mut changed = self.mode == Mode::Explorer && self.workspace_explorer.poll_index();
         changed |= self.repository_browser.poll();
         changed |= self.commit_input.poll_blink(self.mode == Mode::Commit);
         if let Some(dialog) = &mut self.file_dialog {
@@ -1284,7 +1289,7 @@ impl App {
                 }
                 (LoadKind::Open, Err(error)) => {
                     self.notice = None;
-                    self.picker.error = Some(error);
+                    self.workspace_explorer.error = Some(error);
                 }
                 (LoadKind::Reload, Ok(())) => {
                     if let Some((selection, selected_oid)) = self.pending_reload.take() {
@@ -1392,7 +1397,7 @@ impl App {
                 self.graph_commit_open = false;
             }
             KeyCode::Char('r') => self.reload(),
-            KeyCode::Char('o') => self.open_picker(),
+            KeyCode::Char('o') => self.open_explorer(),
             KeyCode::Char('s') => self.mode = Mode::Settings,
             KeyCode::Char('b') => self.open_repository_browser(),
             KeyCode::Char('x') => self.open_actions(),
@@ -1581,9 +1586,11 @@ impl App {
         }
     }
 
-    fn handle_picker(&mut self, key: KeyEvent) {
-        let command = self.picker.handle_key(key, self.repository().is_some());
-        self.apply_picker_command(command);
+    fn handle_explorer(&mut self, key: KeyEvent) {
+        let command = self
+            .workspace_explorer
+            .handle_key(key, self.repository().is_some());
+        self.apply_explorer_command(command);
     }
 
     fn handle_file_search(&mut self, key: KeyEvent) {
@@ -2322,7 +2329,7 @@ impl App {
         }
     }
 
-    fn apply_picker_command(&mut self, command: PickerCommand) {
+    fn apply_explorer_command(&mut self, command: PickerCommand) {
         match command {
             PickerCommand::None => {}
             PickerCommand::Close => self.mode = Mode::Normal,
@@ -2336,25 +2343,26 @@ impl App {
             .session
             .start_open(path, fetch_interval(&self.settings))
         {
-            self.picker.error = None;
+            self.workspace_explorer.error = None;
             self.notice = Some("Opening repository…".to_owned());
         } else {
-            self.picker.error = Some("Another workspace operation is running".to_owned());
+            self.workspace_explorer.error =
+                Some("Another workspace operation is running".to_owned());
         }
     }
 
-    fn open_picker(&mut self) {
+    fn open_explorer(&mut self) {
         let start = self
             .repository()
             .map(|repo| repo.root.clone())
-            .unwrap_or_else(|| self.picker.directory.clone());
-        if self.picker.directory == start {
-            let _ = self.picker.poll_index();
+            .unwrap_or_else(|| self.workspace_explorer.directory.clone());
+        if self.workspace_explorer.directory == start {
+            let _ = self.workspace_explorer.poll_index();
         } else {
-            self.picker.navigate(start);
+            self.workspace_explorer.navigate(start);
         }
-        self.picker.editing_path = false;
-        self.mode = Mode::Picker;
+        self.workspace_explorer.editing_path = false;
+        self.mode = Mode::Explorer;
     }
 
     fn open_file_search(&mut self) {

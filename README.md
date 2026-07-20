@@ -47,7 +47,7 @@ hunkle opens exactly the current or requested directory. When that directory is 
 | `Ctrl+A` | Select the complete commit message |
 | `Ctrl+Backspace`, `Alt+Backspace` | Delete the previous commit-message word |
 | `r` | Refresh |
-| `o` | Choose another repository |
+| `o` | Open Explorer |
 | `b` | Browse branches, pull requests, and issues |
 | `s` | Open settings |
 | `x` | Open repository Actions |
@@ -55,11 +55,11 @@ hunkle opens exactly the current or requested directory. When that directory is 
 | `?` | Help |
 | `q` | Quit |
 
-In the repository explorer, start typing a folder name, press `p` to search from an empty field, or `/` to start an absolute path. Search accepts fuzzy directory names, relative paths, absolute paths, and `~/...`; `Tab` accepts the best completion and `Enter` opens a repository or navigates into a directory. hunkle indexes directories under your home folder and common workspace mounts in the background.
+In Explorer, start typing a folder name, press `p` to search from an empty field, or `/` to start an absolute path. Search accepts fuzzy directory names, relative paths, absolute paths, and `~/...`; `Tab` accepts the best completion and `Enter` opens a repository or navigates into a directory. hunkle indexes directories under your home folder and common workspace mounts in the background.
 
 ## Mouse
 
-- Click header controls to switch views, refresh, choose a repository, or open help.
+- Click header controls to switch views, refresh, open Explorer, or open help.
 - Drag the divider between Worktree and Diff to resize either panel.
 - Drag the History section header vertically to resize the current-branch commit shelf.
 - Click `x ACTIONS` above History to push, fetch, pull with rebase, or run a custom Git command.
@@ -72,7 +72,7 @@ In the repository explorer, start typing a folder name, press `p` to search from
 - Drag the one-column Diff scrollbar or click its track to move quickly through large patches.
 - Click the Worktree `Stage all` checkbox to stage everything; click it again when checked to unstage everything.
 - Click the commit editor inside Worktree, type a message, and press `Ctrl+Enter` to commit.
-- Click the repository path field to type, or click a directory/repository entry to navigate or open it.
+- Click the Explorer path field to type, or click a directory/repository entry to navigate or open it.
 - Drag across visible text to select it and automatically copy it to the clipboard. In Files, hold `Shift` while dragging to select text instead of moving an entry. Selection stays within the panel where the drag starts.
 
 ## Settings
@@ -93,7 +93,7 @@ The binary stays deliberately direct, with modules split by the behavior they ow
 | `app` | Global input routing, workspace state, Git mutations, settings, and notices |
 | `app::actions` | Repository Actions, command input, and captured results |
 | `app::changes` | Changes-screen selection, navigation, and displayed content |
-| `app::repository_picker` | Repository discovery, navigation, and fuzzy search |
+| `app::explorer` | Workspace discovery, navigation, and fuzzy search |
 | `repository_session` | Active repository or local-workspace lifecycle and background operations |
 | `git` | Installed-Git commands, parsing, repository data, and local file workspaces |
 | `selection` | Screen-cell selection, text extraction, and clipboard fallback |
@@ -101,7 +101,7 @@ The binary stays deliberately direct, with modules split by the behavior they ow
 | `ui` | Rendering shell, header, and view dispatch |
 | `ui::changes` | Worktree, Files, Diff, and commit workspace |
 | `ui::history` | Current-branch history and all-refs graph |
-| `ui::overlays` | Repository picker, settings, and help overlays |
+| `ui::overlays` | Explorer, repository browser, settings, and help overlays |
 | `ui::text` | Deterministic source and diff presentation |
 | `theme` | Theme discovery, resolution, and palette data |
 
