@@ -5,7 +5,7 @@
 - Local workspaces for browsing, searching, and previewing directories that are not Git repositories.
 - A resizable current-branch history shelf with HEAD, branch, remote, and tag decorations; selecting a commit shows its patch.
 - A repository Actions menu for committing, pushing, fetching, pulling with rebase, and running non-interactive Git commands with captured output.
-- An all-refs commit graph showing branches, remotes, tags, authors, dates, hashes, and lazy-loaded line-change totals.
+- An all-refs commit graph showing branches, remotes, tags, authors, dates, hashes, lazy-loaded line-change totals, and interactive author filtering.
 - A filterable repository browser for local and remote branches plus open GitHub pull requests and issues.
 - Source-aware diffs with changed-file and line-count summaries, line numbers, syntax color, and tinted additions, deletions, and hunk headers.
 - Nonblocking worktree refresh when files, the index, branches, or HEAD change outside hunkle.
@@ -30,7 +30,7 @@ hunkle opens exactly the current or requested directory. When that directory is 
 | `j`, `k` | Move selection; scroll oversized hunks by 10 rows |
 | `Home`, `G` | First or last row |
 | `PageUp`, `PageDown` | Scroll the selected file's diff |
-| `w` | Toggle line wrapping in the Diff panel |
+| `w` | Toggle patch and changed-file wrapping in the Diff panel |
 | `e`, `E` | Open the selected file in your editor, or configure the editor |
 | `f` | Switch the left pane between Worktree and Files |
 | `F3` | Fuzzy-search repository files from anywhere |
@@ -69,6 +69,7 @@ In Explorer, start typing a folder name, press `p` to search from an empty field
 - Click `+` in the Files header to create a file or folder. Drag a Files entry onto a folder or the Files header to move it.
 - The wheel pans Worktree and Files as viewports without changing the selected file; click a visible row to select it.
 - Use the wheel over Diff or Graph to scroll that surface.
+- Click the Graph `AUTHOR` header to include or exclude commits by author.
 - Drag the one-column Diff scrollbar or click its track to move quickly through large patches.
 - Click the Worktree `Stage all` checkbox to stage everything; click it again when checked to unstage everything.
 - Click the commit editor inside Worktree, type a message, and press `Ctrl+Enter` to commit.
@@ -92,6 +93,7 @@ The binary stays deliberately direct, with modules split by the behavior they ow
 | `main` | Terminal setup, cleanup, and event loop |
 | `app` | Global input routing, workspace state, Git mutations, settings, and notices |
 | `app::actions` | Repository Actions, command input, and captured results |
+| `app::author_filter` | Repository-scoped Graph author filtering and selection |
 | `app::changes` | Changes-screen selection, navigation, and displayed content |
 | `app::commit_summary` | Lazy, repository-scoped cache of commit file and line-change summaries |
 | `app::explorer` | Workspace discovery, navigation, and fuzzy search |

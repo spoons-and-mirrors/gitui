@@ -17,7 +17,7 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
-    app::{App, FileDialogKind, Mode, Regions, View},
+    app::{App, FileDialogKind, GraphHitTarget, HitTarget, Mode, Regions, View},
     theme::{Palette, load_theme},
 };
 
@@ -63,14 +63,19 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         app.regions.diff_scroll_thumb = None;
         app.regions.diff_scroll_max = 0;
         app.regions.diff_hunks.clear();
-        app.regions.graph_table = history::draw_graph(
+        let graph_regions = history::draw_graph(
             frame,
             app.session.data(),
             &app.commit_summaries,
+            &app.author_filter,
             &mut app.graph_state,
             &mut app.graph_scroll_to_selection,
             graph_area,
         );
+        app.regions.graph_table = graph_regions.table;
+        for (target, rect) in graph_regions.targets {
+            app.regions.register_hit_target(target, rect);
+        }
     }
     draw_navigation(frame, app, layout[2]);
     match app.mode {
@@ -110,6 +115,16 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             dim(frame);
             for (target, rect) in
                 overlays::draw_repository_browser(frame, &mut app.repository_browser)
+            {
+                app.regions.register_hit_target(target, rect);
+            }
+        }
+        Mode::AuthorFilter => {
+            let anchor = app
+                .regions
+                .hit_target_rect(HitTarget::Graph(GraphHitTarget::AuthorHeader))
+                .unwrap_or(Rect::new(content.x, content.y, 1, 1));
+            for (target, rect) in history::draw_author_filter(frame, anchor, &mut app.author_filter)
             {
                 app.regions.register_hit_target(target, rect);
             }

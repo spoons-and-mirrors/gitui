@@ -3,32 +3,44 @@ use ratatui::{
     layout::{Constraint, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Cell, List, ListItem, ListState, Paragraph, Row, Table, TableState},
+    widgets::{Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState},
 };
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    app::{CommitSummaryCache, Mode},
+    app::{AuthorFilter, CommitSummaryCache, GraphHitTarget, HitTarget, Mode},
     git::{Commit, RepositoryData},
 };
 
 use super::{draw_empty, fill, palette, truncate_width};
 
+pub(super) struct GraphRegions {
+    pub table: Option<Rect>,
+    pub targets: Vec<(HitTarget, Rect)>,
+}
+
 pub(super) fn draw_graph(
     frame: &mut Frame<'_>,
     repo: Option<&RepositoryData>,
     summaries: &CommitSummaryCache,
+    author_filter: &AuthorFilter,
     state: &mut TableState,
     scroll_to_selection: &mut bool,
     area: Rect,
-) -> Option<Rect> {
+) -> GraphRegions {
     let Some(repo) = repo else {
         draw_empty(frame, area, "Open a repository to inspect its graph");
-        return None;
+        return GraphRegions {
+            table: None,
+            targets: Vec::new(),
+        };
     };
     if repo.commits.is_empty() {
         draw_empty(frame, area, "This repository has no commits yet");
-        return None;
+        return GraphRegions {
+            table: None,
+            targets: Vec::new(),
+        };
     }
     fill(frame, area, palette().panel);
     let graph_header = Rect::new(
@@ -89,9 +101,10 @@ pub(super) fn draw_graph(
         ]
     };
 
+    let visible = author_filter.visible_indices(&repo.commits);
     let viewport = usize::from(graph_region.height);
     let selected = state.selected();
-    let mut offset = state.offset().min(repo.commits.len().saturating_sub(1));
+    let mut offset = state.offset().min(visible.len().saturating_sub(1));
     if *scroll_to_selection && let Some(selected) = selected {
         if selected < offset {
             offset = selected;
@@ -101,22 +114,35 @@ pub(super) fn draw_graph(
     }
     *scroll_to_selection = false;
     *state.offset_mut() = offset;
-    let rows = repo
-        .commits
-        .iter()
-        .skip(offset)
-        .take(viewport)
-        .map(|commit| graph_row(commit, summaries.get(&commit.oid), compact));
+    let rows = visible.iter().skip(offset).take(viewport).map(|index| {
+        let commit = &repo.commits[*index];
+        graph_row(commit, summaries.get(&commit.oid), compact)
+    });
+    let author_label = if author_filter.active_count() == author_filter.entries().len() {
+        "AUTHOR ▾".to_owned()
+    } else {
+        format!(
+            "AUTHOR {}/{}",
+            author_filter.active_count(),
+            author_filter.entries().len()
+        )
+    };
     let headers = if compact {
-        Row::new(["GRAPH", "DESCRIPTION", "CHANGES", "AUTHOR", "COMMIT"])
+        Row::new([
+            "GRAPH".to_owned(),
+            "DESCRIPTION".to_owned(),
+            "CHANGES".to_owned(),
+            author_label,
+            "COMMIT".to_owned(),
+        ])
     } else {
         Row::new([
-            "GRAPH",
-            "DESCRIPTION",
-            "CHANGES",
-            "DATE",
-            "AUTHOR",
-            "COMMIT",
+            "GRAPH".to_owned(),
+            "DESCRIPTION".to_owned(),
+            "CHANGES".to_owned(),
+            "DATE".to_owned(),
+            author_label,
+            "COMMIT".to_owned(),
         ])
     }
     .style(
@@ -134,7 +160,117 @@ pub(super) fn draw_graph(
     let mut visible_state = TableState::default();
     visible_state.select(selected.and_then(|selected| selected.checked_sub(offset)));
     frame.render_stateful_widget(table, table_area, &mut visible_state);
-    Some(graph_region)
+    if visible.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No commits match the author filter")
+                .style(Style::default().fg(palette().faint)),
+            graph_region,
+        );
+    }
+    let author_width = if compact { 12 } else { 16 };
+    let author_x = table_area.right().saturating_sub(7 + 1 + author_width);
+    let author_header = Rect::new(author_x, table_area.y, author_width, 1);
+    GraphRegions {
+        table: Some(graph_region),
+        targets: vec![(
+            HitTarget::Graph(GraphHitTarget::AuthorHeader),
+            author_header,
+        )],
+    }
+}
+
+pub(super) fn draw_author_filter(
+    frame: &mut Frame<'_>,
+    anchor: Rect,
+    filter: &mut AuthorFilter,
+) -> Vec<(HitTarget, Rect)> {
+    let width = filter
+        .entries()
+        .iter()
+        .map(|entry| UnicodeWidthStr::width(entry.name.as_str()) + 12)
+        .max()
+        .unwrap_or(28)
+        .clamp(28, 48) as u16;
+    let list_height = filter.entries().len().clamp(1, 10) as u16;
+    let height = list_height.saturating_add(1);
+    let minimum_x = frame.area().x.saturating_add(1);
+    let maximum_x = frame
+        .area()
+        .right()
+        .saturating_sub(width.saturating_add(1))
+        .max(minimum_x);
+    let x = anchor.x.clamp(minimum_x, maximum_x);
+    let below = anchor.y.saturating_add(1);
+    let y = if below.saturating_add(height) <= frame.area().bottom() {
+        below
+    } else {
+        anchor.y.saturating_sub(height)
+    };
+    let area = Rect::new(x, y, width, height);
+    let list = Rect::new(area.x, area.y, area.width, list_height);
+    frame.render_widget(Clear, area);
+    fill(frame, area, palette().raised);
+
+    let selected = filter.state.selected();
+    let items: Vec<ListItem<'static>> = filter
+        .entries()
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let count = format!("{} commits", entry.commits);
+            let name = truncate_width(
+                &entry.name,
+                usize::from(list.width).saturating_sub(count.len() + 7),
+            );
+            let padding = usize::from(list.width)
+                .saturating_sub(UnicodeWidthStr::width(name.as_str()) + count.len() + 5);
+            let foreground = if selected == Some(index) {
+                palette().ink
+            } else {
+                palette().muted
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    if entry.enabled { " ▣ " } else { " ▢ " },
+                    Style::default().fg(if entry.enabled {
+                        palette().accent
+                    } else {
+                        palette().faint
+                    }),
+                ),
+                Span::styled(name, Style::default().fg(foreground)),
+                Span::raw(" ".repeat(padding)),
+                Span::styled(count, Style::default().fg(foreground)),
+                Span::raw(" "),
+            ]))
+        })
+        .collect();
+    let authors = List::new(items).highlight_style(Style::default().bg(palette().selected));
+    frame.render_stateful_widget(authors, list, &mut filter.state);
+    frame.render_widget(
+        Paragraph::new("Space toggle   a all   n none   Esc close")
+            .style(Style::default().fg(palette().faint)),
+        Rect::new(
+            area.x.saturating_add(1),
+            area.bottom().saturating_sub(1),
+            area.width - 1,
+            1,
+        ),
+    );
+
+    let mut targets = vec![(HitTarget::Graph(GraphHitTarget::FilterOverlay), area)];
+    let offset = filter.state.offset();
+    for row in 0..usize::from(list.height) {
+        let index = offset + row;
+        if index >= filter.entries().len() {
+            break;
+        }
+        targets.push((
+            HitTarget::Graph(GraphHitTarget::FilterItem(index)),
+            Rect::new(list.x, list.y + row as u16, list.width, 1),
+        ));
+    }
+    targets
 }
 
 #[allow(clippy::too_many_arguments)]

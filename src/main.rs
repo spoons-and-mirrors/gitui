@@ -53,6 +53,7 @@ fn main() -> Result<()> {
                         app.changes.hunk_selection,
                         app.actions.selection,
                         app.graph_state.selected(),
+                        app.author_filter.state.selected(),
                         app.repository_browser.state.selected(),
                     );
                     app.handle_mouse(mouse);
@@ -62,6 +63,7 @@ fn main() -> Result<()> {
                                 app.changes.hunk_selection,
                                 app.actions.selection,
                                 app.graph_state.selected(),
+                                app.author_filter.state.selected(),
                                 app.repository_browser.state.selected(),
                             );
                     (changed, false)

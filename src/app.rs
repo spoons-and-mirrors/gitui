@@ -1,4 +1,5 @@
 mod actions;
+mod author_filter;
 mod changes;
 mod commit_summary;
 mod explorer;
@@ -8,6 +9,7 @@ mod repository_browser;
 mod text_input;
 
 pub(crate) use actions::{ACTION_ITEMS, ActionsState, CommandStatus};
+pub(crate) use author_filter::{AuthorFilter, AuthorFilterEffect};
 pub use changes::{ChangesState, LeftPane};
 pub(crate) use commit_summary::CommitSummaryCache;
 pub use explorer::{Explorer, PickerAction, PickerEntry};
@@ -54,6 +56,7 @@ pub enum Mode {
     Settings,
     Help,
     RepositoryBrowser,
+    AuthorFilter,
     ActionMenu,
     Command,
     Editor,
@@ -94,7 +97,15 @@ pub struct DiffHunkRegion {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HitTarget {
+    Graph(GraphHitTarget),
     RepositoryBrowser(RepositoryBrowserHitTarget),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GraphHitTarget {
+    AuthorHeader,
+    FilterOverlay,
+    FilterItem(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,6 +206,7 @@ pub struct App {
     pub changes: ChangesState,
     pub graph_state: TableState,
     pub(crate) graph_scroll_to_selection: bool,
+    pub(crate) author_filter: AuthorFilter,
     pub(crate) commit_summaries: CommitSummaryCache,
     pub(crate) commit_input: TextInput,
     commit_draft_path: Option<PathBuf>,
@@ -312,6 +324,10 @@ impl App {
         if let Some(repo) = session.data().filter(|repo| repo.github_remote) {
             repository_browser.prefetch(&repo.root);
         }
+        let mut author_filter = AuthorFilter::default();
+        if let Some(repo) = session.data() {
+            author_filter.sync(&repo.root, &repo.commits);
+        }
         let mut app = Self {
             session,
             view: View::Changes,
@@ -320,6 +336,7 @@ impl App {
             changes,
             graph_state,
             graph_scroll_to_selection: true,
+            author_filter,
             commit_summaries: CommitSummaryCache::default(),
             commit_input: TextInput::default(),
             commit_draft_path: None,
@@ -357,6 +374,46 @@ impl App {
 
     pub(crate) fn repository(&self) -> Option<&RepositoryData> {
         self.session.data()
+    }
+
+    pub(crate) fn visible_graph_indices(&self) -> Vec<usize> {
+        self.repository().map_or_else(Vec::new, |repo| {
+            self.author_filter.visible_indices(&repo.commits)
+        })
+    }
+
+    pub(crate) fn selected_graph_commit(&self) -> Option<&git::Commit> {
+        let selected = self.graph_state.selected()?;
+        self.repository()?
+            .commits
+            .iter()
+            .filter(|commit| self.author_filter.matches(commit))
+            .nth(selected)
+    }
+
+    fn visible_graph_len(&self) -> usize {
+        self.repository().map_or(0, |repo| {
+            repo.commits
+                .iter()
+                .filter(|commit| self.author_filter.matches(commit))
+                .count()
+        })
+    }
+
+    fn reconcile_graph_selection(&mut self) {
+        let len = self.visible_graph_len();
+        let selected = self
+            .graph_state
+            .selected()
+            .map(|index| index.min(len.saturating_sub(1)))
+            .or_else(|| (len > 0).then_some(0));
+        self.graph_state
+            .select((len > 0).then_some(selected.unwrap_or(0)));
+        *self.graph_state.offset_mut() = self.graph_state.offset().min(len.saturating_sub(1));
+        self.graph_scroll_to_selection = true;
+        if len == 0 {
+            self.graph_commit_open = false;
+        }
     }
 
     fn git_repository(&self) -> Option<&RepositoryData> {
@@ -409,6 +466,7 @@ impl App {
             Mode::Explorer => self.handle_explorer(key),
             Mode::Settings => self.handle_settings(key),
             Mode::RepositoryBrowser => self.handle_repository_browser(key),
+            Mode::AuthorFilter => self.handle_author_filter(key),
             Mode::ActionMenu => self.handle_action_menu(key),
             Mode::Command => self.handle_command(key),
             Mode::Editor => self.handle_editor(key),
@@ -536,6 +594,10 @@ impl App {
 
         if self.mode == Mode::ActionMenu {
             self.handle_action_mouse(mouse);
+            return;
+        }
+        if self.mode == Mode::AuthorFilter {
+            self.handle_author_filter_mouse(mouse);
             return;
         }
         if self.mode == Mode::RepositoryBrowser {
@@ -670,6 +732,8 @@ impl App {
             self.regions.workspace_explorer_overlay,
             self.regions.settings_overlay,
             self.regions.action_menu,
+            self.regions
+                .hit_target_rect(HitTarget::Graph(GraphHitTarget::FilterOverlay)),
             self.regions.hit_target_rect(HitTarget::RepositoryBrowser(
                 RepositoryBrowserHitTarget::Overlay,
             )),
@@ -699,6 +763,7 @@ impl App {
             Mode::FileSearch => self.handle_file_search_mouse(mouse),
             Mode::Settings => self.handle_settings_mouse(mouse),
             Mode::RepositoryBrowser => self.handle_repository_browser_mouse(mouse),
+            Mode::AuthorFilter => self.handle_author_filter_mouse(mouse),
             Mode::Help => self.mode = Mode::Normal,
             Mode::Editor => {}
             Mode::Files => self.handle_file_dialog_click(point),
@@ -712,6 +777,11 @@ impl App {
         {
             self.mode = Mode::Normal;
             self.flush_commit_draft();
+        }
+        if self.regions.hit_target_at(point) == Some(HitTarget::Graph(GraphHitTarget::AuthorHeader))
+        {
+            self.open_author_filter();
+            return;
         }
         if let Some(hunk) = self
             .regions
@@ -876,6 +946,32 @@ impl App {
         }
     }
 
+    fn handle_author_filter_mouse(&mut self, mouse: MouseEvent) {
+        let point = Position::new(mouse.column, mouse.row);
+        match mouse.kind {
+            MouseEventKind::ScrollDown => self.author_filter.move_selection(1),
+            MouseEventKind::ScrollUp => self.author_filter.move_selection(-1),
+            MouseEventKind::Moved => {
+                if let Some(HitTarget::Graph(GraphHitTarget::FilterItem(index))) =
+                    self.regions.hit_target_at(point)
+                {
+                    self.author_filter.select(index);
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => match self.regions.hit_target_at(point) {
+                Some(HitTarget::Graph(GraphHitTarget::FilterItem(index))) => {
+                    self.author_filter.select(index);
+                    if self.author_filter.toggle(index) {
+                        self.reconcile_graph_selection();
+                    }
+                }
+                Some(HitTarget::Graph(GraphHitTarget::FilterOverlay)) => {}
+                _ => self.mode = Mode::Normal,
+            },
+            _ => {}
+        }
+    }
+
     fn action_at(&self, point: Position) -> Option<usize> {
         let list = self
             .regions
@@ -917,6 +1013,7 @@ impl App {
                 Some(HitTarget::RepositoryBrowser(
                     RepositoryBrowserHitTarget::Overlay | RepositoryBrowserHitTarget::List,
                 )) => {}
+                Some(HitTarget::Graph(_)) => {}
             },
             _ => {}
         }
@@ -1113,7 +1210,7 @@ impl App {
             return false;
         };
         let index = self.graph_state.offset() + usize::from(point.y - rect.y);
-        let len = self.repository().map_or(0, |repo| repo.commits.len());
+        let len = self.visible_graph_len();
         if index >= len {
             return false;
         }
@@ -1160,7 +1257,7 @@ impl App {
             .regions
             .graph_table
             .map_or(0, |rect| usize::from(rect.height));
-        let len = self.repository().map_or(0, |repo| repo.commits.len());
+        let len = self.visible_graph_len();
         scroll_table(&mut self.graph_state, len, viewport, delta);
         self.graph_scroll_to_selection = false;
     }
@@ -1324,6 +1421,9 @@ impl App {
                     );
                     self.graph_state = TableState::default();
                     self.graph_scroll_to_selection = true;
+                    if let Some(repo) = self.session.data() {
+                        self.author_filter.sync(&repo.root, &repo.commits);
+                    }
                     self.changes.reset_repository(self.session.data());
                     self.file_search.reindex(
                         self.session
@@ -1348,8 +1448,12 @@ impl App {
                 (LoadKind::Reload, Ok(())) => {
                     if let Some((selection, selected_oid)) = self.pending_reload.take() {
                         let repo = self.session.data().expect("reloaded repository");
+                        self.author_filter.sync(&repo.root, &repo.commits);
+                        let visible = self.author_filter.visible_indices(&repo.commits);
                         let commit_index = selected_oid.and_then(|oid| {
-                            repo.commits.iter().position(|commit| commit.oid == oid)
+                            visible
+                                .iter()
+                                .position(|index| repo.commits[*index].oid == oid)
                         });
                         self.graph_state
                             .select(commit_index.or_else(|| repo.commits.first().map(|_| 0)));
@@ -1399,12 +1503,13 @@ impl App {
                 .regions
                 .graph_table
                 .map_or(40, |region| usize::from(region.height));
+            let visible = self.author_filter.visible_indices(&repo.commits);
             oids.extend(
-                repo.commits
+                visible
                     .iter()
                     .skip(self.graph_state.offset())
                     .take(viewport)
-                    .map(|commit| commit.oid.clone()),
+                    .map(|index| repo.commits[*index].oid.clone()),
             );
         }
         if self.changes.history_focused
@@ -2226,12 +2331,7 @@ impl App {
     }
 
     fn open_selected_graph_commit(&mut self) {
-        let Some(commit) = self
-            .graph_state
-            .selected()
-            .and_then(|index| self.session.data()?.commits.get(index))
-            .cloned()
-        else {
+        let Some(commit) = self.selected_graph_commit().cloned() else {
             return;
         };
         let Some(repo) = self.session.data() else {
@@ -2243,13 +2343,22 @@ impl App {
     }
 
     fn open_browser_branch(&mut self, oid: &str) {
-        let Some(index) = self.repository().and_then(|repo| {
+        let Some((author, actual_index)) = self.repository().and_then(|repo| {
             repo.commits
                 .iter()
                 .position(|commit| commit.oid.starts_with(oid))
+                .map(|index| (repo.commits[index].author.clone(), index))
         }) else {
             self.mode = Mode::Normal;
             self.notice = Some("Branch tip is outside the loaded graph".to_owned());
+            return;
+        };
+        self.author_filter.ensure_enabled(&author);
+        let Some(index) = self
+            .visible_graph_indices()
+            .iter()
+            .position(|index| *index == actual_index)
+        else {
             return;
         };
         self.graph_state.select(Some(index));
@@ -2386,6 +2495,22 @@ impl App {
     fn handle_repository_browser(&mut self, key: KeyEvent) {
         let effect = self.repository_browser.handle_key(key);
         self.apply_repository_browser_effect_option(effect);
+    }
+
+    fn open_author_filter(&mut self) {
+        let Some(repo) = self.session.data().filter(|repo| !repo.is_local()) else {
+            return;
+        };
+        self.author_filter.open(&repo.root, &repo.commits);
+        self.mode = Mode::AuthorFilter;
+    }
+
+    fn handle_author_filter(&mut self, key: KeyEvent) {
+        match self.author_filter.handle_key(key) {
+            Some(AuthorFilterEffect::Close) => self.mode = Mode::Normal,
+            Some(AuthorFilterEffect::Changed) => self.reconcile_graph_selection(),
+            None => {}
+        }
     }
 
     fn open_git_command(&mut self) {
@@ -2597,7 +2722,7 @@ impl App {
                 );
             }
             View::Graph => {
-                let len = self.repository().map_or(0, |repo| repo.commits.len());
+                let len = self.visible_graph_len();
                 move_table(&mut self.graph_state, len, delta);
                 self.graph_scroll_to_selection = true;
             }
@@ -2622,11 +2747,8 @@ impl App {
                 );
             }
             View::Graph => {
-                self.graph_state.select(
-                    self.repository()
-                        .is_some_and(|repo| !repo.commits.is_empty())
-                        .then_some(0),
-                );
+                self.graph_state
+                    .select((self.visible_graph_len() > 0).then_some(0));
                 self.graph_scroll_to_selection = true;
             }
         }
@@ -2647,10 +2769,8 @@ impl App {
                     .select_last(self.session.data(), worktree_viewport, explorer_viewport);
             }
             View::Graph => {
-                self.graph_state.select(
-                    self.repository()
-                        .and_then(|repo| repo.commits.len().checked_sub(1)),
-                );
+                self.graph_state
+                    .select(self.visible_graph_len().checked_sub(1));
                 self.graph_scroll_to_selection = true;
             }
         }
@@ -2721,9 +2841,7 @@ impl App {
         };
         let selection = self.changes.capture_selection(repo);
         let selected_oid = self
-            .graph_state
-            .selected()
-            .and_then(|index| repo.commits.get(index))
+            .selected_graph_commit()
             .map(|commit| commit.oid.clone());
 
         if self

@@ -8,7 +8,7 @@ use ratatui::{
 };
 
 use crate::app::{
-    App, BrowserTab, HitTarget, LeftPane, Mode, PullRequest, RemoteItems,
+    App, BrowserTab, GraphHitTarget, HitTarget, LeftPane, Mode, PullRequest, RemoteItems,
     RepositoryBrowserHitTarget, Settings, View,
 };
 
@@ -40,7 +40,18 @@ fn renders_every_primary_surface() {
     run_git(root, &["commit", "-m", "initial commit"]);
     fs::write(root.join("second.txt"), "second\n").unwrap();
     run_git(root, &["add", "."]);
-    run_git(root, &["commit", "-m", "second commit"]);
+    run_git(
+        root,
+        &[
+            "-c",
+            "user.name=Second Author",
+            "-c",
+            "user.email=second@example.com",
+            "commit",
+            "-m",
+            "second commit",
+        ],
+    );
     fs::write(root.join("tracked.txt"), "changed\n").unwrap();
     fs::write(root.join("untracked.txt"), "new\n").unwrap();
 
@@ -695,6 +706,37 @@ fn renders_every_primary_surface() {
     assert!(graph.x >= worktree.right());
     assert!(app.regions.diff.is_none());
 
+    let author_header = app
+        .regions
+        .hit_target_rect(HitTarget::Graph(GraphHitTarget::AuthorHeader))
+        .unwrap();
+    click(&mut app, author_header.x, author_header.y);
+    assert_eq!(app.mode, Mode::AuthorFilter);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let second_author = app
+        .author_filter
+        .entries()
+        .iter()
+        .position(|entry| entry.name == "Second Author")
+        .unwrap();
+    let second_author_row = app
+        .regions
+        .hit_target_rect(HitTarget::Graph(GraphHitTarget::FilterItem(second_author)))
+        .unwrap();
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: second_author_row.x + 1,
+        row: second_author_row.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert_eq!(app.author_filter.state.selected(), Some(second_author));
+    click(&mut app, second_author_row.x + 1, second_author_row.y);
+    assert_eq!(app.visible_graph_indices().len(), 1);
+    app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+    assert_eq!(app.visible_graph_indices().len(), 2);
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::Normal);
+
     let branch_history = app.regions.history_list.unwrap();
     click(&mut app, branch_history.x + 1, branch_history.y);
     assert_eq!(app.changes.history_state.selected(), Some(0));
@@ -743,7 +785,22 @@ fn renders_every_primary_surface() {
         commit_diff_screen.contains("diff --git a/fixtures/file-00"),
         "the first file heading should be visible"
     );
+    let commit_diff = app.regions.diff.unwrap();
+    let unwrapped_file_summary: String = (commit_diff.x..commit_diff.right())
+        .map(|column| terminal.backend().buffer()[(column, commit_diff.y + 3)].symbol())
+        .collect();
+    assert!(!unwrapped_file_summary.contains("fixtures/file-05.txt"));
     assert!(app.regions.graph_table.is_none());
+    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let mut wrapped_file_summary = String::new();
+    for row in commit_diff.y + 3..commit_diff.y + 9 {
+        for column in commit_diff.x..commit_diff.right() {
+            wrapped_file_summary.push_str(terminal.backend().buffer()[(column, row)].symbol());
+        }
+    }
+    assert!(wrapped_file_summary.contains("fixtures/file-05.txt"));
+    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
 
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     assert_eq!(app.view, View::Graph);

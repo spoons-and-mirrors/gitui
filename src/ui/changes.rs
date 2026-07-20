@@ -5,7 +5,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, List, ListItem, Paragraph, Wrap},
 };
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{App, DiffHunkRegion, LeftPane, Mode, TextInput, View},
@@ -287,11 +287,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         None
     };
     let selected_graph_commit = (app.view == View::Graph && app.graph_commit_open)
-        .then(|| {
-            app.graph_state
-                .selected()
-                .and_then(|index| repo.commits.get(index))
-        })
+        .then(|| app.selected_graph_commit())
         .flatten();
     let selected_commit = selected_history.or(selected_graph_commit);
     let selected_change = if selected_commit.is_none() {
@@ -332,7 +328,31 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     );
     let inspecting_commit = selected_commit.is_some();
     let show_summary = inspecting_commit || selected_change.is_some();
-    let summary_height = if show_summary { 3 } else { 0 };
+    let live_summary = selected_change.map(|change| DiffSummary {
+        files: vec![change.path.clone()],
+        additions: change.additions,
+        deletions: change.deletions,
+    });
+    let summary = selected_commit
+        .and_then(|commit| app.commit_summaries.get(&commit.oid))
+        .or(live_summary.as_ref());
+    let summary_unavailable =
+        selected_commit.is_some_and(|commit| app.commit_summaries.failed(&commit.oid));
+    let maximum_summary_height = columns[1]
+        .height
+        .saturating_sub(7)
+        .clamp(3, 8)
+        .min(columns[1].height);
+    let summary_height = if show_summary {
+        diff_summary_height(
+            summary,
+            diff_header.width,
+            app.changes.diff_wrap,
+            maximum_summary_height,
+        )
+    } else {
+        0
+    };
     let diff_body = Rect::new(
         diff_header.x,
         diff_header
@@ -391,26 +411,17 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         diff_header,
     );
     if show_summary {
-        let live_summary = selected_change.map(|change| DiffSummary {
-            files: vec![change.path.clone()],
-            additions: change.additions,
-            deletions: change.deletions,
-        });
-        let summary = selected_commit
-            .and_then(|commit| app.commit_summaries.get(&commit.oid))
-            .or(live_summary.as_ref());
-        let summary_unavailable =
-            selected_commit.is_some_and(|commit| app.commit_summaries.failed(&commit.oid));
         draw_diff_summary(
             frame,
             Rect::new(
                 diff_header.x,
                 diff_header.y.saturating_add(2),
                 diff_header.width,
-                2,
+                summary_height.saturating_sub(1),
             ),
             summary,
             summary_unavailable,
+            app.changes.diff_wrap,
         );
     }
     let show_hunk_actions =
@@ -860,9 +871,15 @@ fn draw_diff_summary(
     area: Rect,
     summary: Option<&DiffSummary>,
     unavailable: bool,
+    wrapped: bool,
 ) {
     let stats_area = Rect::new(area.x, area.y, area.width, 1);
-    let files_area = Rect::new(area.x, area.y.saturating_add(1), area.width, 1);
+    let files_area = Rect::new(
+        area.x,
+        area.y.saturating_add(1),
+        area.width,
+        area.height.saturating_sub(1),
+    );
     let Some(summary) = summary else {
         let state = if unavailable {
             "unavailable"
@@ -920,22 +937,80 @@ fn draw_diff_summary(
         stats_area,
     );
     let label = "FILES  ";
-    let files = truncate_width(
-        &summary.files.join("  "),
-        usize::from(area.width).saturating_sub(label.len()),
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                label,
-                Style::default()
-                    .fg(palette().muted)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(files, Style::default().fg(palette().cyan)),
-        ])),
-        files_area,
-    );
+    let available = usize::from(area.width).saturating_sub(label.len());
+    let file_lines = if wrapped {
+        wrapped_file_summary(
+            &summary.files.join("  "),
+            available,
+            usize::from(files_area.height),
+        )
+    } else {
+        vec![truncate_width(&summary.files.join("  "), available)]
+    };
+    let lines = file_lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, files)| {
+            Line::from(vec![
+                Span::styled(
+                    if index == 0 { label } else { "       " },
+                    Style::default()
+                        .fg(palette().muted)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(files, Style::default().fg(palette().cyan)),
+            ])
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(Text::from(lines)), files_area);
+}
+
+fn diff_summary_height(
+    summary: Option<&DiffSummary>,
+    width: u16,
+    wrapped: bool,
+    maximum: u16,
+) -> u16 {
+    if !wrapped {
+        return 3.min(maximum);
+    }
+    let file_width = usize::from(width).saturating_sub("FILES  ".len());
+    let rows = summary.map_or(1, |summary| {
+        wrapped_file_summary(&summary.files.join("  "), file_width, usize::MAX)
+            .len()
+            .max(1)
+    });
+    (rows as u16).saturating_add(2).min(maximum)
+}
+
+fn wrapped_file_summary(text: &str, width: usize, maximum_lines: usize) -> Vec<String> {
+    if width == 0 || maximum_lines == 0 {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut line_width = 0usize;
+    let mut truncated = false;
+    for character in text.chars() {
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if line_width > 0 && line_width.saturating_add(character_width) > width {
+            if lines.len().saturating_add(1) >= maximum_lines {
+                truncated = true;
+                break;
+            }
+            lines.push(std::mem::take(&mut line));
+            line_width = 0;
+        }
+        line.push(character);
+        line_width = line_width.saturating_add(character_width);
+    }
+    if !line.is_empty() && lines.len() < maximum_lines {
+        lines.push(line);
+    }
+    if truncated && let Some(last) = lines.last_mut() {
+        *last = format!("{}…", truncate_width(last, width.saturating_sub(1)));
+    }
+    lines
 }
 
 struct VisibleHunk {
@@ -1209,4 +1284,30 @@ fn diff_scroll_thumb(
         track.width,
         thumb_height,
     )
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::*;
+
+    #[test]
+    fn wraps_file_summaries_with_a_bounded_height() {
+        let text = "src/one.rs  src/two.rs  src/three.rs  src/four.rs";
+        let lines = wrapped_file_summary(text, 12, 3);
+        assert_eq!(lines.len(), 3);
+        assert!(lines.last().unwrap().ends_with('…'));
+        assert!(
+            lines
+                .iter()
+                .all(|line| UnicodeWidthStr::width(line.as_str()) <= 12)
+        );
+
+        let summary = DiffSummary {
+            files: vec![text.to_owned()],
+            additions: 1,
+            deletions: 1,
+        };
+        assert_eq!(diff_summary_height(Some(&summary), 19, false, 8), 3);
+        assert!(diff_summary_height(Some(&summary), 19, true, 8) > 3);
+    }
 }
