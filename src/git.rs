@@ -168,6 +168,13 @@ pub struct Commit {
     pub graph: Vec<GraphCell>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiffSummary {
+    pub files: Vec<String>,
+    pub additions: u64,
+    pub deletions: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GraphCell {
     pub symbol: char,
@@ -1045,6 +1052,65 @@ pub fn commit_diff(root: &Path, oid: &str) -> Result<String> {
         bail!("{}", clean_stderr(&output));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+pub fn commit_summaries(root: &Path, oids: &[String]) -> Result<HashMap<String, DiffSummary>> {
+    if oids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut args = vec![
+        "show",
+        "--numstat",
+        "-z",
+        "--format=%x1e%H%x00",
+        "--no-renames",
+        "--first-parent",
+    ];
+    args.extend(oids.iter().map(String::as_str));
+    let output = run(root, &args)?;
+    if !output.status.success() {
+        bail!("{}", clean_stderr(&output));
+    }
+    Ok(parse_commit_summaries(&output.stdout))
+}
+
+fn parse_commit_summaries(bytes: &[u8]) -> HashMap<String, DiffSummary> {
+    let mut summaries = HashMap::new();
+    for record in bytes.split(|byte| *byte == 0x1e) {
+        let Some(separator) = record.iter().position(|byte| *byte == 0) else {
+            continue;
+        };
+        let (oid, entries) = record.split_at(separator);
+        let entries = &entries[1..];
+        let oid = String::from_utf8_lossy(trim_ascii(oid)).into_owned();
+        if oid.is_empty() {
+            continue;
+        }
+        let mut summary = DiffSummary::default();
+        for entry in entries.split(|byte| *byte == 0) {
+            let entry = entry.strip_prefix(b"\n").unwrap_or(entry);
+            if entry.is_empty() {
+                continue;
+            }
+            let mut fields = entry.splitn(3, |byte| *byte == b'\t');
+            let (Some(additions), Some(deletions), Some(path)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            summary.additions = summary
+                .additions
+                .saturating_add(String::from_utf8_lossy(additions).parse().unwrap_or(0));
+            summary.deletions = summary
+                .deletions
+                .saturating_add(String::from_utf8_lossy(deletions).parse().unwrap_or(0));
+            summary
+                .files
+                .push(String::from_utf8_lossy(path).into_owned());
+        }
+        summaries.insert(oid, summary);
+    }
+    summaries
 }
 
 fn branch_name(root: &Path) -> Result<String> {
@@ -1937,6 +2003,30 @@ mod tests {
         repository.apply(update);
         assert!(repository.files.iter().any(|file| file == "new.txt"));
         assert_eq!(repository.commits[0].oid, original_commit);
+    }
+
+    #[test]
+    fn parses_batched_commit_change_summaries() {
+        let summaries = parse_commit_summaries(
+            b"\x1eabc123\0\0\n12\t3\tsrc/app.rs\0-\t-\tassets/logo.png\0\x1edef456\0\0\n4\t0\tREADME.md\0",
+        );
+
+        assert_eq!(
+            summaries["abc123"],
+            DiffSummary {
+                files: vec!["src/app.rs".to_owned(), "assets/logo.png".to_owned()],
+                additions: 12,
+                deletions: 3,
+            }
+        );
+        assert_eq!(
+            summaries["def456"],
+            DiffSummary {
+                files: vec!["README.md".to_owned()],
+                additions: 4,
+                deletions: 0,
+            }
+        );
     }
 
     #[test]

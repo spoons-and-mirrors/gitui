@@ -8,7 +8,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    app::Mode,
+    app::{CommitSummaryCache, Mode},
     git::{Commit, RepositoryData},
 };
 
@@ -17,6 +17,7 @@ use super::{draw_empty, fill, palette, truncate_width};
 pub(super) fn draw_graph(
     frame: &mut Frame<'_>,
     repo: Option<&RepositoryData>,
+    summaries: &CommitSummaryCache,
     state: &mut TableState,
     scroll_to_selection: &mut bool,
     area: Rect,
@@ -66,23 +67,24 @@ pub(super) fn draw_graph(
         table_area.height.saturating_sub(2),
     );
 
-    let maximum_graph_width = table_area.width.saturating_sub(35).clamp(8, 40);
+    let maximum_graph_width = table_area.width.saturating_sub(42).clamp(8, 40);
     let graph_width = repo.graph_width.clamp(8, maximum_graph_width as usize) as u16;
     let compact = table_area.width < 110;
     let widths = if compact {
         vec![
             Constraint::Length(graph_width),
-            Constraint::Min(20),
+            Constraint::Min(16),
+            Constraint::Length(11),
             Constraint::Length(14),
-            Constraint::Length(9),
         ]
     } else {
         vec![
             Constraint::Length(graph_width),
-            Constraint::Min(30),
+            Constraint::Min(24),
+            Constraint::Length(11),
             Constraint::Length(16),
             Constraint::Length(16),
-            Constraint::Length(9),
+            Constraint::Length(7),
         ]
     };
 
@@ -103,11 +105,18 @@ pub(super) fn draw_graph(
         .iter()
         .skip(offset)
         .take(viewport)
-        .map(|commit| graph_row(commit, compact));
+        .map(|commit| graph_row(commit, summaries.get(&commit.oid), compact));
     let headers = if compact {
-        Row::new(["GRAPH", "DESCRIPTION", "AUTHOR", "COMMIT"])
+        Row::new(["GRAPH", "DESCRIPTION", "CHANGES", "AUTHOR"])
     } else {
-        Row::new(["GRAPH", "DESCRIPTION", "DATE", "AUTHOR", "COMMIT"])
+        Row::new([
+            "GRAPH",
+            "DESCRIPTION",
+            "CHANGES",
+            "DATE",
+            "AUTHOR",
+            "COMMIT",
+        ])
     }
     .style(
         Style::default()
@@ -231,7 +240,11 @@ fn history_item_height(commit: &Commit) -> usize {
     1 + usize::from(!commit.refs.is_empty())
 }
 
-fn graph_row(commit: &Commit, compact: bool) -> Row<'static> {
+fn graph_row(
+    commit: &Commit,
+    summary: Option<&crate::git::DiffSummary>,
+    compact: bool,
+) -> Row<'static> {
     let graph = Line::from(
         commit
             .graph
@@ -274,22 +287,41 @@ fn graph_row(commit: &Commit, compact: bool) -> Row<'static> {
     ));
 
     let short_oid: String = commit.oid.chars().take(7).collect();
+    let changes = commit_changes(summary);
     if compact {
         Row::new([
             Cell::from(graph),
             Cell::from(Line::from(description)),
+            changes,
             Cell::from(commit.author.clone()).style(Style::default().fg(palette().muted)),
-            Cell::from(short_oid).style(Style::default().fg(palette().muted)),
         ])
     } else {
         Row::new([
             Cell::from(graph),
             Cell::from(Line::from(description)),
+            changes,
             Cell::from(commit.date.clone()).style(Style::default().fg(palette().muted)),
             Cell::from(commit.author.clone()).style(Style::default().fg(palette().muted)),
             Cell::from(short_oid).style(Style::default().fg(palette().muted)),
         ])
     }
+}
+
+fn commit_changes(summary: Option<&crate::git::DiffSummary>) -> Cell<'static> {
+    let Some(summary) = summary else {
+        return Cell::from("…").style(Style::default().fg(palette().faint));
+    };
+    Cell::from(Line::from(vec![
+        Span::styled(
+            format!("+{}", summary.additions),
+            Style::default().fg(palette().green),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("-{}", summary.deletions),
+            Style::default().fg(palette().red),
+        ),
+    ]))
 }
 
 fn history_item(commit: &Commit, width: usize) -> ListItem<'static> {

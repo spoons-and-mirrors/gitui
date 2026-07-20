@@ -365,6 +365,19 @@ fn renders_every_primary_surface() {
     assert_eq!(app.changes.history_state.selected(), None);
     assert!(!app.changes.history_focused);
     assert!(app.changes.diff.contains("tracked.txt"));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let diff = app.regions.diff.unwrap();
+    let summary_row: String = (diff.x..diff.right())
+        .map(|column| terminal.backend().buffer()[(column, diff.y + 3)].symbol())
+        .collect();
+    let files_row: String = (diff.x..diff.right())
+        .map(|column| terminal.backend().buffer()[(column, diff.y + 4)].symbol())
+        .collect();
+    assert!(summary_row.contains("CHANGES"));
+    assert!(summary_row.contains("+1"));
+    assert!(summary_row.contains("-1"));
+    assert!(files_row.contains("FILES"));
+    assert!(files_row.contains("tracked.txt"));
     let tracked_diff = app.changes.diff.clone();
     app.changes.set_diff(
         concat!(
@@ -653,7 +666,12 @@ fn renders_every_primary_surface() {
 
     app.view = View::Graph;
     app.mode = Mode::Normal;
+    let visible_oid = app.repository().unwrap().commits[0].oid.clone();
+    wait_for(&mut app, |app| {
+        app.commit_summaries.get(&visible_oid).is_some()
+    });
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let visible_summary = app.commit_summaries.get(&visible_oid).unwrap();
     let screen: String = terminal
         .backend()
         .buffer()
@@ -662,6 +680,11 @@ fn renders_every_primary_surface() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(screen.contains("AUTHOR"));
+    assert!(screen.contains("CHANGES"));
+    assert!(screen.contains(&format!(
+        "+{} -{}",
+        visible_summary.additions, visible_summary.deletions
+    )));
     assert!(screen.contains("HEAD"));
     assert!(screen.contains("Render Test"));
     assert!(screen.contains("WORKTREE"));
@@ -700,6 +723,10 @@ fn renders_every_primary_surface() {
     assert!(app.graph_commit_open);
     wait_for_preview(&mut app);
     assert!(app.changes.diff.contains("tracked.txt"));
+    let commit_oid = app.repository().unwrap().commits[1].oid.clone();
+    wait_for(&mut app, |app| {
+        app.commit_summaries.get(&commit_oid).is_some()
+    });
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let commit_diff_screen: String = terminal
         .backend()
@@ -710,6 +737,8 @@ fn renders_every_primary_surface() {
         .collect();
     assert!(commit_diff_screen.contains("DIFF"));
     assert!(commit_diff_screen.contains("initial commit"));
+    assert!(commit_diff_screen.contains("CHANGES"));
+    assert!(commit_diff_screen.contains("FILES"));
     assert!(
         commit_diff_screen.contains("diff --git a/fixtures/file-00"),
         "the first file heading should be visible"
@@ -1225,7 +1254,16 @@ fn selects_visible_text_and_suppresses_clicks_after_dragging() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     let diff = app.regions.diff.unwrap();
-    let start = (diff.x + 1, diff.y + 3);
+    let buffer = terminal.backend().buffer();
+    let start = (diff.y..diff.bottom())
+        .find_map(|row| {
+            let text: String = (diff.x..diff.right())
+                .map(|column| buffer[(column, row)].symbol())
+                .collect();
+            text.find("select")
+                .map(|column| (diff.x + column as u16, row))
+        })
+        .expect("rendered preview should contain selectable text");
     let end = (start.0 + 5, start.1);
     app.handle_mouse(mouse(
         MouseEventKind::Down(MouseButton::Left),

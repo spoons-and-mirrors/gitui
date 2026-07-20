@@ -9,7 +9,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::{App, DiffHunkRegion, LeftPane, Mode, TextInput, View},
-    git::Change,
+    git::{Change, DiffSummary},
     tree::{ExplorerRow, WorktreeRow, WorktreeSection},
 };
 
@@ -319,14 +319,6 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         columns[1].width.saturating_sub(2),
         1,
     );
-    let diff_body = Rect::new(
-        diff_header.x,
-        diff_header.y.saturating_add(2),
-        diff_header.width,
-        columns[1]
-            .bottom()
-            .saturating_sub(diff_header.y.saturating_add(3)),
-    );
     let state = selected_commit.map_or_else(
         || {
             selected_change.map_or(
@@ -339,6 +331,22 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         |_| "commit",
     );
     let inspecting_commit = selected_commit.is_some();
+    let show_summary = inspecting_commit || selected_change.is_some();
+    let summary_height = if show_summary { 3 } else { 0 };
+    let diff_body = Rect::new(
+        diff_header.x,
+        diff_header
+            .y
+            .saturating_add(2)
+            .saturating_add(summary_height),
+        diff_header.width,
+        columns[1].bottom().saturating_sub(
+            diff_header
+                .y
+                .saturating_add(3)
+                .saturating_add(summary_height),
+        ),
+    );
     let wrap_label = if app.changes.diff_wrap {
         "  w:on"
     } else {
@@ -382,6 +390,29 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         ])),
         diff_header,
     );
+    if show_summary {
+        let live_summary = selected_change.map(|change| DiffSummary {
+            files: vec![change.path.clone()],
+            additions: change.additions,
+            deletions: change.deletions,
+        });
+        let summary = selected_commit
+            .and_then(|commit| app.commit_summaries.get(&commit.oid))
+            .or(live_summary.as_ref());
+        let summary_unavailable =
+            selected_commit.is_some_and(|commit| app.commit_summaries.failed(&commit.oid));
+        draw_diff_summary(
+            frame,
+            Rect::new(
+                diff_header.x,
+                diff_header.y.saturating_add(2),
+                diff_header.width,
+                2,
+            ),
+            summary,
+            summary_unavailable,
+        );
+    }
     let show_hunk_actions =
         !inspecting_commit && selected_change.is_some_and(|change| !change.staged);
     let mut preview = prepare_preview_lines(app, diff_body, &syntax_path, true, inspecting_commit);
@@ -822,6 +853,89 @@ fn render_scrollable_content(
             thumb,
         );
     }
+}
+
+fn draw_diff_summary(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    summary: Option<&DiffSummary>,
+    unavailable: bool,
+) {
+    let stats_area = Rect::new(area.x, area.y, area.width, 1);
+    let files_area = Rect::new(area.x, area.y.saturating_add(1), area.width, 1);
+    let Some(summary) = summary else {
+        let state = if unavailable {
+            "unavailable"
+        } else {
+            "loading…"
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    "CHANGES  ",
+                    Style::default()
+                        .fg(palette().muted)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(state, Style::default().fg(palette().faint)),
+            ])),
+            stats_area,
+        );
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                format!("FILES  {state}"),
+                Style::default().fg(palette().faint),
+            )),
+            files_area,
+        );
+        return;
+    };
+
+    let file_count = summary.files.len();
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "CHANGES  ",
+                Style::default()
+                    .fg(palette().muted)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("+{}", summary.additions),
+                Style::default().fg(palette().green),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!("-{}", summary.deletions),
+                Style::default().fg(palette().red),
+            ),
+            Span::styled(
+                format!(
+                    "  {file_count} {}",
+                    if file_count == 1 { "file" } else { "files" }
+                ),
+                Style::default().fg(palette().faint),
+            ),
+        ])),
+        stats_area,
+    );
+    let label = "FILES  ";
+    let files = truncate_width(
+        &summary.files.join("  "),
+        usize::from(area.width).saturating_sub(label.len()),
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                label,
+                Style::default()
+                    .fg(palette().muted)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(files, Style::default().fg(palette().cyan)),
+        ])),
+        files_area,
+    );
 }
 
 struct VisibleHunk {

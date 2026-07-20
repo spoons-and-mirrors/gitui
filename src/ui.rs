@@ -66,6 +66,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         app.regions.graph_table = history::draw_graph(
             frame,
             app.session.data(),
+            &app.commit_summaries,
             &mut app.graph_state,
             &mut app.graph_scroll_to_selection,
             graph_area,

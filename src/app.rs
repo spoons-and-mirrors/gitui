@@ -1,5 +1,6 @@
 mod actions;
 mod changes;
+mod commit_summary;
 mod explorer;
 mod file_search;
 mod fuzzy;
@@ -8,6 +9,7 @@ mod text_input;
 
 pub(crate) use actions::{ACTION_ITEMS, ActionsState, CommandStatus};
 pub use changes::{ChangesState, LeftPane};
+pub(crate) use commit_summary::CommitSummaryCache;
 pub use explorer::{Explorer, PickerAction, PickerEntry};
 pub(crate) use file_search::FileSearch;
 pub(crate) use repository_browser::{
@@ -193,6 +195,7 @@ pub struct App {
     pub changes: ChangesState,
     pub graph_state: TableState,
     pub(crate) graph_scroll_to_selection: bool,
+    pub(crate) commit_summaries: CommitSummaryCache,
     pub(crate) commit_input: TextInput,
     commit_draft_path: Option<PathBuf>,
     commit_draft_due: Option<Instant>,
@@ -317,6 +320,7 @@ impl App {
             changes,
             graph_state,
             graph_scroll_to_selection: true,
+            commit_summaries: CommitSummaryCache::default(),
             commit_input: TextInput::default(),
             commit_draft_path: None,
             commit_draft_due: None,
@@ -1221,6 +1225,8 @@ impl App {
     pub fn poll_worker(&mut self) -> bool {
         let mut changed = self.mode == Mode::Explorer && self.workspace_explorer.poll_index();
         changed |= self.repository_browser.poll();
+        self.prefetch_commit_summaries();
+        changed |= self.commit_summaries.poll();
         changed |= self.commit_input.poll_blink(self.mode == Mode::Commit);
         changed |= self.flush_commit_draft_if_due();
         if let Some(dialog) = &mut self.file_dialog {
@@ -1381,6 +1387,41 @@ impl App {
             .changes
             .poll_preview(self.session.data().map(|repo| repo.root.as_path()));
         changed
+    }
+
+    fn prefetch_commit_summaries(&mut self) {
+        let Some(repo) = self.session.data().filter(|repo| !repo.is_local()) else {
+            return;
+        };
+        let mut oids = Vec::new();
+        if self.view == View::Graph {
+            let viewport = self
+                .regions
+                .graph_table
+                .map_or(40, |region| usize::from(region.height));
+            oids.extend(
+                repo.commits
+                    .iter()
+                    .skip(self.graph_state.offset())
+                    .take(viewport)
+                    .map(|commit| commit.oid.clone()),
+            );
+        }
+        if self.changes.history_focused
+            && let Some(commit) = self
+                .changes
+                .history_state
+                .selected()
+                .and_then(|index| repo.history.get(index))
+        {
+            oids.push(commit.oid.clone());
+        }
+        if oids.is_empty() {
+            return;
+        }
+        let root = repo.root.clone();
+        self.commit_summaries
+            .request(&root, oids.iter().map(String::as_str));
     }
 
     pub fn requires_render_before_next_event(&self) -> bool {

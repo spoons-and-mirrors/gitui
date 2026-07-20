@@ -5,9 +5,9 @@
 - Local workspaces for browsing, searching, and previewing directories that are not Git repositories.
 - A resizable current-branch history shelf with HEAD, branch, remote, and tag decorations; selecting a commit shows its patch.
 - A repository Actions menu for committing, pushing, fetching, pulling with rebase, and running non-interactive Git commands with captured output.
-- An all-refs commit graph showing branches, remotes, tags, authors, dates, and hashes.
+- An all-refs commit graph showing branches, remotes, tags, authors, dates, hashes, and lazy-loaded line-change totals.
 - A filterable repository browser for local and remote branches plus open GitHub pull requests and issues.
-- Source-aware diffs with line numbers, syntax color, and tinted additions, deletions, and hunk headers.
+- Source-aware diffs with changed-file and line-count summaries, line numbers, syntax color, and tinted additions, deletions, and hunk headers.
 - Nonblocking worktree refresh when files, the index, branches, or HEAD change outside hunkle.
 - Automatic OpenCode theme matching, with Catppuccin Macchiato as the fallback.
 
@@ -93,6 +93,7 @@ The binary stays deliberately direct, with modules split by the behavior they ow
 | `app` | Global input routing, workspace state, Git mutations, settings, and notices |
 | `app::actions` | Repository Actions, command input, and captured results |
 | `app::changes` | Changes-screen selection, navigation, and displayed content |
+| `app::commit_summary` | Lazy, repository-scoped cache of commit file and line-change summaries |
 | `app::explorer` | Workspace discovery, navigation, and fuzzy search |
 | `app::repository_browser` | Branch, pull-request, and issue interaction plus cached remote data |
 | `repository_session` | Active workspace lifecycle, background operations, and scoped refreshes |
