@@ -109,6 +109,16 @@ pub(crate) fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn safe_regular_file(root: &Path, relative: &str) -> Result<PathBuf> {
+    let path = safe_path(root, relative)?;
+    let metadata = fs::symlink_metadata(&path)
+        .with_context(|| format!("could not inspect {}", path.display()))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        bail!("{} is not a regular file", path.display());
+    }
+    Ok(path)
+}
+
 fn safe_path(root: &Path, relative: &str) -> Result<PathBuf> {
     let root_metadata = fs::symlink_metadata(root)
         .with_context(|| format!("could not inspect workspace {}", root.display()))?;
@@ -261,6 +271,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn validates_regular_files_inside_the_workspace() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::create_dir(root.join("src")).unwrap();
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+        assert_eq!(
+            safe_regular_file(root, "src/main.rs").unwrap(),
+            root.join("src/main.rs")
+        );
+        assert!(safe_regular_file(root, "../outside").is_err());
+        assert!(safe_regular_file(root, "src").is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn deletes_a_symlink_without_following_it() {
@@ -330,5 +355,7 @@ mod tests {
             .is_err()
         );
         assert!(outside.path().join("keep").exists());
+
+        assert!(safe_regular_file(workspace.path(), "link/keep").is_err());
     }
 }

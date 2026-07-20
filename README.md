@@ -36,6 +36,7 @@ hunkle opens exactly the current or requested directory. When that directory is 
 | `F3` | Fuzzy-search repository files from anywhere |
 | `F2` | Rename the selected file or folder in Files |
 | `Ctrl+Delete` | Delete the selected file or folder after confirmation |
+| `Ctrl+S` | Format the selected file using an available file-type formatter |
 | `h`, `l`, `Left`, `Right` | Navigate the tree; Right enters/stages in hunk mode and Left exits it |
 | `Enter` | Toggle the selected directory |
 | `Space` | Stage or unstage the selected entry, or stage the selected hunk |

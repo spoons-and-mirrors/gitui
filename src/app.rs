@@ -32,6 +32,7 @@ use ratatui::{
 
 use crate::{
     filesystem::{FileOperation, validate_name},
+    formatter,
     git::{self, RefreshScope, RepositoryData},
     repository_session::{LoadKind, Mutation, RepositorySession, WorkerCompletion},
     selection::{SelectionOutcome, SelectionState},
@@ -455,6 +456,10 @@ impl App {
 
     pub(crate) fn fetch_running(&self) -> bool {
         self.session.fetch_running()
+    }
+
+    pub(crate) fn format_running(&self) -> bool {
+        self.session.format_running()
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
@@ -1409,6 +1414,22 @@ impl App {
                     }
                     Err(error) => self.notice = Some(error),
                 },
+                WorkerCompletion::Format(done) => match done.result {
+                    Ok(output) if output.success => {
+                        self.reload(RefreshScope::WORKTREE);
+                        self.notice =
+                            Some(format!("Formatted {} with {}", done.path, done.formatter));
+                    }
+                    Ok(output) => {
+                        let fallback = format!("{} could not format {}", done.formatter, done.path);
+                        self.notice = Some(if output.stderr.trim().is_empty() {
+                            first_error(&output.stdout, &fallback)
+                        } else {
+                            first_error(&output.stderr, &fallback)
+                        });
+                    }
+                    Err(error) => self.notice = Some(error),
+                },
             }
         }
         while self.session.next_worktree_change() {
@@ -1586,6 +1607,16 @@ impl App {
             return;
         }
         match key.code {
+            KeyCode::Char('s')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.view == View::Changes
+                    && self.changes.pane == LeftPane::Files =>
+            {
+                self.format_selected_file();
+            }
+            KeyCode::Char('q') if self.format_running() => {
+                self.notice = Some("A formatter is still running".to_owned())
+            }
             KeyCode::Char('q') if self.commit_running() || self.session.command_running() => {
                 self.notice = Some("A Git operation is still running".to_owned())
             }
@@ -1609,7 +1640,7 @@ impl App {
             }
             KeyCode::Char('r') => self.reload(RefreshScope::ALL),
             KeyCode::Char('o') => self.open_explorer(),
-            KeyCode::Char('s') => self.mode = Mode::Settings,
+            KeyCode::Char('s') if key.modifiers == KeyModifiers::NONE => self.mode = Mode::Settings,
             KeyCode::Char('b') => self.open_repository_browser(),
             KeyCode::Char('x') => self.open_actions(),
             KeyCode::Char('g') => self.open_git_command(),
@@ -2464,6 +2495,35 @@ impl App {
             LeftPane::Files => self.changes.selected_explorer_file_path(repo)?,
         };
         Some((repo.root.clone(), PathBuf::from(path)))
+    }
+
+    fn format_selected_file(&mut self) {
+        let Some(repo) = self.repository() else {
+            self.notice = Some("Open a workspace first".to_owned());
+            return;
+        };
+        let Some(path) = self
+            .changes
+            .selected_explorer_file_path(repo)
+            .map(str::to_owned)
+        else {
+            self.notice = Some("Select a file to format".to_owned());
+            return;
+        };
+        let root = repo.root.clone();
+        let command = match formatter::detect(&root, Path::new(&path)) {
+            Ok(command) => command,
+            Err(error) => {
+                self.notice = Some(error.to_string());
+                return;
+            }
+        };
+        let label = command.label;
+        if self.session.start_format(path.clone(), command) {
+            self.notice = Some(format!("Formatting {path} with {label}…"));
+        } else {
+            self.notice = Some("Another repository operation is still running".to_owned());
+        }
     }
 
     pub(crate) fn take_editor_request(&mut self) -> Option<EditorRequest> {
@@ -3575,6 +3635,64 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('E'), KeyModifiers::NONE));
         assert_eq!(app.mode, Mode::Editor);
         assert_eq!(app.editor_input, "code --wait");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn control_s_formats_the_selected_file_with_a_project_formatter() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::create_dir_all(root.join("node_modules/.bin")).unwrap();
+        fs::write(root.join("config.jsonc"), "{\"value\":true}\n").unwrap();
+        let formatter = root.join("node_modules/.bin/prettier");
+        fs::write(
+            &formatter,
+            "#!/bin/sh\nprintf '{\\n  \"formatted\": true\\n}\\n' > \"$2\"\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&formatter).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&formatter, permissions).unwrap();
+
+        let mut app = App::new(root.to_path_buf());
+        let repo = app.repository().unwrap().clone();
+        app.changes.set_pane(LeftPane::Files, Some(&repo));
+        assert!(app.changes.select_explorer_path(&repo, "config.jsonc", 20));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.format_running());
+        wait_for_state(&mut app, |app| !app.format_running());
+        assert_eq!(
+            fs::read_to_string(root.join("config.jsonc")).unwrap(),
+            "{\n  \"formatted\": true\n}\n"
+        );
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("Formatted config.jsonc with Prettier")
+        );
+    }
+
+    #[test]
+    fn control_s_reports_files_without_a_known_formatter() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::write(root.join("notes.txt"), "notes\n").unwrap();
+        let mut app = App::new(root.to_path_buf());
+        let repo = app.repository().unwrap().clone();
+        app.changes.set_pane(LeftPane::Files, Some(&repo));
+        assert!(app.changes.select_explorer_path(&repo, "notes.txt", 20));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("No known formatter for .txt files")
+        );
     }
 
     #[test]

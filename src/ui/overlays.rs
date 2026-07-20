@@ -1727,6 +1727,7 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
         help_line("a / u", "Stage / unstage all"),
         help_line("F2", "Rename file / folder"),
         help_line("Ctrl+Delete", "Delete file / folder"),
+        help_line("Ctrl+S", "Format selected file"),
         help_line("Drag", "Move file / folder"),
         help_line("c", "Commit editor"),
         help_line("← / →", "Commit cursor"),

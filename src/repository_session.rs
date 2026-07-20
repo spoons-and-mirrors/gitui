@@ -9,6 +9,7 @@ use anyhow::Result;
 
 use crate::{
     filesystem::{self, FileOperation},
+    formatter::{self, FormatCommand},
     git::{
         self, Change, CommandOutput, RefreshScope, RepositoryData, RepositoryKind, RepositoryUpdate,
     },
@@ -23,6 +24,7 @@ pub(crate) enum WorkerCompletion {
     Command(CommandCompletion),
     Mutation(Result<(), String>),
     FileOperation(FileOperationCompletion),
+    Format(FormatCompletion),
 }
 
 pub(crate) enum Mutation {
@@ -52,6 +54,12 @@ pub(crate) struct CommandCompletion {
 pub(crate) struct FileOperationCompletion {
     pub(crate) result: Result<Option<String>, String>,
     pub(crate) message: String,
+}
+
+pub(crate) struct FormatCompletion {
+    pub(crate) path: String,
+    pub(crate) formatter: &'static str,
+    pub(crate) result: Result<CommandOutput, String>,
 }
 
 #[derive(Debug)]
@@ -93,6 +101,10 @@ enum WorkerKind {
         selection: Option<String>,
         message: String,
     },
+    Format {
+        path: String,
+        formatter: &'static str,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +113,7 @@ enum Operation {
     Fetch,
     Command,
     Mutation,
+    Format,
     StatusCheck,
     Load(LoadKind),
 }
@@ -110,6 +123,7 @@ enum ForegroundOperation {
     Commit,
     Command,
     Mutation,
+    Format,
 }
 
 #[derive(Debug, Default)]
@@ -129,20 +143,26 @@ impl OperationState {
                     && !self.fetching
                     && !matches!(
                         self.foreground,
-                        Some(ForegroundOperation::Command | ForegroundOperation::Mutation)
+                        Some(
+                            ForegroundOperation::Command
+                                | ForegroundOperation::Mutation
+                                | ForegroundOperation::Format
+                        )
                     )
             }
             Operation::Command => self.foreground.is_none() && !self.fetching,
             Operation::Mutation => self.foreground.is_none() && !self.fetching && !self.loading,
+            Operation::Format => self.foreground.is_none() && !self.fetching && !self.loading,
             Operation::StatusCheck => {
                 self.foreground.is_none()
                     && !self.fetching
                     && !self.checking_status
                     && !self.loading
             }
-            Operation::Load(LoadKind::Open) => {
-                self.foreground != Some(ForegroundOperation::Mutation)
-            }
+            Operation::Load(LoadKind::Open) => !matches!(
+                self.foreground,
+                Some(ForegroundOperation::Mutation | ForegroundOperation::Format)
+            ),
             Operation::Load(LoadKind::Reload) => !self.loading,
         }
     }
@@ -156,6 +176,7 @@ impl OperationState {
             Operation::Fetch => self.fetching = true,
             Operation::Command => self.foreground = Some(ForegroundOperation::Command),
             Operation::Mutation => self.foreground = Some(ForegroundOperation::Mutation),
+            Operation::Format => self.foreground = Some(ForegroundOperation::Format),
             Operation::StatusCheck => self.checking_status = true,
             Operation::Load(_) => self.loading = true,
         }
@@ -173,10 +194,13 @@ impl OperationState {
             Operation::Mutation if self.foreground == Some(ForegroundOperation::Mutation) => {
                 self.foreground = None;
             }
+            Operation::Format if self.foreground == Some(ForegroundOperation::Format) => {
+                self.foreground = None;
+            }
             Operation::Fetch => self.fetching = false,
             Operation::StatusCheck => self.checking_status = false,
             Operation::Load(_) => self.loading = false,
-            Operation::Commit | Operation::Command | Operation::Mutation => {}
+            Operation::Commit | Operation::Command | Operation::Mutation | Operation::Format => {}
         }
     }
 
@@ -186,6 +210,7 @@ impl OperationState {
             Operation::Fetch => self.fetching,
             Operation::Command => self.foreground == Some(ForegroundOperation::Command),
             Operation::Mutation => self.foreground == Some(ForegroundOperation::Mutation),
+            Operation::Format => self.foreground == Some(ForegroundOperation::Format),
             Operation::StatusCheck => self.checking_status,
             Operation::Load(_) => self.loading,
         }
@@ -268,6 +293,10 @@ impl RepositorySession {
 
     pub(crate) fn command_running(&self) -> bool {
         self.operations.is_running(Operation::Command)
+    }
+
+    pub(crate) fn format_running(&self) -> bool {
+        self.operations.is_running(Operation::Format)
     }
 
     pub(crate) fn start_open(&mut self, path: PathBuf, fetch_interval: Duration) -> bool {
@@ -430,6 +459,28 @@ impl RepositorySession {
         true
     }
 
+    pub(crate) fn start_format(&mut self, path: String, command: FormatCommand) -> bool {
+        if !self.operations.can_start(Operation::Format) {
+            return false;
+        }
+        let Some(root) = self.data.as_ref().map(|repository| repository.root.clone()) else {
+            return false;
+        };
+
+        self.operations.start(Operation::Format);
+        let formatter = command.label;
+        let sender = self.worker_tx.clone();
+        thread::spawn(move || {
+            let result = formatter::run(&root, &path, &command).map_err(|error| error.to_string());
+            let _ = sender.send(WorkerResult {
+                kind: WorkerKind::Format { path, formatter },
+                root,
+                result,
+            });
+        });
+        true
+    }
+
     pub(crate) fn maybe_start_fetch(&mut self, enabled: bool, fetch_interval: Duration) {
         if !enabled
             || !self.operations.can_start(Operation::Fetch)
@@ -523,6 +574,16 @@ impl RepositorySession {
                         return Some(WorkerCompletion::FileOperation(FileOperationCompletion {
                             result: done.result.map(|_| selection),
                             message,
+                        }));
+                    }
+                }
+                WorkerKind::Format { path, formatter } => {
+                    self.operations.finish(Operation::Format);
+                    if active {
+                        return Some(WorkerCompletion::Format(FormatCompletion {
+                            path,
+                            formatter,
+                            result: done.result,
                         }));
                     }
                 }
@@ -803,6 +864,13 @@ mod tests {
         assert!(!mutating.can_start(Operation::Load(LoadKind::Open)));
         assert!(!mutating.can_start(Operation::Commit));
         assert!(!mutating.can_start(Operation::Fetch));
+
+        let mut formatting = OperationState::default();
+        assert!(formatting.start(Operation::Format));
+        assert!(!formatting.can_start(Operation::Commit));
+        assert!(!formatting.can_start(Operation::Fetch));
+        assert!(!formatting.can_start(Operation::Mutation));
+        assert!(!formatting.can_start(Operation::Load(LoadKind::Open)));
 
         let mut loading = OperationState::default();
         assert!(loading.start(Operation::Load(LoadKind::Open)));
