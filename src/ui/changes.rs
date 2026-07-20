@@ -297,7 +297,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .and_then(|index| repo.commits.get(index))
         })
         .flatten();
-    let selected_commit = selected_graph_commit.or(selected_history);
+    let selected_commit = selected_history.or(selected_graph_commit);
     let selected_change = if selected_commit.is_none() {
         app.changes
             .worktree_state

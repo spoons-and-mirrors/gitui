@@ -1046,9 +1046,6 @@ impl App {
     }
 
     fn select_history_row(&mut self, point: Position) -> bool {
-        if self.view != View::Changes {
-            return false;
-        }
         let Some(rect) = self
             .regions
             .history_list
@@ -1060,7 +1057,11 @@ impl App {
             return false;
         };
         let relative_row = usize::from(point.y - rect.y);
-        self.changes.select_history_row(repo, relative_row)
+        let selected = self.changes.select_history_row(repo, relative_row);
+        if selected && self.view == View::Graph {
+            self.graph_commit_open = true;
+        }
+        selected
     }
 
     fn select_graph_row(&mut self, point: Position) -> bool {
@@ -2154,6 +2155,7 @@ impl App {
         let Some(repo) = self.session.data() else {
             return;
         };
+        self.changes.clear_history_selection();
         self.changes.preview_commit(repo, &commit);
         self.graph_commit_open = true;
     }

@@ -667,9 +667,23 @@ fn renders_every_primary_surface() {
     assert!(screen.contains("o Explorer"));
     assert!(!screen.contains("scrollbar line"));
     let worktree = app.regions.worktree.unwrap();
-    let graph = app.regions.graph_table.unwrap();
+    let mut graph = app.regions.graph_table.unwrap();
     assert!(graph.x >= worktree.right());
     assert!(app.regions.diff.is_none());
+
+    let branch_history = app.regions.history_list.unwrap();
+    click(&mut app, branch_history.x + 1, branch_history.y);
+    assert_eq!(app.changes.history_state.selected(), Some(0));
+    assert!(app.graph_commit_open);
+    wait_for_preview(&mut app);
+    assert!(!app.changes.diff.is_empty());
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.graph_table.is_none());
+    assert!(app.regions.diff.is_some());
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    graph = app.regions.graph_table.unwrap();
+
     let graph_offset = app.graph_state.offset();
     app.handle_mouse(MouseEvent {
         kind: MouseEventKind::Moved,
