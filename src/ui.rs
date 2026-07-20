@@ -16,7 +16,7 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
-    app::{App, Mode, Regions, View},
+    app::{App, FileDialogKind, Mode, Regions, View},
     theme::{Palette, load_theme},
 };
 
@@ -128,9 +128,19 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             ));
         }
         Mode::Files => {
-            dim(frame);
             if let Some(dialog) = &app.file_dialog {
-                let regions = overlays::draw_file_dialog(frame, dialog);
+                let regions = if matches!(dialog.kind, FileDialogKind::Add { .. }) {
+                    let anchor = app.regions.files_add.unwrap_or(Rect::new(
+                        content.right().saturating_sub(1),
+                        content.y,
+                        1,
+                        1,
+                    ));
+                    overlays::draw_file_add_popover(frame, anchor, dialog.choice)
+                } else {
+                    dim(frame);
+                    overlays::draw_file_dialog(frame, dialog)
+                };
                 app.regions.file_dialog_overlay = Some(regions.overlay);
                 app.regions.file_dialog_primary = Some(regions.primary);
                 app.regions.file_dialog_secondary = Some(regions.secondary);

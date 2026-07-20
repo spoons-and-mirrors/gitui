@@ -50,6 +50,56 @@ pub(super) struct FileDialogRegions {
     pub(super) secondary: Rect,
 }
 
+pub(super) fn draw_file_add_popover(
+    frame: &mut Frame<'_>,
+    anchor: Rect,
+    selection: usize,
+) -> FileDialogRegions {
+    let width = 18.min(frame.area().width.saturating_sub(2));
+    let height = 2;
+    let minimum_x = frame.area().x.saturating_add(1);
+    let maximum_x = frame
+        .area()
+        .right()
+        .saturating_sub(width.saturating_add(1))
+        .max(minimum_x);
+    let x = anchor
+        .right()
+        .saturating_sub(width)
+        .clamp(minimum_x, maximum_x);
+    let below = anchor.bottom();
+    let y = if below.saturating_add(height) <= frame.area().bottom() {
+        below
+    } else {
+        anchor.y.saturating_sub(height)
+    };
+    let overlay = Rect::new(x, y, width, height);
+    let primary = Rect::new(x, y, width, 1);
+    let secondary = Rect::new(x, y.saturating_add(1), width, 1);
+    frame.render_widget(Clear, overlay);
+    fill(frame, overlay, palette().raised);
+    for (index, (label, area)) in [("New file", primary), ("New folder", secondary)]
+        .into_iter()
+        .enumerate()
+    {
+        frame.render_widget(
+            Paragraph::new(format!("  {label}")).style(Style::default().fg(palette().ink).bg(
+                if selection == index {
+                    palette().selected
+                } else {
+                    palette().raised
+                },
+            )),
+            area,
+        );
+    }
+    FileDialogRegions {
+        overlay,
+        primary,
+        secondary,
+    }
+}
+
 pub(super) fn draw_file_dialog(frame: &mut Frame<'_>, dialog: &FileDialog) -> FileDialogRegions {
     let area = centered_min(frame.area(), 62, 0, 48, 13);
     frame.render_widget(Clear, area);

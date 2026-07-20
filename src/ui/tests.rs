@@ -935,6 +935,8 @@ fn opens_plain_directories_as_file_workspaces() {
     click(&mut app, add.x, add.y);
     assert_eq!(app.mode, Mode::Files);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let popover = app.regions.file_dialog_overlay.unwrap();
+    assert_eq!(popover.y, add.bottom());
     let screen: String = terminal
         .backend()
         .buffer()
@@ -942,7 +944,20 @@ fn opens_plain_directories_as_file_workspaces() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(screen.contains("ADD TO FILES"));
+    assert!(!screen.contains("ADD TO FILES"));
+    assert!(screen.contains("New file"));
+    assert!(screen.contains("New folder"));
+    let new_file = app.regions.file_dialog_primary.unwrap();
+    click(&mut app, new_file.x, new_file.y);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(screen.contains("NEW FILE"));
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
     let worktree_tab = app.regions.worktree_tab.unwrap();

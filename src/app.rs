@@ -1925,6 +1925,15 @@ impl App {
                 }
                 _ => self.close_file_dialog(),
             }
+        } else if matches!(
+            self.file_dialog.as_ref().map(|dialog| &dialog.kind),
+            Some(FileDialogKind::Add { .. })
+        ) && !self
+            .regions
+            .file_dialog_overlay
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.close_file_dialog();
         }
     }
 
