@@ -601,6 +601,9 @@ impl App {
             self.reload(RefreshScope::ALL);
             self.notice = None;
         }
+        if self.session.open_running() {
+            self.notice = Some("Opening workspace…".to_owned());
+        }
         while let Some(done) = self.session.next_load_completion() {
             changed = true;
             match (done.kind, done.result) {
@@ -641,8 +644,9 @@ impl App {
                     self.prefetch_repository_browser();
                 }
                 (LoadKind::Open, Err(error)) => {
-                    self.notice = None;
-                    self.workspace_explorer.error = Some(error);
+                    let message = format!("Could not open workspace: {error}");
+                    self.notice = Some(message.clone());
+                    self.workspace_explorer.error = Some(message);
                 }
                 (LoadKind::Reload, Ok(())) => {
                     if let Some((selection, selected_oid)) = self.pending_reload.take() {
@@ -1460,7 +1464,9 @@ impl App {
             .start_open(path, fetch_interval(&self.settings))
         {
             self.workspace_explorer.error = None;
-            self.notice = Some("Opening repository…".to_owned());
+            self.notice = Some("Opening workspace…".to_owned());
+        } else if self.session.open_running() {
+            self.notice = Some("A workspace is already opening".to_owned());
         } else {
             self.workspace_explorer.error =
                 Some("Another workspace operation is running".to_owned());
@@ -1954,6 +1960,49 @@ mod tests {
         assert_eq!(app.change_counts(), (0, 0));
         assert_eq!(app.mode, Mode::Normal);
         assert_eq!(app.changes.pane, LeftPane::Files);
+    }
+
+    #[test]
+    fn repeated_open_keeps_the_first_workspace_request_active() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::write(root.join("file.txt"), "content\n").unwrap();
+        let mut app = App::new(root.to_path_buf());
+
+        app.open_repository(root.to_path_buf());
+        assert!(app.session.open_running());
+        app.open_repository(root.to_path_buf());
+
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("A workspace is already opening")
+        );
+        wait_for_state(&mut app, |app| !app.session.open_running());
+        assert_eq!(
+            app.repository().unwrap().root,
+            fs::canonicalize(root).unwrap()
+        );
+        assert_eq!(app.notice.as_deref(), Some("Workspace opened"));
+    }
+
+    #[test]
+    fn workspace_open_errors_remain_visible_after_explorer_closes() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::write(root.join("file.txt"), "content\n").unwrap();
+        let mut app = App::new(root.to_path_buf());
+
+        app.open_repository(root.join("missing"));
+        app.mode = Mode::Normal;
+        wait_for_state(&mut app, |app| !app.session.open_running());
+
+        let notice = app.notice.as_deref().unwrap();
+        assert!(notice.starts_with("Could not open workspace:"));
+        assert_eq!(app.workspace_explorer.error.as_deref(), Some(notice));
+        assert_eq!(
+            app.repository().unwrap().root,
+            fs::canonicalize(root).unwrap()
+        );
     }
 
     #[test]

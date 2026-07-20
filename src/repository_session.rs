@@ -131,15 +131,15 @@ struct OperationState {
     foreground: Option<ForegroundOperation>,
     fetching: bool,
     checking_status: bool,
-    loading: bool,
+    loading: Option<LoadKind>,
 }
 
 impl OperationState {
     fn can_start(&self, operation: Operation) -> bool {
         match operation {
-            Operation::Commit => self.foreground.is_none(),
+            Operation::Commit => self.foreground.is_none() && self.loading != Some(LoadKind::Open),
             Operation::Fetch => {
-                !self.loading
+                self.loading.is_none()
                     && !self.fetching
                     && !matches!(
                         self.foreground,
@@ -150,20 +150,23 @@ impl OperationState {
                         )
                     )
             }
-            Operation::Command => self.foreground.is_none() && !self.fetching,
-            Operation::Mutation => self.foreground.is_none() && !self.fetching && !self.loading,
-            Operation::Format => self.foreground.is_none() && !self.fetching && !self.loading,
+            Operation::Command => {
+                self.foreground.is_none() && !self.fetching && self.loading != Some(LoadKind::Open)
+            }
+            Operation::Mutation => {
+                self.foreground.is_none() && !self.fetching && self.loading.is_none()
+            }
+            Operation::Format => {
+                self.foreground.is_none() && !self.fetching && self.loading.is_none()
+            }
             Operation::StatusCheck => {
                 self.foreground.is_none()
                     && !self.fetching
                     && !self.checking_status
-                    && !self.loading
+                    && self.loading.is_none()
             }
-            Operation::Load(LoadKind::Open) => !matches!(
-                self.foreground,
-                Some(ForegroundOperation::Mutation | ForegroundOperation::Format)
-            ),
-            Operation::Load(LoadKind::Reload) => !self.loading,
+            Operation::Load(LoadKind::Open) => self.foreground.is_none() && self.loading.is_none(),
+            Operation::Load(LoadKind::Reload) => self.loading.is_none(),
         }
     }
 
@@ -178,7 +181,7 @@ impl OperationState {
             Operation::Mutation => self.foreground = Some(ForegroundOperation::Mutation),
             Operation::Format => self.foreground = Some(ForegroundOperation::Format),
             Operation::StatusCheck => self.checking_status = true,
-            Operation::Load(_) => self.loading = true,
+            Operation::Load(kind) => self.loading = Some(kind),
         }
         true
     }
@@ -199,8 +202,9 @@ impl OperationState {
             }
             Operation::Fetch => self.fetching = false,
             Operation::StatusCheck => self.checking_status = false,
-            Operation::Load(_) => self.loading = false,
+            Operation::Load(kind) if self.loading == Some(kind) => self.loading = None,
             Operation::Commit | Operation::Command | Operation::Mutation | Operation::Format => {}
+            Operation::Load(_) => {}
         }
     }
 
@@ -212,7 +216,7 @@ impl OperationState {
             Operation::Mutation => self.foreground == Some(ForegroundOperation::Mutation),
             Operation::Format => self.foreground == Some(ForegroundOperation::Format),
             Operation::StatusCheck => self.checking_status,
-            Operation::Load(_) => self.loading,
+            Operation::Load(kind) => self.loading == Some(kind),
         }
     }
 }
@@ -297,6 +301,10 @@ impl RepositorySession {
 
     pub(crate) fn format_running(&self) -> bool {
         self.operations.is_running(Operation::Format)
+    }
+
+    pub(crate) fn open_running(&self) -> bool {
+        self.operations.is_running(Operation::Load(LoadKind::Open))
     }
 
     pub(crate) fn start_open(&mut self, path: PathBuf, fetch_interval: Duration) -> bool {
@@ -874,13 +882,18 @@ mod tests {
 
         let mut loading = OperationState::default();
         assert!(loading.start(Operation::Load(LoadKind::Open)));
-        assert!(loading.can_start(Operation::Commit));
-        assert!(loading.can_start(Operation::Command));
-        assert!(loading.can_start(Operation::Load(LoadKind::Open)));
+        assert!(!loading.can_start(Operation::Commit));
+        assert!(!loading.can_start(Operation::Command));
+        assert!(!loading.can_start(Operation::Load(LoadKind::Open)));
         assert!(!loading.can_start(Operation::Load(LoadKind::Reload)));
         assert!(!loading.can_start(Operation::Fetch));
         assert!(!loading.can_start(Operation::Mutation));
         assert!(!loading.can_start(Operation::StatusCheck));
+
+        let mut reloading = OperationState::default();
+        assert!(reloading.start(Operation::Load(LoadKind::Reload)));
+        assert!(reloading.can_start(Operation::Commit));
+        assert!(reloading.can_start(Operation::Command));
 
         let mut checking_status = OperationState::default();
         assert!(checking_status.start(Operation::StatusCheck));
