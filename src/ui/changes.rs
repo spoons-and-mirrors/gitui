@@ -1422,9 +1422,9 @@ fn worktree_item<'a>(row: &'a WorktreeRow, changes: &'a [Change], width: usize) 
     }
     let Some(change_index) = row.change_index else {
         let marker = if row.directory_expanded == Some(false) {
-            "▸ "
+            "▢ "
         } else {
-            "▾ "
+            "▣ "
         };
         let directory = truncate_width(&format!("{}{}{}", row.prefix, marker, row.label), width);
         return ListItem::new(Line::from(Span::styled(directory, folder_style())));
@@ -1472,9 +1472,9 @@ fn worktree_item<'a>(row: &'a WorktreeRow, changes: &'a [Change], width: usize) 
 fn explorer_item(row: &ExplorerRow, change_code: Option<char>, width: usize) -> ListItem<'static> {
     if row.file_index.is_none() {
         let marker = if row.directory_expanded == Some(false) {
-            "▸ "
+            "▢ "
         } else {
-            "▾ "
+            "▣ "
         };
         return ListItem::new(Line::styled(
             truncate_width(&format!("{}{}{}", row.prefix, marker, row.label), width),
