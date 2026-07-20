@@ -1,11 +1,21 @@
 use std::{fs, process::Command, thread, time::Duration};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::{Terminal, backend::TestBackend, style::Modifier};
+use ratatui::{
+    Terminal,
+    backend::TestBackend,
+    style::{Color, Modifier},
+};
 
 use crate::app::{App, LeftPane, Mode, Settings, View};
 
 use super::draw;
+
+fn assert_black_underlay(terminal: &Terminal<TestBackend>) {
+    let background = &terminal.backend().buffer()[(0, 0)];
+    assert_eq!(background.bg, Color::Rgb(0, 0, 0));
+    assert!(background.modifier.contains(Modifier::DIM));
+}
 
 #[test]
 fn renders_every_primary_surface() {
@@ -557,7 +567,7 @@ fn renders_every_primary_surface() {
         &buffer.content[usize::from(command_overlay.y) * width + usize::from(command_overlay.x)];
     assert!(background.modifier.contains(Modifier::DIM));
     assert_eq!(background.fg, background_before_command.fg);
-    assert_eq!(background.bg, background_before_command.bg);
+    assert_eq!(background.bg, Color::Rgb(0, 0, 0));
     assert!(!modal.modifier.contains(Modifier::DIM));
     assert_eq!(modal.bg, super::palette().surface_alt);
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -697,6 +707,7 @@ fn renders_every_primary_surface() {
     app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
     assert_eq!(app.picker.directory, root);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_black_underlay(&terminal);
     let picker_screen: String = terminal
         .backend()
         .buffer()
@@ -729,6 +740,14 @@ fn renders_every_primary_surface() {
     assert!(browser_screen.contains("LOCAL & REMOTE"));
     assert!(browser_screen.contains("main"));
     assert!(app.regions.browser_list.is_some());
+    let browser_overlay = app.regions.browser_overlay.unwrap();
+    let buffer = terminal.backend().buffer();
+    let background = &buffer[(0, 0)];
+    let modal = &buffer[(browser_overlay.x, browser_overlay.y)];
+    assert_eq!(background.bg, Color::Rgb(0, 0, 0));
+    assert!(background.modifier.contains(Modifier::DIM));
+    assert_eq!(modal.bg, super::palette().surface_alt);
+    assert!(!modal.modifier.contains(Modifier::DIM));
     app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
     assert_eq!(app.repository_browser.query, "m");
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -737,6 +756,7 @@ fn renders_every_primary_surface() {
     app.mode = Mode::Settings;
     app.settings = Settings::default();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_black_underlay(&terminal);
     let settings_screen: String = terminal
         .backend()
         .buffer()
@@ -755,6 +775,7 @@ fn renders_every_primary_surface() {
     app.mode = Mode::Editor;
     app.editor_input = "nvim".to_owned();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_black_underlay(&terminal);
     let editor_screen: String = terminal
         .backend()
         .buffer()
@@ -769,6 +790,7 @@ fn renders_every_primary_surface() {
 
     app.mode = Mode::Help;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_black_underlay(&terminal);
     let help_screen: String = terminal
         .backend()
         .buffer()
@@ -970,6 +992,7 @@ fn opens_plain_directories_as_file_workspaces() {
     let new_file = app.regions.file_dialog_primary.unwrap();
     click(&mut app, new_file.x, new_file.y);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_black_underlay(&terminal);
     let screen: String = terminal
         .backend()
         .buffer()
@@ -1030,6 +1053,7 @@ fn fuzzy_searches_and_opens_repository_files() {
     assert_eq!(app.mode, Mode::FileSearch);
     assert_eq!(app.file_search.match_count, 1);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_black_underlay(&terminal);
 
     let screen: String = terminal
         .backend()

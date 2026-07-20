@@ -73,6 +73,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     draw_navigation(frame, app, layout[2]);
     match app.mode {
         Mode::FileSearch => {
+            dim(frame);
             let files = app
                 .session
                 .data()
@@ -82,12 +83,14 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             app.regions.file_search_list = Some(regions.list);
         }
         Mode::Picker => {
+            dim(frame);
             let regions = overlays::draw_picker(frame, &mut app.picker);
             app.regions.picker_overlay = Some(regions.overlay);
             app.regions.picker_path = Some(regions.path);
             app.regions.picker_list = Some(regions.list);
         }
         Mode::Settings => {
+            dim(frame);
             let regions = overlays::draw_settings(
                 frame,
                 &app.settings,
@@ -153,7 +156,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 app.regions.file_dialog_secondary = Some(regions.secondary);
             }
         }
-        Mode::Help => overlays::draw_help(frame),
+        Mode::Help => {
+            dim(frame);
+            overlays::draw_help(frame);
+        }
         _ => {}
     }
     finish_selection(frame, app);
@@ -172,9 +178,12 @@ fn finish_selection(frame: &mut Frame<'_>, app: &mut App) {
 
 fn dim(frame: &mut Frame<'_>) {
     let area = frame.area();
-    frame
-        .buffer_mut()
-        .set_style(area, Style::default().add_modifier(Modifier::DIM));
+    frame.buffer_mut().set_style(
+        area,
+        Style::default()
+            .bg(Color::Rgb(0, 0, 0))
+            .add_modifier(Modifier::DIM),
+    );
 }
 
 fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
