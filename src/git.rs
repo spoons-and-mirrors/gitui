@@ -36,6 +36,73 @@ pub struct RepositoryData {
     pub github_remote: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefreshScope(u8);
+
+impl RefreshScope {
+    const INVENTORY: Self = Self(1 << 1);
+    const HISTORY: Self = Self(1 << 2);
+    const GRAPH: Self = Self(1 << 3);
+    const REFS: Self = Self(1 << 4);
+
+    pub const WORKTREE: Self = Self(1);
+    pub const WORKTREE_AND_INVENTORY: Self = Self(Self::WORKTREE.0 | Self::INVENTORY.0);
+    pub const HISTORY_AND_REFS: Self = Self(Self::HISTORY.0 | Self::GRAPH.0 | Self::REFS.0);
+    pub const ALL: Self =
+        Self(Self::WORKTREE.0 | Self::INVENTORY.0 | Self::HISTORY.0 | Self::GRAPH.0 | Self::REFS.0);
+
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    fn includes(self, facet: Self) -> bool {
+        self.0 & facet.0 != 0
+    }
+}
+
+#[derive(Debug)]
+pub struct RepositoryUpdate {
+    root: PathBuf,
+    worktree: Option<WorktreeData>,
+    inventory: Option<InventoryData>,
+    history: Option<HistoryData>,
+    graph: Option<GraphData>,
+    refs: Option<RefsData>,
+}
+
+#[derive(Debug)]
+struct WorktreeData {
+    changes: Vec<Change>,
+    fingerprint: u64,
+    counts: (usize, usize),
+}
+
+#[derive(Debug)]
+struct InventoryData {
+    files: Vec<String>,
+    directories: Vec<String>,
+    fingerprint: u64,
+}
+
+#[derive(Debug)]
+struct HistoryData {
+    branch: String,
+    commits: Vec<Commit>,
+}
+
+#[derive(Debug)]
+struct GraphData {
+    commits: Vec<Commit>,
+    width: usize,
+    truncated: bool,
+}
+
+#[derive(Debug)]
+struct RefsData {
+    branches: Vec<Branch>,
+    github_remote: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct Branch {
     pub name: String,
@@ -50,6 +117,33 @@ pub struct Branch {
 impl RepositoryData {
     pub fn is_local(&self) -> bool {
         self.kind == RepositoryKind::Local
+    }
+
+    pub(crate) fn apply(&mut self, update: RepositoryUpdate) {
+        debug_assert_eq!(self.root, update.root);
+        if let Some(worktree) = update.worktree {
+            self.changes = worktree.changes;
+            self.changes_fingerprint = worktree.fingerprint;
+            self.change_counts = worktree.counts;
+        }
+        if let Some(inventory) = update.inventory {
+            self.files = inventory.files;
+            self.directories = inventory.directories;
+            self.files_fingerprint = inventory.fingerprint;
+        }
+        if let Some(history) = update.history {
+            self.branch = history.branch;
+            self.history = history.commits;
+        }
+        if let Some(graph) = update.graph {
+            self.commits = graph.commits;
+            self.graph_width = graph.width;
+            self.graph_truncated = graph.truncated;
+        }
+        if let Some(refs) = update.refs {
+            self.branches = refs.branches;
+            self.github_remote = refs.github_remote;
+        }
     }
 }
 
@@ -130,70 +224,185 @@ pub fn load_or_local(path: &Path) -> Result<RepositoryData> {
 }
 
 fn load_git_root(root: PathBuf) -> Result<RepositoryData> {
-    let (branch, changes, files, history, commits, branches, github_remote) =
-        thread::scope(|scope| {
-            let branch = scope.spawn(|| branch_name(&root));
-            let changes = scope.spawn(|| -> Result<Vec<Change>> {
-                let mut changes = status(&root)?;
-                populate_diff_stats(&root, &mut changes)?;
-                Ok(changes)
-            });
-            let files = scope.spawn(|| git_repository_entries(&root));
-            let history = scope.spawn(|| branch_history(&root));
-            let commits = scope.spawn(|| -> Result<(Vec<Commit>, bool)> {
-                let (mut commits, truncated) = log(&root)?;
-                layout_graph(&mut commits);
-                Ok((commits, truncated))
-            });
-            let branches = scope.spawn(|| repository_branches(&root));
-            let github_remote = scope.spawn(|| repository_has_github_remote(&root));
+    let (worktree, inventory, history, graph, refs) = thread::scope(|scope| {
+        let worktree = scope.spawn(|| load_worktree(&root));
+        let inventory = scope.spawn(|| load_git_inventory(&root));
+        let history = scope.spawn(|| load_history(&root));
+        let graph = scope.spawn(|| load_graph(&root));
+        let refs = scope.spawn(|| load_refs(&root));
 
-            Ok::<_, anyhow::Error>((
-                branch
-                    .join()
-                    .map_err(|_| anyhow!("branch worker panicked"))??,
-                changes
-                    .join()
-                    .map_err(|_| anyhow!("status worker panicked"))??,
-                files
-                    .join()
-                    .map_err(|_| anyhow!("file worker panicked"))??,
-                history
-                    .join()
-                    .map_err(|_| anyhow!("history worker panicked"))??,
-                commits
-                    .join()
-                    .map_err(|_| anyhow!("graph worker panicked"))??,
-                branches
-                    .join()
-                    .map_err(|_| anyhow!("branch list worker panicked"))??,
-                github_remote
-                    .join()
-                    .map_err(|_| anyhow!("remote worker panicked"))??,
-            ))
-        })?;
-
-    let (commits, graph_truncated) = commits;
-    let (files, directories) = files;
-    let files_fingerprint = fingerprint(&(&files, &directories));
-    let changes_fingerprint = fingerprint(&changes);
-    let change_counts = change_counts(&changes);
-    let graph_width = graph_width(&commits);
+        Ok::<_, anyhow::Error>((
+            worktree
+                .join()
+                .map_err(|_| anyhow!("status worker panicked"))??,
+            inventory
+                .join()
+                .map_err(|_| anyhow!("file worker panicked"))??,
+            history
+                .join()
+                .map_err(|_| anyhow!("history worker panicked"))??,
+            graph
+                .join()
+                .map_err(|_| anyhow!("graph worker panicked"))??,
+            refs.join().map_err(|_| anyhow!("refs worker panicked"))??,
+        ))
+    })?;
 
     Ok(RepositoryData {
         root,
         kind: RepositoryKind::Git,
-        branch,
+        branch: history.branch,
+        changes: worktree.changes,
+        files: inventory.files,
+        directories: inventory.directories,
+        history: history.commits,
+        commits: graph.commits,
+        files_fingerprint: inventory.fingerprint,
+        changes_fingerprint: worktree.fingerprint,
+        change_counts: worktree.counts,
+        graph_width: graph.width,
+        graph_truncated: graph.truncated,
+        branches: refs.branches,
+        github_remote: refs.github_remote,
+    })
+}
+
+pub fn refresh_repository(
+    root: &Path,
+    kind: RepositoryKind,
+    scope: RefreshScope,
+) -> Result<RepositoryUpdate> {
+    if kind == RepositoryKind::Local {
+        return Ok(RepositoryUpdate {
+            root: root.to_owned(),
+            worktree: None,
+            inventory: scope
+                .includes(RefreshScope::INVENTORY)
+                .then(|| load_local_inventory(root))
+                .transpose()?,
+            history: None,
+            graph: None,
+            refs: None,
+        });
+    }
+
+    let (worktree, inventory, history, graph, refs) = thread::scope(|thread_scope| {
+        let worktree = scope
+            .includes(RefreshScope::WORKTREE)
+            .then(|| thread_scope.spawn(|| load_worktree(root)));
+        let inventory = scope
+            .includes(RefreshScope::INVENTORY)
+            .then(|| thread_scope.spawn(|| load_git_inventory(root)));
+        let history = scope
+            .includes(RefreshScope::HISTORY)
+            .then(|| thread_scope.spawn(|| load_history(root)));
+        let graph = scope
+            .includes(RefreshScope::GRAPH)
+            .then(|| thread_scope.spawn(|| load_graph(root)));
+        let refs = scope
+            .includes(RefreshScope::REFS)
+            .then(|| thread_scope.spawn(|| load_refs(root)));
+
+        Ok::<_, anyhow::Error>((
+            join_refresh_worker(worktree, "status")?,
+            join_refresh_worker(inventory, "file")?,
+            join_refresh_worker(history, "history")?,
+            join_refresh_worker(graph, "graph")?,
+            join_refresh_worker(refs, "refs")?,
+        ))
+    })?;
+
+    Ok(RepositoryUpdate {
+        root: root.to_owned(),
+        worktree,
+        inventory,
+        history,
+        graph,
+        refs,
+    })
+}
+
+fn join_refresh_worker<T>(
+    worker: Option<thread::ScopedJoinHandle<'_, Result<T>>>,
+    label: &str,
+) -> Result<Option<T>> {
+    worker
+        .map(|worker| {
+            worker
+                .join()
+                .map_err(|_| anyhow!("{label} worker panicked"))?
+        })
+        .transpose()
+}
+
+fn load_worktree(root: &Path) -> Result<WorktreeData> {
+    let mut changes = status(root)?;
+    populate_diff_stats(root, &mut changes)?;
+    Ok(WorktreeData {
+        fingerprint: fingerprint(&changes),
+        counts: change_counts(&changes),
         changes,
+    })
+}
+
+fn load_git_inventory(root: &Path) -> Result<InventoryData> {
+    let (files, directories) = git_repository_entries(root)?;
+    Ok(InventoryData {
+        fingerprint: fingerprint(&(&files, &directories)),
         files,
         directories,
-        history,
+    })
+}
+
+fn load_local_inventory(root: &Path) -> Result<InventoryData> {
+    let (files, directories) = local_entries(root)?;
+    Ok(InventoryData {
+        fingerprint: fingerprint(&(&files, &directories)),
+        files,
+        directories,
+    })
+}
+
+fn load_history(root: &Path) -> Result<HistoryData> {
+    let (branch, commits) = thread::scope(|scope| {
+        let branch = scope.spawn(|| branch_name(root));
+        let commits = scope.spawn(|| branch_history(root));
+        Ok::<_, anyhow::Error>((
+            branch
+                .join()
+                .map_err(|_| anyhow!("branch worker panicked"))??,
+            commits
+                .join()
+                .map_err(|_| anyhow!("history worker panicked"))??,
+        ))
+    })?;
+    Ok(HistoryData { branch, commits })
+}
+
+fn load_graph(root: &Path) -> Result<GraphData> {
+    let (mut commits, truncated) = log(root)?;
+    layout_graph(&mut commits);
+    Ok(GraphData {
+        width: graph_width(&commits),
         commits,
-        files_fingerprint,
-        changes_fingerprint,
-        change_counts,
-        graph_width,
-        graph_truncated,
+        truncated,
+    })
+}
+
+fn load_refs(root: &Path) -> Result<RefsData> {
+    let (branches, github_remote) = thread::scope(|scope| {
+        let branches = scope.spawn(|| repository_branches(root));
+        let github_remote = scope.spawn(|| repository_has_github_remote(root));
+        Ok::<_, anyhow::Error>((
+            branches
+                .join()
+                .map_err(|_| anyhow!("branch list worker panicked"))??,
+            github_remote
+                .join()
+                .map_err(|_| anyhow!("remote worker panicked"))??,
+        ))
+    })?;
+    Ok(RefsData {
         branches,
         github_remote,
     })
@@ -204,18 +413,17 @@ fn local_workspace(path: &Path) -> Result<RepositoryData> {
     if !root.is_dir() {
         bail!("{} is not a directory", root.display());
     }
-    let (files, directories) = local_entries(&root)?;
-    let files_fingerprint = fingerprint(&(&files, &directories));
+    let inventory = load_local_inventory(&root)?;
     Ok(RepositoryData {
         root,
         kind: RepositoryKind::Local,
         branch: "local".to_owned(),
         changes: Vec::new(),
-        files,
-        directories,
+        files: inventory.files,
+        directories: inventory.directories,
         history: Vec::new(),
         commits: Vec::new(),
-        files_fingerprint,
+        files_fingerprint: inventory.fingerprint,
         changes_fingerprint: fingerprint(&Vec::<Change>::new()),
         change_counts: (0, 0),
         graph_width: 0,
@@ -1683,6 +1891,52 @@ mod tests {
         let preview = diff(root, &change).unwrap();
         assert!(preview.contains("Preview truncated; file is 262144 bytes"));
         assert!(preview.len() < 140 * 1024);
+    }
+
+    #[test]
+    fn scoped_refresh_updates_only_requested_facets() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "-b", "main"]);
+        git(root, &["config", "user.name", "Test Author"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        fs::write(root.join("tracked.txt"), "base\n").unwrap();
+        git(root, &["add", "tracked.txt"]);
+        git(root, &["commit", "-m", "base"]);
+
+        let mut repository = load(root).unwrap();
+        let original_commit = repository.commits[0].oid.clone();
+        let original_files = repository.files.clone();
+        fs::write(root.join("tracked.txt"), "changed\n").unwrap();
+        fs::write(root.join("new.txt"), "new\n").unwrap();
+
+        let update = refresh_repository(root, RepositoryKind::Git, RefreshScope::WORKTREE).unwrap();
+        assert!(update.worktree.is_some());
+        assert!(update.inventory.is_none());
+        assert!(update.history.is_none());
+        assert!(update.graph.is_none());
+        assert!(update.refs.is_none());
+        repository.apply(update);
+        assert_eq!(repository.files, original_files);
+        assert_eq!(repository.commits[0].oid, original_commit);
+        assert!(
+            repository
+                .changes
+                .iter()
+                .any(|change| change.path == "tracked.txt")
+        );
+
+        let update = refresh_repository(
+            root,
+            RepositoryKind::Git,
+            RefreshScope::WORKTREE_AND_INVENTORY,
+        )
+        .unwrap();
+        assert!(update.worktree.is_some());
+        assert!(update.inventory.is_some());
+        repository.apply(update);
+        assert!(repository.files.iter().any(|file| file == "new.txt"));
+        assert_eq!(repository.commits[0].oid, original_commit);
     }
 
     #[test]

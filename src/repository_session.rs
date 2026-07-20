@@ -9,7 +9,9 @@ use anyhow::Result;
 
 use crate::{
     filesystem::{self, FileOperation},
-    git::{self, Change, CommandOutput, RepositoryData},
+    git::{
+        self, Change, CommandOutput, RefreshScope, RepositoryData, RepositoryKind, RepositoryUpdate,
+    },
 };
 
 const MIN_STATUS_INTERVAL: Duration = Duration::from_millis(800);
@@ -71,7 +73,12 @@ struct LoadResult {
     generation: u64,
     kind: LoadKind,
     fetch_interval: Duration,
-    result: Result<(RepositoryData, Option<u64>), String>,
+    result: Result<(LoadPayload, Option<u64>), String>,
+}
+
+enum LoadPayload {
+    Open(RepositoryData),
+    Refresh(RepositoryUpdate),
 }
 
 #[derive(Debug)]
@@ -255,14 +262,24 @@ impl RepositorySession {
     }
 
     pub(crate) fn start_open(&mut self, path: PathBuf, fetch_interval: Duration) -> bool {
-        self.start_load(path, LoadKind::Open, fetch_interval)
+        self.start_load(
+            path,
+            LoadKind::Open,
+            RefreshScope::ALL,
+            None,
+            fetch_interval,
+        )
     }
 
-    pub(crate) fn start_reload(&mut self, fetch_interval: Duration) -> bool {
-        let Some(root) = self.data.as_ref().map(|repository| repository.root.clone()) else {
+    pub(crate) fn start_reload(&mut self, scope: RefreshScope, fetch_interval: Duration) -> bool {
+        let Some((root, kind)) = self
+            .data
+            .as_ref()
+            .map(|repository| (repository.root.clone(), repository.kind))
+        else {
             return false;
         };
-        self.start_load(root, LoadKind::Reload, fetch_interval)
+        self.start_load(root, LoadKind::Reload, scope, Some(kind), fetch_interval)
     }
 
     pub(crate) fn next_load_completion(&mut self) -> Option<LoadCompletion> {
@@ -271,13 +288,20 @@ impl RepositorySession {
                 continue;
             }
             self.operations.finish(Operation::Load(done.kind));
-            let result = done.result.map(|(data, signature)| {
+            let result = done.result.map(|(payload, signature)| {
                 self.status_signature = signature;
                 self.reset_status_interval();
                 if done.kind == LoadKind::Open {
                     self.next_fetch_at = Instant::now() + done.fetch_interval;
                 }
-                self.data = Some(data);
+                match payload {
+                    LoadPayload::Open(data) => self.data = Some(data),
+                    LoadPayload::Refresh(update) => self
+                        .data
+                        .as_mut()
+                        .expect("refresh completed without repository data")
+                        .apply(update),
+                }
             });
             return Some(LoadCompletion {
                 kind: done.kind,
@@ -542,7 +566,14 @@ impl RepositorySession {
         self.next_status_check = Instant::now() + MIN_STATUS_INTERVAL;
     }
 
-    fn start_load(&mut self, path: PathBuf, kind: LoadKind, fetch_interval: Duration) -> bool {
+    fn start_load(
+        &mut self,
+        path: PathBuf,
+        kind: LoadKind,
+        scope: RefreshScope,
+        repository_kind: Option<RepositoryKind>,
+        fetch_interval: Duration,
+    ) -> bool {
         if !self.operations.start(Operation::Load(kind)) {
             return false;
         }
@@ -550,14 +581,23 @@ impl RepositorySession {
         let generation = self.load_generation;
         let sender = self.load_tx.clone();
         thread::spawn(move || {
-            let result = git::load_or_local(&path)
-                .map(|data| {
-                    let signature = (!data.is_local())
-                        .then(|| git::worktree_signature(&data.root).ok())
-                        .flatten();
-                    (data, signature)
-                })
-                .map_err(|error| error.to_string());
+            let result = match repository_kind {
+                None => git::load_or_local(&path).map(LoadPayload::Open),
+                Some(repository_kind) => {
+                    git::refresh_repository(&path, repository_kind, scope).map(LoadPayload::Refresh)
+                }
+            }
+            .map(|payload| {
+                let is_git = match &payload {
+                    LoadPayload::Open(data) => !data.is_local(),
+                    LoadPayload::Refresh(_) => repository_kind != Some(RepositoryKind::Local),
+                };
+                let signature = is_git
+                    .then(|| git::worktree_signature(&path).ok())
+                    .flatten();
+                (payload, signature)
+            })
+            .map_err(|error| error.to_string());
             let _ = sender.send(LoadResult {
                 generation,
                 kind,
@@ -640,7 +680,7 @@ mod tests {
                 generation: 1,
                 kind: LoadKind::Open,
                 fetch_interval: Duration::ZERO,
-                result: Ok((stale_data, Some(99))),
+                result: Ok((LoadPayload::Open(stale_data), Some(99))),
             })
             .unwrap();
 

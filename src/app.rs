@@ -28,7 +28,7 @@ use ratatui::{
 
 use crate::{
     filesystem::{FileOperation, validate_name},
-    git::{self, RepositoryData},
+    git::{self, RefreshScope, RepositoryData},
     repository_session::{LoadKind, Mutation, RepositorySession, WorkerCompletion},
     selection::{SelectionOutcome, SelectionState},
 };
@@ -213,7 +213,7 @@ pub struct App {
     pub should_quit: bool,
     pub(crate) settings_path: Option<PathBuf>,
     pending_reload: Option<(changes::ChangesSelection, Option<String>)>,
-    reload_queued: bool,
+    reload_queued: Option<RefreshScope>,
     pub(crate) editor_input: String,
     pub(crate) editor_error: Option<String>,
     pub(crate) editor_configure_only: bool,
@@ -337,7 +337,7 @@ impl App {
             should_quit: false,
             settings_path,
             pending_reload: None,
-            reload_queued: false,
+            reload_queued: None,
             editor_input: String::new(),
             editor_error: None,
             editor_configure_only: false,
@@ -786,7 +786,7 @@ impl App {
             .refresh
             .is_some_and(|rect| rect.contains(point))
         {
-            self.reload();
+            self.reload(RefreshScope::ALL);
         } else if self
             .regions
             .explorer
@@ -1240,7 +1240,7 @@ impl App {
                         self.commit_input.clear();
                         self.schedule_commit_draft();
                         self.flush_commit_draft();
-                        self.reload();
+                        self.reload(RefreshScope::WORKTREE.union(RefreshScope::HISTORY_AND_REFS));
                         self.notice = Some("Commit created".to_owned());
                     }
                     Ok(output) => {
@@ -1250,7 +1250,7 @@ impl App {
                 },
                 WorkerCompletion::Fetch(result) => match result {
                     Ok(output) if output.success => {
-                        self.reload();
+                        self.reload(RefreshScope::HISTORY_AND_REFS);
                         self.notice = Some("Fetched remotes".to_owned());
                     }
                     Ok(output) => {
@@ -1263,7 +1263,7 @@ impl App {
                         let success = output.success;
                         let error = first_error(&output.stderr, "Git command failed");
                         if success {
-                            self.reload();
+                            self.reload(RefreshScope::ALL);
                         }
                         self.actions.complete(output);
                         self.notice = Some(if success {
@@ -1278,7 +1278,7 @@ impl App {
                     }
                 },
                 WorkerCompletion::Mutation(result) => match result {
-                    Ok(()) => self.reload(),
+                    Ok(()) => self.reload(RefreshScope::WORKTREE),
                     Err(error) => {
                         self.changes.cancel_pending_hunk_stage();
                         self.notice = Some(error);
@@ -1287,7 +1287,7 @@ impl App {
                 WorkerCompletion::FileOperation(done) => match done.result {
                     Ok(selection) => {
                         self.pending_file_selection = selection;
-                        self.reload();
+                        self.reload(RefreshScope::WORKTREE_AND_INVENTORY);
                         self.notice = Some(done.message);
                     }
                     Err(error) => self.notice = Some(error),
@@ -1296,7 +1296,7 @@ impl App {
         }
         while self.session.next_worktree_change() {
             changed = true;
-            self.reload();
+            self.reload(RefreshScope::ALL);
             self.notice = None;
         }
         while let Some(done) = self.session.next_load_completion() {
@@ -1305,7 +1305,7 @@ impl App {
                 (LoadKind::Open, Ok(())) => {
                     self.pending_reload = None;
                     self.pending_file_selection = None;
-                    self.reload_queued = false;
+                    self.reload_queued = None;
                     self.mode = Mode::Normal;
                     self.actions = ActionsState::default();
                     self.notice = Some(
@@ -1366,14 +1366,13 @@ impl App {
                     if self.notice.as_deref() == Some("Refreshing…") {
                         self.notice = Some("Refreshed".to_owned());
                     }
-                    if self.reload_queued {
-                        self.reload_queued = false;
-                        self.reload();
+                    if let Some(scope) = self.reload_queued.take() {
+                        self.reload(scope);
                     }
                 }
                 (LoadKind::Reload, Err(error)) => {
                     self.pending_reload = None;
-                    self.reload_queued = false;
+                    self.reload_queued = None;
                     self.notice = Some(error);
                 }
             }
@@ -1448,7 +1447,7 @@ impl App {
                 self.graph_commit_open = false;
                 self.show_graph_if_diff_empty();
             }
-            KeyCode::Char('r') => self.reload(),
+            KeyCode::Char('r') => self.reload(RefreshScope::ALL),
             KeyCode::Char('o') => self.open_explorer(),
             KeyCode::Char('s') => self.mode = Mode::Settings,
             KeyCode::Char('b') => self.open_repository_browser(),
@@ -2309,7 +2308,7 @@ impl App {
 
     pub(crate) fn editor_finished(&mut self, result: Result<(), String>) {
         let error = result.err();
-        self.reload();
+        self.reload(RefreshScope::WORKTREE);
         if let Some(error) = error {
             self.notice = Some(error);
         }
@@ -2675,7 +2674,7 @@ impl App {
         }
     }
 
-    fn reload(&mut self) {
+    fn reload(&mut self, scope: RefreshScope) {
         let Some(repo) = self.repository() else {
             return;
         };
@@ -2686,12 +2685,18 @@ impl App {
             .and_then(|index| repo.commits.get(index))
             .map(|commit| commit.oid.clone());
 
-        if self.session.start_reload(fetch_interval(&self.settings)) {
+        if self
+            .session
+            .start_reload(scope, fetch_interval(&self.settings))
+        {
             self.pending_reload = Some((selection, selected_oid));
             self.notice = Some("Refreshing…".to_owned());
         } else {
             self.pending_reload = Some((selection, selected_oid));
-            self.reload_queued = true;
+            self.reload_queued = Some(
+                self.reload_queued
+                    .map_or(scope, |queued| queued.union(scope)),
+            );
         }
     }
 
