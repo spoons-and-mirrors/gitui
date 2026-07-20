@@ -97,6 +97,8 @@ fn main() -> Result<()> {
         }
     }
 
+    app.flush_commit_draft();
+
     Ok(())
 }
 

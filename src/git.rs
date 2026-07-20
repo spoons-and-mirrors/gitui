@@ -695,6 +695,18 @@ pub fn commit(root: &Path, message: &str) -> Result<CommandOutput> {
     Ok(command_output(output))
 }
 
+pub(crate) fn commit_draft_path(root: &Path) -> Result<PathBuf> {
+    let output = run(root, &["rev-parse", "--absolute-git-dir"])?;
+    if !output.status.success() {
+        bail!("{}", clean_stderr(&output));
+    }
+    let git_directory = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if git_directory.is_empty() {
+        bail!("Git returned an empty repository directory");
+    }
+    Ok(PathBuf::from(git_directory).join("HUNKLE_COMMIT_DRAFT"))
+}
+
 pub fn fetch(root: &Path) -> Result<CommandOutput> {
     let output = run(root, &["fetch", "--all", "--prune"])?;
     Ok(command_output(output))

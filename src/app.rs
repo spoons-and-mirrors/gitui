@@ -16,7 +16,7 @@ pub(crate) use repository_browser::{BrowserTab, PullRequest, RemoteItems, Reposi
 use std::{
     fs,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -27,7 +27,7 @@ use ratatui::{
 
 use crate::{
     filesystem::{FileOperation, validate_name},
-    git::RepositoryData,
+    git::{self, RepositoryData},
     repository_session::{LoadKind, Mutation, RepositorySession, WorkerCompletion},
     selection::{SelectionOutcome, SelectionState},
 };
@@ -155,6 +155,8 @@ pub struct App {
     pub graph_state: TableState,
     pub(crate) graph_scroll_to_selection: bool,
     pub(crate) commit_input: TextInput,
+    commit_draft_path: Option<PathBuf>,
+    commit_draft_due: Option<Instant>,
     pub dragging_splitter: bool,
     pub dragging_history: bool,
     pub dragging_diff_scrollbar: bool,
@@ -277,6 +279,8 @@ impl App {
             graph_state,
             graph_scroll_to_selection: true,
             commit_input: TextInput::default(),
+            commit_draft_path: None,
+            commit_draft_due: None,
             dragging_splitter: false,
             dragging_history: false,
             dragging_diff_scrollbar: false,
@@ -303,6 +307,7 @@ impl App {
             file_drag: None,
             pending_file_selection: None,
         };
+        app.restore_commit_draft();
         app.show_graph_if_diff_empty();
         app
     }
@@ -375,7 +380,10 @@ impl App {
 
     pub fn handle_paste(&mut self, text: &str) {
         match self.mode {
-            Mode::Commit => self.commit_input.insert(text),
+            Mode::Commit => {
+                self.commit_input.insert(text);
+                self.schedule_commit_draft();
+            }
             Mode::FileSearch => {
                 if let Some(repo) = self.session.data() {
                     self.file_search.paste(text, &repo.files);
@@ -542,6 +550,7 @@ impl App {
             && !self.regions.commit.is_some_and(|rect| rect.contains(point))
         {
             self.mode = Mode::Normal;
+            self.flush_commit_draft();
         }
 
         match mouse.kind {
@@ -657,6 +666,7 @@ impl App {
             && !self.regions.commit.is_some_and(|rect| rect.contains(point))
         {
             self.mode = Mode::Normal;
+            self.flush_commit_draft();
         }
         if let Some(hunk) = self
             .regions
@@ -1021,7 +1031,7 @@ impl App {
     }
 
     fn select_worktree_row(&mut self, point: Position) -> bool {
-        if self.view != View::Changes || self.changes.pane != LeftPane::Worktree {
+        if self.changes.pane != LeftPane::Worktree {
             return false;
         }
         let Some(rect) = self
@@ -1196,6 +1206,7 @@ impl App {
         let mut changed = self.mode == Mode::Explorer && self.workspace_explorer.poll_index();
         changed |= self.repository_browser.poll();
         changed |= self.commit_input.poll_blink(self.mode == Mode::Commit);
+        changed |= self.flush_commit_draft_if_due();
         if let Some(dialog) = &mut self.file_dialog {
             changed |= dialog.input.poll_blink(
                 self.mode == Mode::Files && matches!(dialog.kind, FileDialogKind::Name { .. }),
@@ -1211,6 +1222,8 @@ impl App {
                 WorkerCompletion::Commit(result) => match result {
                     Ok(output) if output.success => {
                         self.commit_input.clear();
+                        self.schedule_commit_draft();
+                        self.flush_commit_draft();
                         self.reload();
                         self.notice = Some("Commit created".to_owned());
                     }
@@ -1302,6 +1315,7 @@ impl App {
                             .is_some_and(|repo| !repo.commits.is_empty())
                             .then_some(0),
                     );
+                    self.restore_commit_draft();
                     self.show_graph_if_diff_empty();
                     self.prefetch_repository_browser();
                 }
@@ -1453,20 +1467,14 @@ impl App {
                 self.set_left_pane(LeftPane::Worktree);
                 self.focus_commit();
             }
-            KeyCode::Char('a')
-                if self.view == View::Changes && self.changes.pane == LeftPane::Worktree =>
-            {
+            KeyCode::Char('a') if self.changes.pane == LeftPane::Worktree => {
                 self.stage_all();
             }
-            KeyCode::Char('u')
-                if self.view == View::Changes && self.changes.pane == LeftPane::Worktree =>
-            {
+            KeyCode::Char('u') if self.changes.pane == LeftPane::Worktree => {
                 self.unstage_all();
             }
             KeyCode::Char(' ')
-                if self.view == View::Changes
-                    && self.changes.pane == LeftPane::Worktree
-                    && !self.changes.history_focused =>
+                if self.changes.pane == LeftPane::Worktree && !self.changes.history_focused =>
             {
                 self.toggle_stage()
             }
@@ -1572,8 +1580,12 @@ impl App {
 
     fn handle_commit_input(&mut self, key: KeyEvent) {
         self.commit_input.focus();
+        let previous = self.commit_input.text().to_owned();
         match key.code {
-            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+                self.flush_commit_draft();
+            }
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.start_commit();
             }
@@ -1605,6 +1617,9 @@ impl App {
                 self.commit_input.insert_char(character);
             }
             _ => {}
+        }
+        if self.commit_input.text() != previous {
+            self.schedule_commit_draft();
         }
     }
 
@@ -2390,6 +2405,7 @@ impl App {
     }
 
     fn open_repository(&mut self, path: PathBuf) {
+        self.flush_commit_draft();
         if self
             .session
             .start_open(path, fetch_interval(&self.settings))
@@ -2469,6 +2485,60 @@ impl App {
         {
             self.notice = Some(format!("Could not save settings: {error}"));
         }
+    }
+
+    fn restore_commit_draft(&mut self) {
+        self.commit_input.clear();
+        self.commit_draft_due = None;
+        self.commit_draft_path = self
+            .repository()
+            .filter(|repo| !repo.is_local())
+            .and_then(|repo| git::commit_draft_path(&repo.root).ok());
+        let Some(path) = &self.commit_draft_path else {
+            return;
+        };
+        match fs::read_to_string(path) {
+            Ok(message) => self.commit_input.set(message),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => self.notice = Some(format!("Could not load commit draft: {error}")),
+        }
+    }
+
+    fn schedule_commit_draft(&mut self) {
+        self.commit_draft_due = Some(Instant::now() + Duration::from_millis(300));
+    }
+
+    fn flush_commit_draft_if_due(&mut self) -> bool {
+        if self
+            .commit_draft_due
+            .is_some_and(|due| Instant::now() >= due)
+        {
+            return self.flush_commit_draft();
+        }
+        false
+    }
+
+    pub(crate) fn flush_commit_draft(&mut self) -> bool {
+        if self.commit_draft_due.take().is_none() {
+            return false;
+        }
+        let Some(path) = &self.commit_draft_path else {
+            return false;
+        };
+        let result = if self.commit_input.is_empty() {
+            match fs::remove_file(path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+            }
+        } else {
+            fs::write(path, self.commit_input.text())
+        };
+        if let Err(error) = result {
+            self.notice = Some(format!("Could not save commit draft: {error}"));
+            return true;
+        }
+        false
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -2679,6 +2749,7 @@ impl App {
             self.notice = Some("Commit message cannot be empty".to_owned());
             return;
         }
+        self.flush_commit_draft();
         if self.session.start_commit(message) {
             self.mode = Mode::Normal;
         }
@@ -3011,6 +3082,40 @@ mod tests {
     }
 
     #[test]
+    fn stages_worktree_changes_while_the_graph_is_visible() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        initialize_repository(root);
+        fs::write(root.join("tracked.txt"), "edited\n").unwrap();
+
+        let mut app = App::new(root.to_path_buf());
+        app.view = View::Graph;
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        wait_for_state(&mut app, |app| {
+            app.repository()
+                .is_some_and(|repo| repo.changes.iter().all(|change| change.staged))
+        });
+        assert_eq!(app.view, View::Graph);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+        wait_for_state(&mut app, |app| {
+            app.repository()
+                .is_some_and(|repo| repo.changes.iter().all(|change| !change.staged))
+        });
+        assert_eq!(app.view, View::Graph);
+
+        let selected = app.changes.worktree_state.selected().unwrap() as u16;
+        app.regions.worktree_list = Some(Rect::new(0, 0, 20, selected + 1));
+        app.regions.worktree_status = Some(Rect::new(18, 0, 2, selected + 1));
+        app.handle_left_click(Position::new(19, selected));
+        wait_for_state(&mut app, |app| {
+            app.repository()
+                .is_some_and(|repo| repo.changes.iter().all(|change| change.staged))
+        });
+        assert_eq!(app.view, View::Graph);
+    }
+
+    #[test]
     fn switches_views_with_tab_and_edits_settings() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config");
@@ -3141,6 +3246,41 @@ mod tests {
         assert!(!app.commit_running());
         assert!(app.commit_input.is_empty());
         assert_eq!(app.repository().unwrap().commits.len(), 2);
+    }
+
+    #[test]
+    fn restores_commit_drafts_and_removes_them_after_commit() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        initialize_repository(root);
+        fs::write(root.join("next.txt"), "next\n").unwrap();
+        run_git(root, &["add", "next.txt"]);
+        let draft_path = git::commit_draft_path(root).unwrap();
+
+        let mut app = App::new(root.to_path_buf());
+        app.mode = Mode::Commit;
+        app.handle_paste("persisted subject\npersisted body");
+        assert!(!draft_path.exists());
+        assert!(app.commit_draft_due.is_some());
+        app.flush_commit_draft();
+        assert_eq!(
+            fs::read_to_string(&draft_path).unwrap(),
+            "persisted subject\npersisted body"
+        );
+        drop(app);
+
+        let mut restored = App::new(root.to_path_buf());
+        assert_eq!(
+            restored.commit_input.text(),
+            "persisted subject\npersisted body"
+        );
+        restored.mode = Mode::Commit;
+        restored.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        wait_for_state(&mut restored, |app| {
+            app.repository().is_some_and(|repo| repo.commits.len() == 2)
+        });
+        assert!(restored.commit_input.is_empty());
+        assert!(!draft_path.exists());
     }
 
     #[test]

@@ -50,7 +50,6 @@ impl TextInput {
         self.text.is_empty()
     }
 
-    #[cfg(test)]
     pub(crate) fn set(&mut self, text: impl Into<String>) {
         self.text = text.into();
         self.cursor = self.text.len();
