@@ -211,10 +211,19 @@ pub(crate) struct RepositorySession {
 
 impl RepositorySession {
     pub(crate) fn new(path: &Path, fetch_interval: Duration) -> Self {
+        Self::with_data(git::load_or_local(path).ok(), fetch_interval)
+    }
+
+    pub(crate) fn opening(path: PathBuf, fetch_interval: Duration) -> Self {
+        let mut session = Self::with_data(None, fetch_interval);
+        let _ = session.start_open(path, fetch_interval);
+        session
+    }
+
+    fn with_data(data: Option<RepositoryData>, fetch_interval: Duration) -> Self {
         let (worker_tx, worker_rx) = mpsc::channel();
         let (status_tx, status_rx) = mpsc::channel();
         let (load_tx, load_rx) = mpsc::channel();
-        let data = git::load_or_local(path).ok();
         let status_signature = data
             .as_ref()
             .filter(|repository| !repository.is_local())

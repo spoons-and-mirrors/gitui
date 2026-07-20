@@ -30,7 +30,7 @@ fn main() -> Result<()> {
     install_panic_hook();
     let mut terminal = start_terminal()?;
     let _guard = TerminalGuard;
-    let mut app = App::new(path);
+    let mut app = App::opening(path);
     let mut dirty = true;
 
     while !app.should_quit {

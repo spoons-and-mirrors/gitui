@@ -282,7 +282,16 @@ struct FileDrag {
 }
 
 impl App {
+    #[cfg(test)]
     pub fn new(path: PathBuf) -> Self {
+        Self::build(path, false)
+    }
+
+    pub fn opening(path: PathBuf) -> Self {
+        Self::build(path, true)
+    }
+
+    fn build(path: PathBuf, open_in_background: bool) -> Self {
         let settings_path = settings_path();
         let settings = settings_path
             .as_deref()
@@ -297,7 +306,12 @@ impl App {
                 }
             })
             .unwrap_or_default();
-        let session = RepositorySession::new(&path, fetch_interval(&settings));
+        let interval = fetch_interval(&settings);
+        let session = if open_in_background {
+            RepositorySession::opening(path.clone(), interval)
+        } else {
+            RepositorySession::new(&path, interval)
+        };
         let mode = if session.data().is_some() {
             Mode::Normal
         } else {
@@ -351,7 +365,7 @@ impl App {
             repository_browser,
             settings,
             settings_selection: 0,
-            notice: None,
+            notice: open_in_background.then(|| "Opening workspace…".to_owned()),
             regions: Regions::default(),
             selection: SelectionState::default(),
             copy_request: None,
