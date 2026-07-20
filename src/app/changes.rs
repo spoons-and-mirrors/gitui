@@ -5,11 +5,12 @@ use std::{
     thread,
 };
 
-use ratatui::{text::Line, widgets::ListState};
+use ratatui::widgets::ListState;
 
 use crate::{
     git::{self, Change, Commit, RepositoryData},
     tree::{ExplorerRow, FileTree, WorktreeRow, WorktreeSection, WorktreeTree},
+    ui::preview::PreviewPresentation,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,7 +51,7 @@ pub struct ChangesState {
     change_codes: HashMap<String, char>,
     preview_generation: u64,
     pub(crate) preview_content_generation: u64,
-    pub(crate) preview_render_cache: Option<PreviewRenderCache>,
+    pub(crate) preview_presentation: PreviewPresentation,
     preview_tx: Sender<PreviewRequest>,
     preview_rx: Receiver<PreviewResult>,
 }
@@ -76,21 +77,6 @@ struct PreviewResult {
 struct PendingHunkSelection {
     path: String,
     index: usize,
-}
-
-pub(crate) struct PreviewRenderCache {
-    pub(crate) generation: u64,
-    pub(crate) path: String,
-    pub(crate) is_diff: bool,
-    pub(crate) show_initial_diff_header: bool,
-    pub(crate) width: usize,
-    pub(crate) lines: Vec<Line<'static>>,
-    pub(crate) fully_styled: bool,
-    pub(crate) window_start: usize,
-    pub(crate) display_count: usize,
-    pub(crate) wrapped_line_starts: Option<Vec<usize>>,
-    pub(crate) unwrapped_hunks: Option<(Vec<(usize, usize)>, usize)>,
-    pub(crate) wrapped_hunks: Option<(Vec<(usize, usize)>, usize)>,
 }
 
 pub(super) struct ChangesSelection {
@@ -138,7 +124,7 @@ impl ChangesState {
             change_codes: repo.map_or_else(HashMap::new, |repo| change_codes(&repo.changes)),
             preview_generation: 0,
             preview_content_generation: 0,
-            preview_render_cache: None,
+            preview_presentation: PreviewPresentation::default(),
             preview_tx,
             preview_rx,
         };
@@ -962,7 +948,7 @@ impl ChangesState {
     pub(crate) fn set_diff(&mut self, content: String) {
         self.diff = content;
         self.preview_content_generation = self.preview_content_generation.wrapping_add(1);
-        self.preview_render_cache = None;
+        self.preview_presentation.clear();
     }
 
     fn select_initial_rows(&mut self, repo: Option<&RepositoryData>) {

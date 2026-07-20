@@ -9,7 +9,9 @@ use anyhow::Result;
 
 use crate::{
     filesystem::{self, FileOperation},
-    git::{self, Change, CommandOutput, RepositoryData},
+    git::{
+        self, Change, CommandOutput, RefreshScope, RepositoryData, RepositoryKind, RepositoryUpdate,
+    },
 };
 
 const MIN_STATUS_INTERVAL: Duration = Duration::from_millis(800);
@@ -71,7 +73,12 @@ struct LoadResult {
     generation: u64,
     kind: LoadKind,
     fetch_interval: Duration,
-    result: Result<(RepositoryData, Option<u64>), String>,
+    result: Result<(LoadPayload, Option<u64>), String>,
+}
+
+enum LoadPayload {
+    Open(RepositoryData),
+    Refresh(RepositoryUpdate),
 }
 
 #[derive(Debug)]
@@ -88,24 +95,116 @@ enum WorkerKind {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Operation {
+    Commit,
+    Fetch,
+    Command,
+    Mutation,
+    StatusCheck,
+    Load(LoadKind),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForegroundOperation {
+    Commit,
+    Command,
+    Mutation,
+}
+
+#[derive(Debug, Default)]
+struct OperationState {
+    foreground: Option<ForegroundOperation>,
+    fetching: bool,
+    checking_status: bool,
+    loading: bool,
+}
+
+impl OperationState {
+    fn can_start(&self, operation: Operation) -> bool {
+        match operation {
+            Operation::Commit => self.foreground.is_none(),
+            Operation::Fetch => {
+                !self.loading
+                    && !self.fetching
+                    && !matches!(
+                        self.foreground,
+                        Some(ForegroundOperation::Command | ForegroundOperation::Mutation)
+                    )
+            }
+            Operation::Command => self.foreground.is_none() && !self.fetching,
+            Operation::Mutation => self.foreground.is_none() && !self.fetching && !self.loading,
+            Operation::StatusCheck => {
+                self.foreground.is_none()
+                    && !self.fetching
+                    && !self.checking_status
+                    && !self.loading
+            }
+            Operation::Load(LoadKind::Open) => {
+                self.foreground != Some(ForegroundOperation::Mutation)
+            }
+            Operation::Load(LoadKind::Reload) => !self.loading,
+        }
+    }
+
+    fn start(&mut self, operation: Operation) -> bool {
+        if !self.can_start(operation) {
+            return false;
+        }
+        match operation {
+            Operation::Commit => self.foreground = Some(ForegroundOperation::Commit),
+            Operation::Fetch => self.fetching = true,
+            Operation::Command => self.foreground = Some(ForegroundOperation::Command),
+            Operation::Mutation => self.foreground = Some(ForegroundOperation::Mutation),
+            Operation::StatusCheck => self.checking_status = true,
+            Operation::Load(_) => self.loading = true,
+        }
+        true
+    }
+
+    fn finish(&mut self, operation: Operation) {
+        match operation {
+            Operation::Commit if self.foreground == Some(ForegroundOperation::Commit) => {
+                self.foreground = None;
+            }
+            Operation::Command if self.foreground == Some(ForegroundOperation::Command) => {
+                self.foreground = None;
+            }
+            Operation::Mutation if self.foreground == Some(ForegroundOperation::Mutation) => {
+                self.foreground = None;
+            }
+            Operation::Fetch => self.fetching = false,
+            Operation::StatusCheck => self.checking_status = false,
+            Operation::Load(_) => self.loading = false,
+            Operation::Commit | Operation::Command | Operation::Mutation => {}
+        }
+    }
+
+    fn is_running(&self, operation: Operation) -> bool {
+        match operation {
+            Operation::Commit => self.foreground == Some(ForegroundOperation::Commit),
+            Operation::Fetch => self.fetching,
+            Operation::Command => self.foreground == Some(ForegroundOperation::Command),
+            Operation::Mutation => self.foreground == Some(ForegroundOperation::Mutation),
+            Operation::StatusCheck => self.checking_status,
+            Operation::Load(_) => self.loading,
+        }
+    }
+}
+
 pub(crate) struct RepositorySession {
     data: Option<RepositoryData>,
-    commit_running: bool,
-    fetch_running: bool,
-    command_running: bool,
-    mutation_running: bool,
+    operations: OperationState,
     worker_tx: Sender<WorkerResult>,
     worker_rx: Receiver<WorkerResult>,
     status_tx: Sender<StatusResult>,
     status_rx: Receiver<StatusResult>,
-    status_check_running: bool,
     status_signature: Option<u64>,
     next_fetch_at: Instant,
     next_status_check: Instant,
     status_interval: Duration,
     status_activity_generation: u64,
     load_generation: u64,
-    load_running: bool,
     load_tx: Sender<LoadResult>,
     load_rx: Receiver<LoadResult>,
 }
@@ -123,22 +222,17 @@ impl RepositorySession {
 
         Self {
             data,
-            commit_running: false,
-            fetch_running: false,
-            command_running: false,
-            mutation_running: false,
+            operations: OperationState::default(),
             worker_tx,
             worker_rx,
             status_tx,
             status_rx,
-            status_check_running: false,
             status_signature,
             next_fetch_at: Instant::now() + fetch_interval,
             next_status_check: Instant::now() + MIN_STATUS_INTERVAL,
             status_interval: MIN_STATUS_INTERVAL,
             status_activity_generation: 0,
             load_generation: 0,
-            load_running: false,
             load_tx,
             load_rx,
         }
@@ -156,29 +250,36 @@ impl RepositorySession {
     }
 
     pub(crate) fn commit_running(&self) -> bool {
-        self.commit_running
+        self.operations.is_running(Operation::Commit)
     }
 
     pub(crate) fn fetch_running(&self) -> bool {
-        self.fetch_running
+        self.operations.is_running(Operation::Fetch)
     }
 
     pub(crate) fn command_running(&self) -> bool {
-        self.command_running
+        self.operations.is_running(Operation::Command)
     }
 
     pub(crate) fn start_open(&mut self, path: PathBuf, fetch_interval: Duration) -> bool {
-        if self.mutation_running {
-            return false;
-        }
-        self.start_load(path, LoadKind::Open, fetch_interval)
+        self.start_load(
+            path,
+            LoadKind::Open,
+            RefreshScope::ALL,
+            None,
+            fetch_interval,
+        )
     }
 
-    pub(crate) fn start_reload(&mut self, fetch_interval: Duration) -> bool {
-        let Some(root) = self.data.as_ref().map(|repository| repository.root.clone()) else {
+    pub(crate) fn start_reload(&mut self, scope: RefreshScope, fetch_interval: Duration) -> bool {
+        let Some((root, kind)) = self
+            .data
+            .as_ref()
+            .map(|repository| (repository.root.clone(), repository.kind))
+        else {
             return false;
         };
-        self.start_load(root, LoadKind::Reload, fetch_interval)
+        self.start_load(root, LoadKind::Reload, scope, Some(kind), fetch_interval)
     }
 
     pub(crate) fn next_load_completion(&mut self) -> Option<LoadCompletion> {
@@ -186,14 +287,21 @@ impl RepositorySession {
             if done.generation != self.load_generation {
                 continue;
             }
-            self.load_running = false;
-            let result = done.result.map(|(data, signature)| {
+            self.operations.finish(Operation::Load(done.kind));
+            let result = done.result.map(|(payload, signature)| {
                 self.status_signature = signature;
                 self.reset_status_interval();
                 if done.kind == LoadKind::Open {
                     self.next_fetch_at = Instant::now() + done.fetch_interval;
                 }
-                self.data = Some(data);
+                match payload {
+                    LoadPayload::Open(data) => self.data = Some(data),
+                    LoadPayload::Refresh(update) => self
+                        .data
+                        .as_mut()
+                        .expect("refresh completed without repository data")
+                        .apply(update),
+                }
             });
             return Some(LoadCompletion {
                 kind: done.kind,
@@ -208,14 +316,14 @@ impl RepositorySession {
     }
 
     pub(crate) fn start_commit(&mut self, message: String) -> bool {
-        if self.commit_running || self.command_running || self.mutation_running {
+        if !self.operations.can_start(Operation::Commit) {
             return false;
         }
         let Some(root) = self.git_root() else {
             return false;
         };
 
-        self.commit_running = true;
+        self.operations.start(Operation::Commit);
         let sender = self.worker_tx.clone();
         thread::spawn(move || {
             let result = git::commit(&root, &message).map_err(|error| error.to_string());
@@ -229,18 +337,14 @@ impl RepositorySession {
     }
 
     pub(crate) fn start_command(&mut self, label: String, args: Vec<String>) -> bool {
-        if self.command_running
-            || self.commit_running
-            || self.fetch_running
-            || self.mutation_running
-        {
+        if !self.operations.can_start(Operation::Command) {
             return false;
         }
         let Some(root) = self.git_root() else {
             return false;
         };
 
-        self.command_running = true;
+        self.operations.start(Operation::Command);
         let sender = self.worker_tx.clone();
         thread::spawn(move || {
             let result = git::run_command(&root, &args).map_err(|error| error.to_string());
@@ -254,19 +358,14 @@ impl RepositorySession {
     }
 
     pub(crate) fn start_mutation(&mut self, mutation: Mutation) -> bool {
-        if self.mutation_running
-            || self.commit_running
-            || self.fetch_running
-            || self.command_running
-            || self.load_running
-        {
+        if !self.operations.can_start(Operation::Mutation) {
             return false;
         }
         let Some(root) = self.git_root() else {
             return false;
         };
 
-        self.mutation_running = true;
+        self.operations.start(Operation::Mutation);
         let sender = self.worker_tx.clone();
         thread::spawn(move || {
             let result = match &mutation {
@@ -293,19 +392,14 @@ impl RepositorySession {
     }
 
     pub(crate) fn start_file_operation(&mut self, operation: FileOperation) -> bool {
-        if self.mutation_running
-            || self.commit_running
-            || self.fetch_running
-            || self.command_running
-            || self.load_running
-        {
+        if !self.operations.can_start(Operation::Mutation) {
             return false;
         }
         let Some(root) = self.data.as_ref().map(|repository| repository.root.clone()) else {
             return false;
         };
 
-        self.mutation_running = true;
+        self.operations.start(Operation::Mutation);
         let selection = operation.selection_after();
         let message = operation.success_message();
         let sender = self.worker_tx.clone();
@@ -329,10 +423,7 @@ impl RepositorySession {
 
     pub(crate) fn maybe_start_fetch(&mut self, enabled: bool, fetch_interval: Duration) {
         if !enabled
-            || self.load_running
-            || self.fetch_running
-            || self.command_running
-            || self.mutation_running
+            || !self.operations.can_start(Operation::Fetch)
             || Instant::now() < self.next_fetch_at
         {
             return;
@@ -341,7 +432,7 @@ impl RepositorySession {
             return;
         };
 
-        self.fetch_running = true;
+        self.operations.start(Operation::Fetch);
         self.next_fetch_at = Instant::now() + fetch_interval;
         let sender = self.worker_tx.clone();
         thread::spawn(move || {
@@ -355,12 +446,7 @@ impl RepositorySession {
     }
 
     pub(crate) fn maybe_start_status_check(&mut self) {
-        if self.status_check_running
-            || self.load_running
-            || self.commit_running
-            || self.fetch_running
-            || self.command_running
-            || self.mutation_running
+        if !self.operations.can_start(Operation::StatusCheck)
             || Instant::now() < self.next_status_check
         {
             return;
@@ -369,7 +455,7 @@ impl RepositorySession {
             return;
         };
 
-        self.status_check_running = true;
+        self.operations.start(Operation::StatusCheck);
         let baseline = self.status_signature;
         let activity_generation = self.status_activity_generation;
         let sender = self.status_tx.clone();
@@ -395,20 +481,20 @@ impl RepositorySession {
                 .is_some_and(|repository| repository.root == done.root);
             match done.kind {
                 WorkerKind::Commit => {
-                    self.commit_running = false;
+                    self.operations.finish(Operation::Commit);
                     if active {
                         return Some(WorkerCompletion::Commit(done.result));
                     }
                 }
                 WorkerKind::Fetch => {
-                    self.fetch_running = false;
+                    self.operations.finish(Operation::Fetch);
                     self.next_fetch_at = Instant::now() + fetch_interval;
                     if active {
                         return Some(WorkerCompletion::Fetch(done.result));
                     }
                 }
                 WorkerKind::Command { label } => {
-                    self.command_running = false;
+                    self.operations.finish(Operation::Command);
                     if active {
                         return Some(WorkerCompletion::Command(CommandCompletion {
                             label,
@@ -417,13 +503,13 @@ impl RepositorySession {
                     }
                 }
                 WorkerKind::Mutation => {
-                    self.mutation_running = false;
+                    self.operations.finish(Operation::Mutation);
                     if active {
                         return Some(WorkerCompletion::Mutation(done.result.map(|_| ())));
                     }
                 }
                 WorkerKind::FileOperation { selection, message } => {
-                    self.mutation_running = false;
+                    self.operations.finish(Operation::Mutation);
                     if active {
                         return Some(WorkerCompletion::FileOperation(FileOperationCompletion {
                             result: done.result.map(|_| selection),
@@ -438,7 +524,7 @@ impl RepositorySession {
 
     pub(crate) fn next_worktree_change(&mut self) -> bool {
         while let Ok(done) = self.status_rx.try_recv() {
-            self.status_check_running = false;
+            self.operations.finish(Operation::StatusCheck);
             let active = self
                 .data
                 .as_ref()
@@ -480,23 +566,38 @@ impl RepositorySession {
         self.next_status_check = Instant::now() + MIN_STATUS_INTERVAL;
     }
 
-    fn start_load(&mut self, path: PathBuf, kind: LoadKind, fetch_interval: Duration) -> bool {
-        if self.load_running && kind == LoadKind::Reload {
+    fn start_load(
+        &mut self,
+        path: PathBuf,
+        kind: LoadKind,
+        scope: RefreshScope,
+        repository_kind: Option<RepositoryKind>,
+        fetch_interval: Duration,
+    ) -> bool {
+        if !self.operations.start(Operation::Load(kind)) {
             return false;
         }
         self.load_generation = self.load_generation.wrapping_add(1);
-        self.load_running = true;
         let generation = self.load_generation;
         let sender = self.load_tx.clone();
         thread::spawn(move || {
-            let result = git::load_or_local(&path)
-                .map(|data| {
-                    let signature = (!data.is_local())
-                        .then(|| git::worktree_signature(&data.root).ok())
-                        .flatten();
-                    (data, signature)
-                })
-                .map_err(|error| error.to_string());
+            let result = match repository_kind {
+                None => git::load_or_local(&path).map(LoadPayload::Open),
+                Some(repository_kind) => {
+                    git::refresh_repository(&path, repository_kind, scope).map(LoadPayload::Refresh)
+                }
+            }
+            .map(|payload| {
+                let is_git = match &payload {
+                    LoadPayload::Open(data) => !data.is_local(),
+                    LoadPayload::Refresh(_) => repository_kind != Some(RepositoryKind::Local),
+                };
+                let signature = is_git
+                    .then(|| git::worktree_signature(&path).ok())
+                    .flatten();
+                (payload, signature)
+            })
+            .map_err(|error| error.to_string());
             let _ = sender.send(LoadResult {
                 generation,
                 kind,
@@ -525,7 +626,7 @@ mod tests {
     #[test]
     fn ignores_worker_completion_from_a_previous_repository() {
         let mut session = session("/active", Some(10));
-        session.commit_running = true;
+        session.operations.start(Operation::Commit);
         session
             .worker_tx
             .send(WorkerResult {
@@ -546,7 +647,7 @@ mod tests {
     #[test]
     fn ignores_command_completion_from_a_previous_repository() {
         let mut session = session("/active", Some(10));
-        session.command_running = true;
+        session.operations.start(Operation::Command);
         session
             .worker_tx
             .send(WorkerResult {
@@ -570,7 +671,7 @@ mod tests {
     fn ignores_superseded_repository_loads() {
         let mut session = session("/active", Some(7));
         session.load_generation = 2;
-        session.load_running = true;
+        session.operations.start(Operation::Load(LoadKind::Open));
         let mut stale_data = session.data.clone().unwrap();
         stale_data.root = PathBuf::from("/stale");
         session
@@ -579,20 +680,24 @@ mod tests {
                 generation: 1,
                 kind: LoadKind::Open,
                 fetch_interval: Duration::ZERO,
-                result: Ok((stale_data, Some(99))),
+                result: Ok((LoadPayload::Open(stale_data), Some(99))),
             })
             .unwrap();
 
         assert!(session.next_load_completion().is_none());
         assert_eq!(session.data().unwrap().root, Path::new("/active"));
         assert_eq!(session.status_signature, Some(7));
-        assert!(session.load_running);
+        assert!(
+            session
+                .operations
+                .is_running(Operation::Load(LoadKind::Open))
+        );
     }
 
     #[test]
     fn ignores_status_result_from_a_previous_repository() {
         let mut session = session("/active", Some(10));
-        session.status_check_running = true;
+        session.operations.start(Operation::StatusCheck);
         session
             .status_tx
             .send(StatusResult {
@@ -605,13 +710,13 @@ mod tests {
 
         assert!(!session.next_worktree_change());
         assert_eq!(session.status_signature, Some(10));
-        assert!(!session.status_check_running);
+        assert!(!session.operations.is_running(Operation::StatusCheck));
     }
 
     #[test]
     fn ignores_status_result_with_a_superseded_baseline() {
         let mut session = session("/active", Some(20));
-        session.status_check_running = true;
+        session.operations.start(Operation::StatusCheck);
         session
             .status_tx
             .send(StatusResult {
@@ -624,7 +729,7 @@ mod tests {
 
         assert!(!session.next_worktree_change());
         assert_eq!(session.status_signature, Some(20));
-        assert!(!session.status_check_running);
+        assert!(!session.operations.is_running(Operation::StatusCheck));
     }
 
     #[test]
@@ -637,8 +742,8 @@ mod tests {
         session.maybe_start_fetch(true, Duration::ZERO);
         session.maybe_start_status_check();
 
-        assert!(!session.fetch_running);
-        assert!(!session.status_check_running);
+        assert!(!session.operations.is_running(Operation::Fetch));
+        assert!(!session.operations.is_running(Operation::StatusCheck));
         assert!(!session.start_commit("local".to_owned()));
         assert!(!session.start_command("Status".to_owned(), vec!["status".to_owned()]));
         assert!(!session.start_mutation(Mutation::StageAll));
@@ -651,7 +756,7 @@ mod tests {
         session.note_activity();
         assert!(session.next_status_check <= Instant::now());
 
-        session.status_check_running = true;
+        session.operations.start(Operation::StatusCheck);
         session
             .status_tx
             .send(StatusResult {
@@ -663,6 +768,51 @@ mod tests {
             .unwrap();
         assert!(!session.next_worktree_change());
         assert_eq!(session.status_interval, MIN_STATUS_INTERVAL);
+    }
+
+    #[test]
+    fn operation_state_preserves_repository_concurrency_rules() {
+        let mut committing = OperationState::default();
+        assert!(committing.start(Operation::Commit));
+        assert!(committing.can_start(Operation::Fetch));
+        assert!(committing.can_start(Operation::Load(LoadKind::Reload)));
+        assert!(!committing.can_start(Operation::Command));
+        assert!(!committing.can_start(Operation::Mutation));
+        assert!(!committing.can_start(Operation::StatusCheck));
+
+        let mut fetching = OperationState::default();
+        assert!(fetching.start(Operation::Fetch));
+        assert!(fetching.can_start(Operation::Commit));
+        assert!(fetching.can_start(Operation::Load(LoadKind::Reload)));
+        assert!(!fetching.can_start(Operation::Command));
+        assert!(!fetching.can_start(Operation::Mutation));
+        assert!(!fetching.can_start(Operation::StatusCheck));
+
+        let mut mutating = OperationState::default();
+        assert!(mutating.start(Operation::Mutation));
+        assert!(mutating.can_start(Operation::Load(LoadKind::Reload)));
+        assert!(!mutating.can_start(Operation::Load(LoadKind::Open)));
+        assert!(!mutating.can_start(Operation::Commit));
+        assert!(!mutating.can_start(Operation::Fetch));
+
+        let mut loading = OperationState::default();
+        assert!(loading.start(Operation::Load(LoadKind::Open)));
+        assert!(loading.can_start(Operation::Commit));
+        assert!(loading.can_start(Operation::Command));
+        assert!(loading.can_start(Operation::Load(LoadKind::Open)));
+        assert!(!loading.can_start(Operation::Load(LoadKind::Reload)));
+        assert!(!loading.can_start(Operation::Fetch));
+        assert!(!loading.can_start(Operation::Mutation));
+        assert!(!loading.can_start(Operation::StatusCheck));
+
+        let mut checking_status = OperationState::default();
+        assert!(checking_status.start(Operation::StatusCheck));
+        assert!(checking_status.can_start(Operation::Commit));
+        assert!(checking_status.can_start(Operation::Fetch));
+        assert!(checking_status.can_start(Operation::Command));
+        assert!(checking_status.can_start(Operation::Mutation));
+        assert!(checking_status.can_start(Operation::Load(LoadKind::Open)));
+        assert!(!checking_status.can_start(Operation::StatusCheck));
     }
 
     fn session(root: &str, status_signature: Option<u64>) -> RepositorySession {
@@ -687,22 +837,17 @@ mod tests {
                 graph_width: 0,
                 graph_truncated: false,
             }),
-            commit_running: false,
-            fetch_running: false,
-            command_running: false,
-            mutation_running: false,
+            operations: OperationState::default(),
             worker_tx,
             worker_rx,
             status_tx,
             status_rx,
-            status_check_running: false,
             status_signature,
             next_fetch_at: Instant::now(),
             next_status_check: Instant::now(),
             status_interval: MIN_STATUS_INTERVAL,
             status_activity_generation: 0,
             load_generation: 0,
-            load_running: false,
             load_tx,
             load_rx,
         }

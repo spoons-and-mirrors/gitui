@@ -1,7 +1,7 @@
 # hunkle
 
 - A collapsible worktree tree with per-file added/deleted line counts for inspecting, staging, unstaging, and committing changes.
-- A switchable repository file tree that respects Git ignore rules while retaining `.env` files, with read-only, syntax-colored previews.
+- A switchable repository file tree that includes tracked, untracked, and Git-ignored content, with read-only, syntax-colored previews.
 - Local workspaces for browsing, searching, and previewing directories that are not Git repositories.
 - A resizable current-branch history shelf with HEAD, branch, remote, and tag decorations; selecting a commit shows its patch.
 - A repository Actions menu for committing, pushing, fetching, pulling with rebase, and running non-interactive Git commands with captured output.
@@ -94,8 +94,10 @@ The binary stays deliberately direct, with modules split by the behavior they ow
 | `app::actions` | Repository Actions, command input, and captured results |
 | `app::changes` | Changes-screen selection, navigation, and displayed content |
 | `app::explorer` | Workspace discovery, navigation, and fuzzy search |
-| `repository_session` | Active repository or local-workspace lifecycle and background operations |
-| `git` | Installed-Git commands, parsing, repository data, and local file workspaces |
+| `app::repository_browser` | Branch, pull-request, and issue interaction plus cached remote data |
+| `repository_session` | Active workspace lifecycle, background operations, and scoped refreshes |
+| `git` | Installed-Git commands, parsing, refreshable repository facets, and local workspaces |
+| `ui::preview` | Stateful preview styling, wrapping, viewport windows, and hunk geometry |
 | `selection` | Screen-cell selection, text extraction, and clipboard fallback |
 | `tree` | Pure worktree and file-tree projection |
 | `ui` | Rendering shell, header, and view dispatch |

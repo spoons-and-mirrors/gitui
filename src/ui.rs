@@ -1,6 +1,7 @@
 mod changes;
 mod history;
 mod overlays;
+pub(crate) mod preview;
 mod text;
 
 #[cfg(test)]
@@ -106,10 +107,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         Mode::RepositoryBrowser => {
             dim(frame);
-            let regions = overlays::draw_repository_browser(frame, &mut app.repository_browser);
-            app.regions.browser_overlay = Some(regions.overlay);
-            app.regions.browser_list = Some(regions.list);
-            app.regions.browser_tabs = regions.tabs.map(Some);
+            for (target, rect) in
+                overlays::draw_repository_browser(frame, &mut app.repository_browser)
+            {
+                app.regions.register_hit_target(target, rect);
+            }
         }
         Mode::ActionMenu => {
             let anchor = app.regions.actions.unwrap_or(Rect::new(

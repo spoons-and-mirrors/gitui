@@ -7,11 +7,12 @@ mod repository_browser;
 mod text_input;
 
 pub(crate) use actions::{ACTION_ITEMS, ActionsState, CommandStatus};
-pub(crate) use changes::PreviewRenderCache;
 pub use changes::{ChangesState, LeftPane};
 pub use explorer::{Explorer, PickerAction, PickerEntry};
 pub(crate) use file_search::FileSearch;
-pub(crate) use repository_browser::{BrowserTab, PullRequest, RemoteItems, RepositoryBrowser};
+pub(crate) use repository_browser::{
+    BrowserTab, PullRequest, RemoteItems, RepositoryBrowser, RepositoryBrowserEffect,
+};
 
 use std::{
     fs,
@@ -27,7 +28,7 @@ use ratatui::{
 
 use crate::{
     filesystem::{FileOperation, validate_name},
-    git::{self, RepositoryData},
+    git::{self, RefreshScope, RepositoryData},
     repository_session::{LoadKind, Mutation, RepositorySession, WorkerCompletion},
     selection::{SelectionOutcome, SelectionState},
 };
@@ -89,6 +90,25 @@ pub struct DiffHunkRegion {
     pub scroll_end: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HitTarget {
+    RepositoryBrowser(RepositoryBrowserHitTarget),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RepositoryBrowserHitTarget {
+    Overlay,
+    List,
+    Tab(BrowserTab),
+    Item(usize),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct HitRegion {
+    target: HitTarget,
+    rect: Rect,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct Regions {
     pub screen: Option<Rect>,
@@ -123,9 +143,6 @@ pub struct Regions {
     pub settings_overlay: Option<Rect>,
     pub action_menu: Option<Rect>,
     pub action_list: Option<Rect>,
-    pub browser_overlay: Option<Rect>,
-    pub browser_list: Option<Rect>,
-    pub browser_tabs: [Option<Rect>; 3],
     pub command_overlay: Option<Rect>,
     pub command_output: Option<Rect>,
     pub editor_overlay: Option<Rect>,
@@ -144,6 +161,28 @@ pub struct Regions {
     pub stage_all: Option<Rect>,
     pub unstage_all: Option<Rect>,
     pub diff_hunks: Vec<DiffHunkRegion>,
+    hit_regions: Vec<HitRegion>,
+}
+
+impl Regions {
+    pub(crate) fn register_hit_target(&mut self, target: HitTarget, rect: Rect) {
+        self.hit_regions.push(HitRegion { target, rect });
+    }
+
+    pub(crate) fn hit_target_at(&self, point: Position) -> Option<HitTarget> {
+        self.hit_regions
+            .iter()
+            .rev()
+            .find(|region| region.rect.contains(point))
+            .map(|region| region.target)
+    }
+
+    pub(crate) fn hit_target_rect(&self, target: HitTarget) -> Option<Rect> {
+        self.hit_regions
+            .iter()
+            .find(|region| region.target == target)
+            .map(|region| region.rect)
+    }
 }
 
 pub struct App {
@@ -174,7 +213,7 @@ pub struct App {
     pub should_quit: bool,
     pub(crate) settings_path: Option<PathBuf>,
     pending_reload: Option<(changes::ChangesSelection, Option<String>)>,
-    reload_queued: bool,
+    reload_queued: Option<RefreshScope>,
     pub(crate) editor_input: String,
     pub(crate) editor_error: Option<String>,
     pub(crate) editor_configure_only: bool,
@@ -298,7 +337,7 @@ impl App {
             should_quit: false,
             settings_path,
             pending_reload: None,
-            reload_queued: false,
+            reload_queued: None,
             editor_input: String::new(),
             editor_error: None,
             editor_configure_only: false,
@@ -627,7 +666,9 @@ impl App {
             self.regions.workspace_explorer_overlay,
             self.regions.settings_overlay,
             self.regions.action_menu,
-            self.regions.browser_overlay,
+            self.regions.hit_target_rect(HitTarget::RepositoryBrowser(
+                RepositoryBrowserHitTarget::Overlay,
+            )),
             self.regions.diff,
             self.regions.worktree,
             self.regions.graph_table,
@@ -745,7 +786,7 @@ impl App {
             .refresh
             .is_some_and(|rect| rect.contains(point))
         {
-            self.reload();
+            self.reload(RefreshScope::ALL);
         } else if self
             .regions
             .explorer
@@ -854,52 +895,27 @@ impl App {
             MouseEventKind::ScrollDown => self.repository_browser.move_selection(1),
             MouseEventKind::ScrollUp => self.repository_browser.move_selection(-1),
             MouseEventKind::Moved => {
-                if let Some(index) = self.repository_browser_row_at(point) {
+                if let Some(HitTarget::RepositoryBrowser(RepositoryBrowserHitTarget::Item(index))) =
+                    self.regions.hit_target_at(point)
+                {
                     self.repository_browser.select(index);
                 }
             }
-            MouseEventKind::Down(MouseButton::Left) => {
-                if self
-                    .regions
-                    .browser_overlay
-                    .is_some_and(|rect| !rect.contains(point))
-                {
-                    self.mode = Mode::Normal;
-                    return;
+            MouseEventKind::Down(MouseButton::Left) => match self.regions.hit_target_at(point) {
+                None => self.apply_repository_browser_effect(RepositoryBrowserEffect::Close),
+                Some(HitTarget::RepositoryBrowser(RepositoryBrowserHitTarget::Tab(tab))) => {
+                    self.repository_browser.set_tab(tab);
                 }
-                if let Some(tab) = self
-                    .regions
-                    .browser_tabs
-                    .iter()
-                    .position(|rect| rect.is_some_and(|rect| rect.contains(point)))
-                {
-                    self.repository_browser.set_tab(BrowserTab::ALL[tab]);
-                    return;
+                Some(HitTarget::RepositoryBrowser(RepositoryBrowserHitTarget::Item(index))) => {
+                    let effect = self.repository_browser.activate(index);
+                    self.apply_repository_browser_effect_option(effect);
                 }
-                let Some(index) = self.repository_browser_row_at(point) else {
-                    return;
-                };
-                if self.repository_browser.select(index)
-                    && self.repository_browser.tab == BrowserTab::Branches
-                {
-                    self.open_selected_browser_branch();
-                }
-            }
+                Some(HitTarget::RepositoryBrowser(
+                    RepositoryBrowserHitTarget::Overlay | RepositoryBrowserHitTarget::List,
+                )) => {}
+            },
             _ => {}
         }
-    }
-
-    fn repository_browser_row_at(&self, point: Position) -> Option<usize> {
-        let list = self
-            .regions
-            .browser_list
-            .filter(|rect| rect.contains(point))?;
-        let row_height = if self.repository_browser.tab == BrowserTab::PullRequests {
-            2
-        } else {
-            1
-        };
-        Some(self.repository_browser.state.offset() + usize::from(point.y - list.y) / row_height)
     }
 
     fn handle_explorer_mouse(&mut self, mouse: MouseEvent) {
@@ -1224,7 +1240,7 @@ impl App {
                         self.commit_input.clear();
                         self.schedule_commit_draft();
                         self.flush_commit_draft();
-                        self.reload();
+                        self.reload(RefreshScope::WORKTREE.union(RefreshScope::HISTORY_AND_REFS));
                         self.notice = Some("Commit created".to_owned());
                     }
                     Ok(output) => {
@@ -1234,7 +1250,7 @@ impl App {
                 },
                 WorkerCompletion::Fetch(result) => match result {
                     Ok(output) if output.success => {
-                        self.reload();
+                        self.reload(RefreshScope::HISTORY_AND_REFS);
                         self.notice = Some("Fetched remotes".to_owned());
                     }
                     Ok(output) => {
@@ -1247,7 +1263,7 @@ impl App {
                         let success = output.success;
                         let error = first_error(&output.stderr, "Git command failed");
                         if success {
-                            self.reload();
+                            self.reload(RefreshScope::ALL);
                         }
                         self.actions.complete(output);
                         self.notice = Some(if success {
@@ -1262,7 +1278,7 @@ impl App {
                     }
                 },
                 WorkerCompletion::Mutation(result) => match result {
-                    Ok(()) => self.reload(),
+                    Ok(()) => self.reload(RefreshScope::WORKTREE),
                     Err(error) => {
                         self.changes.cancel_pending_hunk_stage();
                         self.notice = Some(error);
@@ -1271,7 +1287,7 @@ impl App {
                 WorkerCompletion::FileOperation(done) => match done.result {
                     Ok(selection) => {
                         self.pending_file_selection = selection;
-                        self.reload();
+                        self.reload(RefreshScope::WORKTREE_AND_INVENTORY);
                         self.notice = Some(done.message);
                     }
                     Err(error) => self.notice = Some(error),
@@ -1280,7 +1296,7 @@ impl App {
         }
         while self.session.next_worktree_change() {
             changed = true;
-            self.reload();
+            self.reload(RefreshScope::ALL);
             self.notice = None;
         }
         while let Some(done) = self.session.next_load_completion() {
@@ -1289,7 +1305,7 @@ impl App {
                 (LoadKind::Open, Ok(())) => {
                     self.pending_reload = None;
                     self.pending_file_selection = None;
-                    self.reload_queued = false;
+                    self.reload_queued = None;
                     self.mode = Mode::Normal;
                     self.actions = ActionsState::default();
                     self.notice = Some(
@@ -1350,14 +1366,13 @@ impl App {
                     if self.notice.as_deref() == Some("Refreshing…") {
                         self.notice = Some("Refreshed".to_owned());
                     }
-                    if self.reload_queued {
-                        self.reload_queued = false;
-                        self.reload();
+                    if let Some(scope) = self.reload_queued.take() {
+                        self.reload(scope);
                     }
                 }
                 (LoadKind::Reload, Err(error)) => {
                     self.pending_reload = None;
-                    self.reload_queued = false;
+                    self.reload_queued = None;
                     self.notice = Some(error);
                 }
             }
@@ -1432,7 +1447,7 @@ impl App {
                 self.graph_commit_open = false;
                 self.show_graph_if_diff_empty();
             }
-            KeyCode::Char('r') => self.reload(),
+            KeyCode::Char('r') => self.reload(RefreshScope::ALL),
             KeyCode::Char('o') => self.open_explorer(),
             KeyCode::Char('s') => self.mode = Mode::Settings,
             KeyCode::Char('b') => self.open_repository_browser(),
@@ -2186,18 +2201,11 @@ impl App {
         self.graph_commit_open = true;
     }
 
-    fn open_selected_browser_branch(&mut self) {
-        let Some(oid) = self
-            .repository_browser
-            .selected_branch()
-            .map(|branch| branch.oid.clone())
-        else {
-            return;
-        };
+    fn open_browser_branch(&mut self, oid: &str) {
         let Some(index) = self.repository().and_then(|repo| {
             repo.commits
                 .iter()
-                .position(|commit| commit.oid.starts_with(&oid))
+                .position(|commit| commit.oid.starts_with(oid))
         }) else {
             self.mode = Mode::Normal;
             self.notice = Some("Branch tip is outside the loaded graph".to_owned());
@@ -2209,6 +2217,19 @@ impl App {
         self.graph_commit_open = false;
         self.view = View::Graph;
         self.mode = Mode::Normal;
+    }
+
+    fn apply_repository_browser_effect_option(&mut self, effect: Option<RepositoryBrowserEffect>) {
+        if let Some(effect) = effect {
+            self.apply_repository_browser_effect(effect);
+        }
+    }
+
+    fn apply_repository_browser_effect(&mut self, effect: RepositoryBrowserEffect) {
+        match effect {
+            RepositoryBrowserEffect::Close => self.mode = Mode::Normal,
+            RepositoryBrowserEffect::OpenBranch(oid) => self.open_browser_branch(&oid),
+        }
     }
 
     fn queue_editor(&mut self) {
@@ -2287,7 +2308,7 @@ impl App {
 
     pub(crate) fn editor_finished(&mut self, result: Result<(), String>) {
         let error = result.err();
-        self.reload();
+        self.reload(RefreshScope::WORKTREE);
         if let Some(error) = error {
             self.notice = Some(error);
         }
@@ -2322,33 +2343,8 @@ impl App {
     }
 
     fn handle_repository_browser(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => self.mode = Mode::Normal,
-            KeyCode::Enter if self.repository_browser.tab == BrowserTab::Branches => {
-                self.open_selected_browser_branch();
-            }
-            KeyCode::Tab | KeyCode::Right => self.repository_browser.move_tab(1),
-            KeyCode::BackTab | KeyCode::Left => self.repository_browser.move_tab(-1),
-            KeyCode::Down => self.repository_browser.move_selection(1),
-            KeyCode::Up => self.repository_browser.move_selection(-1),
-            KeyCode::Home => self.repository_browser.state.select(Some(0)),
-            KeyCode::End => {
-                let count = self.repository_browser.result_count();
-                self.repository_browser.state.select(count.checked_sub(1));
-            }
-            KeyCode::Backspace => self.repository_browser.backspace(),
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.repository_browser.clear();
-            }
-            KeyCode::Char(character)
-                if !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                self.repository_browser.push(character);
-            }
-            _ => {}
-        }
+        let effect = self.repository_browser.handle_key(key);
+        self.apply_repository_browser_effect_option(effect);
     }
 
     fn open_git_command(&mut self) {
@@ -2678,7 +2674,7 @@ impl App {
         }
     }
 
-    fn reload(&mut self) {
+    fn reload(&mut self, scope: RefreshScope) {
         let Some(repo) = self.repository() else {
             return;
         };
@@ -2689,12 +2685,18 @@ impl App {
             .and_then(|index| repo.commits.get(index))
             .map(|commit| commit.oid.clone());
 
-        if self.session.start_reload(fetch_interval(&self.settings)) {
+        if self
+            .session
+            .start_reload(scope, fetch_interval(&self.settings))
+        {
             self.pending_reload = Some((selection, selected_oid));
             self.notice = Some("Refreshing…".to_owned());
         } else {
             self.pending_reload = Some((selection, selected_oid));
-            self.reload_queued = true;
+            self.reload_queued = Some(
+                self.reload_queued
+                    .map_or(scope, |queued| queued.union(scope)),
+            );
         }
     }
 

@@ -9,8 +9,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
     ACTION_ITEMS, ActionsState, BrowserTab, CommandStatus, Explorer, FileDialog, FileDialogKind,
-    FileNameAction, FileSearch, PickerAction, PickerEntry, PullRequest, RemoteItems,
-    RepositoryBrowser, Settings,
+    FileNameAction, FileSearch, HitTarget, PickerAction, PickerEntry, PullRequest, RemoteItems,
+    RepositoryBrowser, RepositoryBrowserHitTarget, Settings,
 };
 
 use super::{fill, palette, truncate_width};
@@ -51,17 +51,15 @@ pub(super) struct FileDialogRegions {
     pub(super) secondary: Rect,
 }
 
-pub(super) struct RepositoryBrowserRegions {
-    pub(super) overlay: Rect,
-    pub(super) list: Rect,
-    pub(super) tabs: [Rect; 3],
-}
-
 pub(super) fn draw_repository_browser(
     frame: &mut Frame<'_>,
     browser: &mut RepositoryBrowser,
-) -> RepositoryBrowserRegions {
+) -> Vec<(HitTarget, Rect)> {
     let area = centered_min(frame.area(), 84, 72, 60, 18);
+    let mut hit_targets = vec![(
+        HitTarget::RepositoryBrowser(RepositoryBrowserHitTarget::Overlay),
+        area,
+    )];
     frame.render_widget(Clear, area);
     fill(frame, area, palette().panel);
     fill(
@@ -107,6 +105,10 @@ pub(super) fn draw_repository_browser(
         remote_tab_label("ISSUES", &browser.issues),
     ];
     for (index, rect) in tabs.iter().copied().enumerate() {
+        hit_targets.push((
+            HitTarget::RepositoryBrowser(RepositoryBrowserHitTarget::Tab(BrowserTab::ALL[index])),
+            rect,
+        ));
         let active = BrowserTab::ALL[index] == browser.tab;
         frame.render_widget(
             Paragraph::new(tab_labels[index].as_str())
@@ -263,6 +265,27 @@ pub(super) fn draw_repository_browser(
         list,
         &mut browser.state,
     );
+    hit_targets.push((
+        HitTarget::RepositoryBrowser(RepositoryBrowserHitTarget::List),
+        list,
+    ));
+    let row_height = if browser.tab == BrowserTab::PullRequests {
+        2
+    } else {
+        1
+    };
+    let mut row_y = list.y;
+    for index in browser.state.offset()..result_count {
+        let height = row_height.min(list.bottom().saturating_sub(row_y));
+        if height == 0 {
+            break;
+        }
+        hit_targets.push((
+            HitTarget::RepositoryBrowser(RepositoryBrowserHitTarget::Item(index)),
+            Rect::new(list.x, row_y, list.width, height),
+        ));
+        row_y = row_y.saturating_add(row_height);
+    }
 
     let footer = if browser.tab == BrowserTab::Branches {
         "Enter open in Graph   ←→ / Tab switch   ↑↓ select   type to filter   Esc close"
@@ -276,11 +299,7 @@ pub(super) fn draw_repository_browser(
         Rect::new(inner_x, area.bottom().saturating_sub(1), inner_width, 1),
     );
 
-    RepositoryBrowserRegions {
-        overlay: area,
-        list,
-        tabs,
-    }
+    hit_targets
 }
 
 fn remote_tab_label<T>(label: &str, items: &RemoteItems<T>) -> String {

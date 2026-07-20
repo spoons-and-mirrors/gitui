@@ -7,6 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
 use serde_json::Value;
 
@@ -19,6 +20,12 @@ pub(crate) enum BrowserTab {
     Branches,
     PullRequests,
     Issues,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RepositoryBrowserEffect {
+    Close,
+    OpenBranch(String),
 }
 
 impl BrowserTab {
@@ -256,6 +263,54 @@ impl RepositoryBrowser {
         self.select_first();
     }
 
+    pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Option<RepositoryBrowserEffect> {
+        match key.code {
+            KeyCode::Esc => Some(RepositoryBrowserEffect::Close),
+            KeyCode::Enter => self.activate_selected(),
+            KeyCode::Tab | KeyCode::Right => {
+                self.move_tab(1);
+                None
+            }
+            KeyCode::BackTab | KeyCode::Left => {
+                self.move_tab(-1);
+                None
+            }
+            KeyCode::Down => {
+                self.move_selection(1);
+                None
+            }
+            KeyCode::Up => {
+                self.move_selection(-1);
+                None
+            }
+            KeyCode::Home => {
+                self.state.select((self.result_count() > 0).then_some(0));
+                None
+            }
+            KeyCode::End => {
+                self.state.select(self.result_count().checked_sub(1));
+                None
+            }
+            KeyCode::Backspace => {
+                self.backspace();
+                None
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.clear();
+                None
+            }
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.push(character);
+                None
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn move_tab(&mut self, delta: isize) {
         let index = self
             .tab
@@ -305,6 +360,17 @@ impl RepositoryBrowser {
         }
         self.state.select(Some(index));
         true
+    }
+
+    pub(crate) fn activate(&mut self, index: usize) -> Option<RepositoryBrowserEffect> {
+        self.select(index)
+            .then(|| self.activate_selected())
+            .flatten()
+    }
+
+    fn activate_selected(&self) -> Option<RepositoryBrowserEffect> {
+        self.selected_branch()
+            .map(|branch| RepositoryBrowserEffect::OpenBranch(branch.oid.clone()))
     }
 
     pub(crate) fn result_count(&self) -> usize {
@@ -559,6 +625,14 @@ mod tests {
         assert_eq!(browser.result_count(), 0);
         browser.clear();
         assert_eq!(browser.result_count(), 1);
+        assert_eq!(
+            browser.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(RepositoryBrowserEffect::OpenBranch("abc1234".to_owned()))
+        );
+        assert_eq!(
+            browser.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(RepositoryBrowserEffect::Close)
+        );
     }
 
     #[test]
