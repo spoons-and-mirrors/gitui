@@ -7,7 +7,6 @@ mod repository_browser;
 mod text_input;
 
 pub(crate) use actions::{ACTION_ITEMS, ActionsState, CommandStatus};
-pub(crate) use changes::PreviewRenderCache;
 pub use changes::{ChangesState, LeftPane};
 pub use explorer::{Explorer, PickerAction, PickerEntry};
 pub(crate) use file_search::FileSearch;

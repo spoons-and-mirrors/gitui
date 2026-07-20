@@ -1,0 +1,573 @@
+use ratatui::{
+    style::Style,
+    text::{Line, Span},
+};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
+
+use super::text::{
+    diff_display_line_count, styled_diff, styled_diff_window, styled_source, styled_source_window,
+    wrapped_preview_line_starts,
+};
+
+const MAX_CACHED_PREVIEW_LINES: usize = 30_000;
+
+pub(crate) struct PreviewInput<'a> {
+    pub(crate) content: &'a str,
+    pub(crate) generation: u64,
+    pub(crate) path: &'a str,
+    pub(crate) is_diff: bool,
+    pub(crate) show_initial_diff_header: bool,
+    pub(crate) width: usize,
+    pub(crate) viewport_height: usize,
+    pub(crate) wrapped: bool,
+    pub(crate) hunk_selected: bool,
+}
+
+pub(crate) struct PreparedPreview {
+    pub(crate) lines: Vec<Line<'static>>,
+    pub(crate) rendered_height: usize,
+    pub(crate) wrapped: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct PreviewPresentation {
+    cache: Option<PreviewCache>,
+}
+
+struct PreviewCache {
+    generation: u64,
+    path: String,
+    is_diff: bool,
+    show_initial_diff_header: bool,
+    width: usize,
+    lines: Vec<Line<'static>>,
+    fully_styled: bool,
+    window_start: usize,
+    display_count: usize,
+    wrapped_line_starts: Option<Vec<usize>>,
+    unwrapped_hunks: Option<(Vec<(usize, usize)>, usize)>,
+    wrapped_hunks: Option<(Vec<(usize, usize)>, usize)>,
+}
+
+impl PreviewPresentation {
+    pub(crate) fn clear(&mut self) {
+        self.cache = None;
+    }
+
+    pub(crate) fn prepare(
+        &mut self,
+        input: PreviewInput<'_>,
+        scroll: &mut usize,
+    ) -> PreparedPreview {
+        let cache_matches = self.cache.as_ref().is_some_and(|cache| {
+            cache.generation == input.generation
+                && cache.path == input.path
+                && cache.is_diff == input.is_diff
+                && cache.show_initial_diff_header == input.show_initial_diff_header
+                && cache.width == input.width
+        });
+        if !cache_matches {
+            let display_count = if input.is_diff {
+                diff_display_line_count(input.content, input.show_initial_diff_header)
+            } else {
+                input.content.lines().count()
+            };
+            let fully_styled = display_count <= MAX_CACHED_PREVIEW_LINES;
+            let lines = if fully_styled {
+                if input.is_diff {
+                    styled_diff(
+                        input.content,
+                        input.path,
+                        input.width,
+                        input.show_initial_diff_header,
+                    )
+                } else {
+                    styled_source(input.content, input.path, input.width)
+                }
+            } else {
+                Vec::new()
+            };
+            self.cache = Some(PreviewCache {
+                generation: input.generation,
+                path: input.path.to_owned(),
+                is_diff: input.is_diff,
+                show_initial_diff_header: input.show_initial_diff_header,
+                width: input.width,
+                lines,
+                fully_styled,
+                window_start: 0,
+                display_count,
+                wrapped_line_starts: None,
+                unwrapped_hunks: None,
+                wrapped_hunks: None,
+            });
+        }
+
+        if input.wrapped {
+            if self
+                .cache
+                .as_ref()
+                .is_some_and(|cache| cache.wrapped_line_starts.is_none())
+            {
+                let starts = wrapped_preview_line_starts(
+                    input.content,
+                    input.is_diff,
+                    input.width,
+                    input.show_initial_diff_header,
+                );
+                self.cache
+                    .as_mut()
+                    .expect("preview cache was initialized")
+                    .wrapped_line_starts = Some(starts);
+            }
+            let starts = self
+                .cache
+                .as_ref()
+                .and_then(|cache| cache.wrapped_line_starts.as_deref())
+                .expect("wrapped line starts were initialized");
+            let display_count = starts.len().saturating_sub(1);
+            let rendered_height = starts.last().copied().unwrap_or(0);
+            let scroll_limit = if input.hunk_selected {
+                rendered_height.saturating_sub(1)
+            } else {
+                rendered_height.saturating_sub(input.viewport_height)
+            };
+            *scroll = (*scroll).min(scroll_limit);
+            let first = starts
+                .partition_point(|start| *start <= *scroll)
+                .saturating_sub(1)
+                .min(display_count);
+            let visible_end = scroll.saturating_add(input.viewport_height);
+            let end = starts
+                .partition_point(|start| *start < visible_end)
+                .max(first.saturating_add(1))
+                .min(display_count);
+            let local_scroll = scroll.saturating_sub(starts[first]);
+            let logical_lines = self.line_window(
+                &input,
+                first,
+                end.saturating_sub(first),
+                input.viewport_height,
+            );
+            return PreparedPreview {
+                lines: hard_wrap_lines(
+                    logical_lines,
+                    input.width,
+                    local_scroll,
+                    input.viewport_height,
+                    input.is_diff,
+                ),
+                rendered_height,
+                wrapped: true,
+            };
+        }
+
+        let height = self
+            .cache
+            .as_ref()
+            .expect("preview cache was initialized")
+            .display_count;
+        let max_scroll = if input.is_diff && input.hunk_selected {
+            height.saturating_sub(1)
+        } else {
+            height.saturating_sub(input.viewport_height)
+        };
+        *scroll = (*scroll).min(max_scroll);
+        let lines = self.line_window(
+            &input,
+            *scroll,
+            input.viewport_height,
+            input.viewport_height,
+        );
+        PreparedPreview {
+            lines,
+            rendered_height: height,
+            wrapped: false,
+        }
+    }
+
+    pub(crate) fn hunk_rows(
+        &mut self,
+        content: &str,
+        wrapped: bool,
+    ) -> (Vec<(usize, usize)>, usize) {
+        if let Some(cache) = &self.cache {
+            let cached = if wrapped {
+                &cache.wrapped_hunks
+            } else {
+                &cache.unwrapped_hunks
+            };
+            if let Some(cached) = cached {
+                return cached.clone();
+            }
+        }
+        let rendered = rendered_hunk_rows(
+            content,
+            self.cache
+                .as_ref()
+                .and_then(|cache| cache.wrapped_line_starts.as_deref()),
+            wrapped,
+        );
+        if let Some(cache) = &mut self.cache {
+            if wrapped {
+                cache.wrapped_hunks = Some(rendered.clone());
+            } else {
+                cache.unwrapped_hunks = Some(rendered.clone());
+            }
+        }
+        rendered
+    }
+
+    fn line_window(
+        &mut self,
+        input: &PreviewInput<'_>,
+        start: usize,
+        count: usize,
+        viewport_height: usize,
+    ) -> Vec<Line<'static>> {
+        let cache = self.cache.as_ref().expect("preview cache was initialized");
+        if cache.fully_styled {
+            return cache
+                .lines
+                .iter()
+                .skip(start)
+                .take(count)
+                .cloned()
+                .collect();
+        }
+        let cached_end = cache.window_start.saturating_add(cache.lines.len());
+        if start < cache.window_start || start.saturating_add(count) > cached_end {
+            let margin = viewport_height.saturating_mul(4).max(256);
+            let window_start = start.saturating_sub(margin);
+            let window_count = count.saturating_add(margin.saturating_mul(2));
+            let lines = if input.is_diff {
+                styled_diff_window(
+                    input.content,
+                    input.path,
+                    input.width,
+                    window_start,
+                    window_count,
+                    input.show_initial_diff_header,
+                )
+            } else {
+                styled_source_window(
+                    input.content,
+                    input.path,
+                    input.width,
+                    window_start,
+                    window_count,
+                )
+            };
+            let cache = self.cache.as_mut().expect("preview cache was initialized");
+            cache.window_start = window_start;
+            cache.lines = lines;
+        }
+        let cache = self.cache.as_ref().expect("preview cache was initialized");
+        cache
+            .lines
+            .iter()
+            .skip(start.saturating_sub(cache.window_start))
+            .take(count)
+            .cloned()
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_windowed(&self) -> bool {
+        self.cache
+            .as_ref()
+            .is_some_and(|cache| !cache.fully_styled && !cache.lines.is_empty())
+    }
+}
+
+type StyledGrapheme = (String, Style, usize);
+type WrapToken = (bool, Vec<StyledGrapheme>);
+
+fn hard_wrap_lines(
+    lines: Vec<Line<'static>>,
+    width: usize,
+    skip: usize,
+    take: usize,
+    is_diff: bool,
+) -> Vec<Line<'static>> {
+    if take == 0 {
+        return Vec::new();
+    }
+    let width = width.max(1);
+    let mut wrapped = Vec::with_capacity(take);
+    let mut rendered = 0_usize;
+    for line in lines {
+        let line_style = line.style;
+        let (gutter, prefix_spans) = line_gutter(&line, width, is_diff);
+        let mut output_spans = line.spans[..prefix_spans].to_vec();
+        let mut output_width = gutter;
+        let mut tokens: Vec<WrapToken> = Vec::new();
+        for span in &line.spans[prefix_spans..] {
+            for grapheme in span.content.graphemes(true) {
+                let grapheme_width = UnicodeWidthStr::width(grapheme);
+                let whitespace = grapheme.chars().all(char::is_whitespace);
+                if tokens.last().is_none_or(|token| token.0 != whitespace) {
+                    tokens.push((whitespace, Vec::new()));
+                }
+                tokens.last_mut().expect("token was inserted").1.push((
+                    grapheme.to_owned(),
+                    span.style,
+                    grapheme_width,
+                ));
+            }
+        }
+
+        let mut pending_whitespace = None;
+        let mut has_word = false;
+        for (whitespace, token) in tokens {
+            if whitespace && has_word {
+                pending_whitespace = Some(token);
+                continue;
+            }
+            let token_width = token.iter().map(|grapheme| grapheme.2).sum::<usize>();
+            let whitespace_width = pending_whitespace
+                .as_ref()
+                .map_or(0, |token: &Vec<StyledGrapheme>| {
+                    token.iter().map(|grapheme| grapheme.2).sum()
+                });
+            if !whitespace
+                && has_word
+                && token_width <= width.saturating_sub(gutter)
+                && output_width
+                    .saturating_add(whitespace_width)
+                    .saturating_add(token_width)
+                    > width
+            {
+                if emit_wrapped_row(
+                    &mut wrapped,
+                    &mut rendered,
+                    skip,
+                    take,
+                    &mut output_spans,
+                    line_style,
+                ) {
+                    return wrapped;
+                }
+                start_continuation(&mut output_spans, &mut output_width, gutter);
+                pending_whitespace = None;
+            } else if let Some(whitespace) = pending_whitespace.take()
+                && append_wrap_token(
+                    whitespace,
+                    &mut output_spans,
+                    &mut output_width,
+                    gutter,
+                    width,
+                    line_style,
+                    &mut wrapped,
+                    &mut rendered,
+                    skip,
+                    take,
+                )
+            {
+                return wrapped;
+            }
+            if append_wrap_token(
+                token,
+                &mut output_spans,
+                &mut output_width,
+                gutter,
+                width,
+                line_style,
+                &mut wrapped,
+                &mut rendered,
+                skip,
+                take,
+            ) {
+                return wrapped;
+            }
+            has_word |= !whitespace;
+        }
+        if emit_wrapped_row(
+            &mut wrapped,
+            &mut rendered,
+            skip,
+            take,
+            &mut output_spans,
+            line_style,
+        ) {
+            return wrapped;
+        }
+    }
+    wrapped
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_wrap_token(
+    token: Vec<StyledGrapheme>,
+    output_spans: &mut Vec<Span<'static>>,
+    output_width: &mut usize,
+    gutter: usize,
+    width: usize,
+    line_style: Style,
+    wrapped: &mut Vec<Line<'static>>,
+    rendered: &mut usize,
+    skip: usize,
+    take: usize,
+) -> bool {
+    for (content, style, grapheme_width) in token {
+        if *output_width > gutter && output_width.saturating_add(grapheme_width) > width {
+            if emit_wrapped_row(wrapped, rendered, skip, take, output_spans, line_style) {
+                return true;
+            }
+            start_continuation(output_spans, output_width, gutter);
+        }
+        if let Some(last) = output_spans.last_mut()
+            && last.style == style
+        {
+            last.content.to_mut().push_str(&content);
+        } else {
+            output_spans.push(Span::styled(content, style));
+        }
+        *output_width = output_width.saturating_add(grapheme_width);
+    }
+    false
+}
+
+fn emit_wrapped_row(
+    wrapped: &mut Vec<Line<'static>>,
+    rendered: &mut usize,
+    skip: usize,
+    take: usize,
+    output_spans: &mut Vec<Span<'static>>,
+    line_style: Style,
+) -> bool {
+    if *rendered >= skip {
+        wrapped.push(Line::from(std::mem::take(output_spans)).style(line_style));
+    } else {
+        output_spans.clear();
+    }
+    *rendered = rendered.saturating_add(1);
+    wrapped.len() == take
+}
+
+fn start_continuation(
+    output_spans: &mut Vec<Span<'static>>,
+    output_width: &mut usize,
+    gutter: usize,
+) {
+    if gutter > 0 {
+        output_spans.push(Span::raw(" ".repeat(gutter)));
+    }
+    *output_width = gutter;
+}
+
+fn line_gutter(line: &Line<'_>, width: usize, is_diff: bool) -> (usize, usize) {
+    if !is_diff {
+        let gutter = line
+            .spans
+            .first()
+            .filter(|span| {
+                span.content.strip_suffix("  ").is_some_and(|prefix| {
+                    prefix.chars().count() >= 5 && prefix.trim().parse::<usize>().is_ok()
+                })
+            })
+            .map_or(0, |span| UnicodeWidthStr::width(span.content.as_ref()));
+        return if width > gutter && gutter > 0 {
+            (gutter, 1)
+        } else {
+            (0, 0)
+        };
+    }
+    let marker = |span: &Span<'_>| matches!(span.content.as_ref(), "+" | "-" | " ");
+    let (gutter, spans) = match line.spans.as_slice() {
+        [number, marker_span, ..]
+            if UnicodeWidthStr::width(number.content.as_ref()) == 5 && marker(marker_span) =>
+        {
+            (6, 2)
+        }
+        [marker_span, ..] if marker(marker_span) => (1, 1),
+        _ => (0, 0),
+    };
+    if width > gutter {
+        (gutter, spans)
+    } else {
+        (0, 0)
+    }
+}
+
+fn rendered_hunk_rows(
+    diff: &str,
+    wrapped_line_starts: Option<&[usize]>,
+    wrapped: bool,
+) -> (Vec<(usize, usize)>, usize) {
+    let mut rendered_row: usize = 0;
+    let mut styled_index = 0;
+    let mut hunk_index = 0;
+    let mut rows = Vec::new();
+    let has_hunks = diff.lines().any(|line| line.starts_with("@@"));
+    let mut in_hunk = false;
+
+    for line in diff.lines() {
+        let hunk_header = line.starts_with("@@");
+        if has_hunks && !in_hunk && !hunk_header {
+            continue;
+        }
+        if hunk_header {
+            if hunk_index > 0 {
+                if wrapped {
+                    let Some(line_height) = wrapped_line_starts.and_then(|starts| {
+                        Some(starts.get(styled_index + 1)? - starts.get(styled_index)?)
+                    }) else {
+                        break;
+                    };
+                    rendered_row = rendered_row.saturating_add(line_height);
+                    styled_index += 1;
+                } else {
+                    rendered_row += 1;
+                }
+            }
+            in_hunk = true;
+            rows.push((hunk_index, rendered_row));
+            hunk_index += 1;
+        }
+        if wrapped {
+            let Some(line_height) = wrapped_line_starts
+                .and_then(|starts| Some(starts.get(styled_index + 1)? - starts.get(styled_index)?))
+            else {
+                break;
+            };
+            rendered_row = rendered_row.saturating_add(line_height);
+            styled_index += 1;
+        } else {
+            rendered_row += 1;
+        }
+    }
+    (rows, rendered_row)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrapped_source_continuations_stay_after_the_line_number_gutter() {
+        let lines = vec![Line::from(vec![
+            Span::raw("    1  "),
+            Span::raw("abcdefghijklmnop"),
+        ])];
+
+        let wrapped = hard_wrap_lines(lines, 12, 0, 10, false);
+
+        assert_eq!(wrapped.len(), 4);
+        assert!(wrapped[0].spans[0].content.starts_with("    1  "));
+        assert!(
+            wrapped[1..]
+                .iter()
+                .all(|line| line.spans[0].content.starts_with("       "))
+        );
+
+        let lines = vec![Line::from(vec![
+            Span::raw("    1  "),
+            Span::raw("word committing"),
+        ])];
+        let wrapped = hard_wrap_lines(lines, 18, 0, 10, false);
+        assert_eq!(wrapped.len(), 2);
+        assert_eq!(wrapped[1].spans[0].content, "       committing");
+    }
+}

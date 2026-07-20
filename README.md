@@ -97,6 +97,7 @@ The binary stays deliberately direct, with modules split by the behavior they ow
 | `app::repository_browser` | Branch, pull-request, and issue interaction plus cached remote data |
 | `repository_session` | Active repository or local-workspace lifecycle and background operations |
 | `git` | Installed-Git commands, parsing, repository data, and local file workspaces |
+| `ui::preview` | Stateful preview styling, wrapping, viewport windows, and hunk geometry |
 | `selection` | Screen-cell selection, text extraction, and clipboard fallback |
 | `tree` | Pure worktree and file-tree projection |
 | `ui` | Rendering shell, header, and view dispatch |

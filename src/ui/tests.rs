@@ -496,9 +496,7 @@ fn renders_every_primary_surface() {
     app.changes.diff_wrap = true;
     app.changes.diff_scroll = usize::MAX;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let cache = app.changes.preview_render_cache.as_ref().unwrap();
-    assert!(!cache.fully_styled);
-    assert!(!cache.lines.is_empty());
+    assert!(app.changes.preview_presentation.is_windowed());
     assert!(app.changes.diff_scroll > usize::from(u16::MAX));
     app.changes.diff_wrap = false;
 

@@ -1,6 +1,7 @@
 mod changes;
 mod history;
 mod overlays;
+pub(crate) mod preview;
 mod text;
 
 #[cfg(test)]
