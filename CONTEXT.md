@@ -1,0 +1,39 @@
+# Hunkle Domain Context
+
+This glossary records product concepts whose names should stay stable across modules and UI text.
+
+## Workspace
+
+The directory Hunkle has opened. A workspace is either a Git repository root or a local workspace.
+
+## Repository
+
+A Git-backed workspace. Repository data includes the worktree, file inventory, history, graph, refs, and host capabilities.
+
+## Local workspace
+
+A directory opened without Git behavior. It supports file browsing, search, previews, and file operations.
+
+## Worktree
+
+The tracked and untracked changes shown in the left WORKTREE pane. Staging actions operate on this view even while Graph is visible.
+
+## Files
+
+The complete filesystem tree inside the workspace, including Git-ignored content but excluding Git's own metadata directory.
+
+## Explorer
+
+The `o` interaction for finding and opening another workspace. Explorer is not the repository browser.
+
+## Repository browser
+
+The `b` interaction for branches, pull requests, and issues belonging to the active repository.
+
+## Interaction
+
+A focused user flow that owns its transient state and interprets input. An interaction may emit an application effect, such as opening a branch tip in Graph.
+
+## Hit target
+
+A semantic action or location attached to a rendered rectangle. Rendering owns the geometry; application input routing consumes the semantic target rather than reconstructing item identity from coordinates.

@@ -7,7 +7,10 @@ use ratatui::{
     style::{Color, Modifier},
 };
 
-use crate::app::{App, BrowserTab, LeftPane, Mode, PullRequest, RemoteItems, Settings, View};
+use crate::app::{
+    App, BrowserTab, HitTarget, LeftPane, Mode, PullRequest, RemoteItems,
+    RepositoryBrowserHitTarget, Settings, View,
+};
 
 use super::draw;
 
@@ -764,8 +767,19 @@ fn renders_every_primary_surface() {
     assert!(browser_screen.contains("PULL REQUESTS"));
     assert!(browser_screen.contains("LOCAL & REMOTE"));
     assert!(browser_screen.contains("main"));
-    assert!(app.regions.browser_list.is_some());
-    let browser_overlay = app.regions.browser_overlay.unwrap();
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::RepositoryBrowser(
+                RepositoryBrowserHitTarget::List,
+            ))
+            .is_some()
+    );
+    let browser_overlay = app
+        .regions
+        .hit_target_rect(HitTarget::RepositoryBrowser(
+            RepositoryBrowserHitTarget::Overlay,
+        ))
+        .unwrap();
     let buffer = terminal.backend().buffer();
     let background = &buffer[(0, 0)];
     let modal = &buffer[(browser_overlay.x, browser_overlay.y)];
@@ -781,7 +795,12 @@ fn renders_every_primary_surface() {
     target_branch.current = false;
     app.repository_browser.branches.push(target_branch);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let list = app.regions.browser_list.unwrap();
+    let list = app
+        .regions
+        .hit_target_rect(HitTarget::RepositoryBrowser(
+            RepositoryBrowserHitTarget::List,
+        ))
+        .unwrap();
     app.handle_mouse(MouseEvent {
         kind: MouseEventKind::Moved,
         column: list.x + 4,
@@ -803,7 +822,12 @@ fn renders_every_primary_surface() {
 
     app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let list = app.regions.browser_list.unwrap();
+    let list = app
+        .regions
+        .hit_target_rect(HitTarget::RepositoryBrowser(
+            RepositoryBrowserHitTarget::List,
+        ))
+        .unwrap();
     let branch_oid = app.repository_browser.branches[0].oid.clone();
     let branch_tip = app
         .repository()
@@ -840,7 +864,12 @@ fn renders_every_primary_surface() {
     ]);
     app.repository_browser.set_tab(BrowserTab::PullRequests);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let list = app.regions.browser_list.unwrap();
+    let list = app
+        .regions
+        .hit_target_rect(HitTarget::RepositoryBrowser(
+            RepositoryBrowserHitTarget::List,
+        ))
+        .unwrap();
     let buffer = terminal.backend().buffer();
     assert_eq!(buffer[(list.x + 4, list.y + 1)].fg, super::palette().ink);
     assert_eq!(buffer[(list.x + 4, list.y + 3)].fg, super::palette().cyan);
