@@ -268,7 +268,7 @@ impl App {
         if let Some(repo) = session.data().filter(|repo| repo.github_remote) {
             repository_browser.prefetch(&repo.root);
         }
-        Self {
+        let mut app = Self {
             session,
             view: View::Changes,
             graph_commit_open: false,
@@ -302,7 +302,9 @@ impl App {
             file_dialog: None,
             file_drag: None,
             pending_file_selection: None,
-        }
+        };
+        app.show_graph_if_diff_empty();
+        app
     }
 
     pub(crate) fn repository(&self) -> Option<&RepositoryData> {
@@ -688,6 +690,7 @@ impl App {
             .is_some_and(|rect| rect.contains(point))
         {
             self.set_left_pane(LeftPane::Worktree);
+            self.show_graph_if_diff_empty();
             return;
         }
         if self
@@ -696,6 +699,7 @@ impl App {
             .is_some_and(|rect| rect.contains(point))
         {
             self.set_left_pane(LeftPane::Files);
+            self.show_graph_if_diff_empty();
             return;
         }
         if self
@@ -722,6 +726,7 @@ impl App {
         {
             self.view = View::Changes;
             self.graph_commit_open = false;
+            self.show_graph_if_diff_empty();
         } else if self.regions.graph.is_some_and(|rect| rect.contains(point)) {
             self.view = View::Graph;
             self.graph_commit_open = false;
@@ -1285,6 +1290,7 @@ impl App {
                             .is_some_and(|repo| !repo.commits.is_empty())
                             .then_some(0),
                     );
+                    self.show_graph_if_diff_empty();
                     self.prefetch_repository_browser();
                 }
                 (LoadKind::Open, Err(error)) => {
@@ -1313,6 +1319,7 @@ impl App {
                         self.file_search
                             .reindex(&repo.files, Some(repo.files_fingerprint));
                     }
+                    self.show_graph_if_diff_empty();
                     self.prefetch_repository_browser();
                     if self.notice.as_deref() == Some("Refreshing…") {
                         self.notice = Some("Refreshed".to_owned());
@@ -1360,6 +1367,7 @@ impl App {
             self.view = View::Changes;
             self.graph_commit_open = false;
             self.set_left_pane(LeftPane::Files);
+            self.show_graph_if_diff_empty();
             return;
         }
         if let Some(index) = self.changes.hunk_selection {
@@ -1384,6 +1392,7 @@ impl App {
             KeyCode::Char('1') => {
                 self.view = View::Changes;
                 self.graph_commit_open = false;
+                self.show_graph_if_diff_empty();
             }
             KeyCode::Char('2') => {
                 self.view = View::Graph;
@@ -1395,6 +1404,7 @@ impl App {
                     View::Graph => View::Changes,
                 };
                 self.graph_commit_open = false;
+                self.show_graph_if_diff_empty();
             }
             KeyCode::Char('r') => self.reload(),
             KeyCode::Char('o') => self.open_explorer(),
@@ -2593,6 +2603,21 @@ impl App {
             LeftPane::Worktree => LeftPane::Files,
             LeftPane::Files => LeftPane::Worktree,
         });
+        self.show_graph_if_diff_empty();
+    }
+
+    fn show_graph_if_diff_empty(&mut self) {
+        let should_show_graph = self.view == View::Changes
+            && self.mode != Mode::Commit
+            && self.repository().is_some_and(|repo| {
+                !repo.is_local()
+                    && !repo.commits.is_empty()
+                    && !self.changes.has_preview_target(repo)
+            });
+        if should_show_graph {
+            self.view = View::Graph;
+            self.graph_commit_open = false;
+        }
     }
 
     fn start_commit(&mut self) {
@@ -2913,6 +2938,35 @@ mod tests {
         assert_eq!(loaded.fetch_interval_minutes, 1);
         assert_eq!(loaded.worktree_width, 24);
         assert_eq!(loaded.history_height, 3);
+    }
+
+    #[test]
+    fn empty_diff_falls_back_to_the_graph() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        initialize_repository(root);
+
+        let mut app = App::new(root.to_path_buf());
+        assert_eq!(app.view, View::Graph);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+        assert_eq!(app.view, View::Graph);
+
+        app.changes.pane = LeftPane::Files;
+        app.changes.explorer_state.select(None);
+        app.handle_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+        assert_eq!(app.view, View::Graph);
+
+        fs::write(root.join("tracked.txt"), "edited\n").unwrap();
+        let mut dirty_app = App::new(root.to_path_buf());
+        assert_eq!(dirty_app.view, View::Changes);
+
+        fs::write(root.join("tracked.txt"), "base\n").unwrap();
+        dirty_app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        wait_for_state(&mut dirty_app, |app| {
+            app.repository().is_some_and(|repo| repo.changes.is_empty())
+        });
+        assert_eq!(dirty_app.view, View::Graph);
     }
 
     #[test]

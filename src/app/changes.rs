@@ -268,6 +268,30 @@ impl ChangesState {
         self.worktree_rows(repo).get(selected)?.change_index
     }
 
+    pub(super) fn has_preview_target(&self, repo: &RepositoryData) -> bool {
+        match self.pane {
+            LeftPane::Files => self
+                .explorer_state
+                .selected()
+                .and_then(|index| self.explorer_rows_cache.get(index))
+                .is_some_and(|row| row.file_index.is_some() || row.directory_path.is_some()),
+            LeftPane::Worktree => {
+                if self.history_focused
+                    && self
+                        .history_state
+                        .selected()
+                        .is_some_and(|index| repo.history.get(index).is_some())
+                {
+                    return true;
+                }
+                self.worktree_state
+                    .selected()
+                    .and_then(|index| self.worktree_rows_cache.get(index))
+                    .is_some_and(|row| row.change_index.is_some() || row.directory_path.is_some())
+            }
+        }
+    }
+
     pub(super) fn selected_directory_path(&self, repo: &RepositoryData) -> Option<String> {
         let selected = self.worktree_state.selected()?;
         self.worktree_rows(repo)
