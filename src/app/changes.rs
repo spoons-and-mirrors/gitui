@@ -1049,14 +1049,18 @@ fn preview_worker() -> (Sender<PreviewRequest>, Receiver<PreviewResult>) {
 fn change_codes(changes: &[Change]) -> HashMap<String, char> {
     let mut codes = HashMap::new();
     for change in changes {
-        codes
-            .entry(change.path.clone())
-            .and_modify(|code| {
-                if change_code_priority(change.code) < change_code_priority(*code) {
-                    *code = change.code;
-                }
-            })
-            .or_insert(change.code);
+        let mut path = Some(change.path.as_str());
+        while let Some(current) = path {
+            codes
+                .entry(current.to_owned())
+                .and_modify(|code| {
+                    if change_code_priority(change.code) < change_code_priority(*code) {
+                        *code = change.code;
+                    }
+                })
+                .or_insert(change.code);
+            path = current.rsplit_once('/').map(|(parent, _)| parent);
+        }
     }
     codes
 }

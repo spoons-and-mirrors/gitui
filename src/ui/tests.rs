@@ -1113,6 +1113,52 @@ fn colors_changed_files_in_the_files_view() {
 }
 
 #[test]
+fn colors_collapsed_folders_for_the_changes_they_contain() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    run_git(root, &["config", "user.name", "Render Test"]);
+    run_git(root, &["config", "user.email", "render@example.com"]);
+    for path in ["modified/file.txt", "deleted/file.txt", "deleted/keep.txt"] {
+        fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
+        fs::write(root.join(path), "original\n").unwrap();
+    }
+    run_git(root, &["add", "."]);
+    run_git(root, &["commit", "-m", "initial commit"]);
+
+    fs::write(root.join("modified/file.txt"), "changed\n").unwrap();
+    fs::create_dir_all(root.join("added")).unwrap();
+    fs::write(root.join("added/file.txt"), "added\n").unwrap();
+    run_git(root, &["add", "added/file.txt"]);
+    fs::create_dir_all(root.join("untracked")).unwrap();
+    fs::write(root.join("untracked/file.txt"), "new\n").unwrap();
+    run_git(root, &["rm", "deleted/file.txt"]);
+
+    let mut app = App::new(root.to_path_buf());
+    app.changes.pane = LeftPane::Files;
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let list = app.regions.explorer_list.unwrap();
+    let rows = app.changes.explorer_rows();
+    for (path, expected) in [
+        ("added", super::palette().accent),
+        ("deleted", super::palette().red),
+        ("modified", super::palette().yellow),
+        ("untracked", super::palette().green),
+    ] {
+        let row_index = rows
+            .iter()
+            .position(|row| row.directory_path.as_deref() == Some(path))
+            .unwrap();
+        assert_eq!(rows[row_index].directory_expanded, Some(false));
+        let x = list.x + rows[row_index].prefix.chars().count() as u16;
+        let y = list.y + row_index.saturating_sub(app.changes.explorer_scroll) as u16;
+        assert_eq!(terminal.backend().buffer()[(x, y)].fg, expected, "{path}");
+    }
+}
+
+#[test]
 fn files_click_waits_for_release_without_styling_every_file_as_a_drop_target() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();

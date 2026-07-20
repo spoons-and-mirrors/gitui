@@ -701,10 +701,12 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
             .take(viewport)
             .map(|(index, row)| {
                 let repo = app.repository().expect("checked above");
-                let code = row
+                let path = row
                     .file_index
                     .and_then(|file_index| repo.files.get(file_index))
-                    .and_then(|path| app.changes.explorer_change_code(path));
+                    .map(String::as_str)
+                    .or(row.directory_path.as_deref());
+                let code = path.and_then(|path| app.changes.explorer_change_code(path));
                 let item = explorer_item(row, code, usize::from(list_area.width));
                 if app.changes.explorer_state.selected() == Some(index) {
                     item.style(Style::default().bg(palette().selected))
@@ -1213,7 +1215,7 @@ fn explorer_item(row: &ExplorerRow, change_code: Option<char>, width: usize) -> 
         };
         return ListItem::new(Line::styled(
             truncate_width(&format!("{}{}{}", row.prefix, marker, row.label), width),
-            folder_style(),
+            explorer_folder_style(change_code),
         ));
     }
     let prefix = truncate_width(&row.prefix, width);
@@ -1238,6 +1240,12 @@ fn explorer_file_color(code: char) -> ratatui::style::Color {
         'M' => palette().yellow,
         _ => palette().orange,
     }
+}
+
+fn explorer_folder_style(change_code: Option<char>) -> Style {
+    Style::default().fg(change_code
+        .map(explorer_file_color)
+        .unwrap_or(palette().muted))
 }
 
 fn folder_style() -> Style {
