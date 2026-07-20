@@ -264,6 +264,10 @@ impl App {
                 .is_some_and(|repo| !repo.commits.is_empty())
                 .then_some(0),
         );
+        let mut repository_browser = RepositoryBrowser::default();
+        if let Some(repo) = session.data().filter(|repo| repo.github_remote) {
+            repository_browser.prefetch(&repo.root);
+        }
         Self {
             session,
             view: View::Changes,
@@ -280,7 +284,7 @@ impl App {
             picker: RepositoryPicker::new(start),
             file_search,
             actions: ActionsState::default(),
-            repository_browser: RepositoryBrowser::default(),
+            repository_browser,
             settings,
             settings_selection: 0,
             notice: None,
@@ -1276,6 +1280,7 @@ impl App {
                             .is_some_and(|repo| !repo.commits.is_empty())
                             .then_some(0),
                     );
+                    self.prefetch_repository_browser();
                 }
                 (LoadKind::Open, Err(error)) => {
                     self.notice = None;
@@ -1303,6 +1308,7 @@ impl App {
                         self.file_search
                             .reindex(&repo.files, Some(repo.files_fingerprint));
                     }
+                    self.prefetch_repository_browser();
                     if self.notice.as_deref() == Some("Refreshing…") {
                         self.notice = Some("Refreshed".to_owned());
                     }
@@ -2230,8 +2236,19 @@ impl App {
         };
         let root = repo.root.clone();
         let branches = repo.branches.clone();
-        self.repository_browser.open(&root, &branches);
+        let prefetch = repo.github_remote;
+        self.repository_browser.open(&root, &branches, prefetch);
         self.mode = Mode::RepositoryBrowser;
+    }
+
+    fn prefetch_repository_browser(&mut self) {
+        let root = self
+            .git_repository()
+            .filter(|repo| repo.github_remote)
+            .map(|repo| repo.root.clone());
+        if let Some(root) = root {
+            self.repository_browser.prefetch(&root);
+        }
     }
 
     fn handle_repository_browser(&mut self, key: KeyEvent) {

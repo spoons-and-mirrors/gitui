@@ -13,7 +13,7 @@
 
 ## Run
 
-A recent Rust toolchain is required. Git is required for repository status, history, staging, and repository actions. GitHub CLI (`gh`) is optional and supplies pull requests and issues in the repository browser when installed and authenticated.
+A recent Rust toolchain is required. Git is required for repository status, history, staging, and repository actions. GitHub CLI (`gh`) is optional and supplies pull requests and issues in the repository browser when installed and authenticated. GitHub data is prefetched and cached in memory for 15 minutes.
 
 ```sh
 cargo run -p hunkle

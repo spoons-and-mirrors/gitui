@@ -675,6 +675,7 @@ mod tests {
                 kind: git::RepositoryKind::Git,
                 branch: "main".to_owned(),
                 branches: Vec::new(),
+                github_remote: false,
                 changes: Vec::new(),
                 files: Vec::new(),
                 directories: Vec::new(),

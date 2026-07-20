@@ -1,14 +1,18 @@
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     process::Command,
     sync::mpsc::{self, Receiver, Sender},
     thread,
+    time::{Duration, Instant},
 };
 
 use ratatui::widgets::ListState;
 use serde_json::Value;
 
 use crate::git::Branch;
+
+const REMOTE_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BrowserTab {
@@ -46,21 +50,91 @@ pub(crate) struct Issue {
     pub(crate) labels: String,
 }
 
-#[derive(Debug)]
-pub(crate) enum RemoteItems<T> {
-    NotLoaded,
-    Loading,
-    Ready(Vec<T>),
-    Error(String),
+#[derive(Debug, Clone)]
+pub(crate) struct RemoteItems<T> {
+    items: Vec<T>,
+    fetched_at: Option<Instant>,
+    loading: bool,
+    error: Option<String>,
 }
 
 impl<T> RemoteItems<T> {
     pub(crate) fn count(&self) -> Option<usize> {
-        match self {
-            Self::Ready(items) => Some(items.len()),
-            Self::NotLoaded | Self::Loading | Self::Error(_) => None,
+        self.fetched_at.map(|_| self.items.len())
+    }
+
+    pub(crate) fn items(&self) -> Option<&[T]> {
+        self.fetched_at.map(|_| self.items.as_slice())
+    }
+
+    pub(crate) fn is_loading(&self) -> bool {
+        self.loading
+    }
+
+    pub(crate) fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    fn start_if_stale(&mut self, now: Instant) -> bool {
+        if self.loading
+            || self.fetched_at.is_some_and(|fetched_at| {
+                now.saturating_duration_since(fetched_at) < REMOTE_CACHE_TTL
+            })
+        {
+            return false;
+        }
+        self.loading = true;
+        self.error = None;
+        true
+    }
+
+    fn finish(&mut self, result: Result<Vec<T>, String>, now: Instant) {
+        self.loading = false;
+        match result {
+            Ok(items) => {
+                self.items = items;
+                self.fetched_at = Some(now);
+                self.error = None;
+            }
+            Err(error) => self.error = Some(error),
         }
     }
+
+    fn paused(&self) -> Self
+    where
+        T: Clone,
+    {
+        let mut cached = self.clone();
+        cached.loading = false;
+        cached
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ready(items: Vec<T>) -> Self {
+        Self {
+            items,
+            fetched_at: Some(Instant::now()),
+            loading: false,
+            error: None,
+        }
+    }
+}
+
+impl<T> Default for RemoteItems<T> {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            fetched_at: None,
+            loading: false,
+            error: None,
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct RemoteCache {
+    pull_requests: RemoteItems<PullRequest>,
+    issues: RemoteItems<Issue>,
 }
 
 #[derive(Clone, Copy)]
@@ -87,6 +161,7 @@ pub(crate) struct RepositoryBrowser {
     pub(crate) pull_requests: RemoteItems<PullRequest>,
     pub(crate) issues: RemoteItems<Issue>,
     root: Option<PathBuf>,
+    cache: HashMap<PathBuf, RemoteCache>,
     generation: u64,
     sender: Sender<RemoteCompletion>,
     receiver: Receiver<RemoteCompletion>,
@@ -100,9 +175,10 @@ impl Default for RepositoryBrowser {
             query: String::new(),
             state: ListState::default(),
             branches: Vec::new(),
-            pull_requests: RemoteItems::NotLoaded,
-            issues: RemoteItems::NotLoaded,
+            pull_requests: RemoteItems::default(),
+            issues: RemoteItems::default(),
             root: None,
+            cache: HashMap::new(),
             generation: 0,
             sender,
             receiver,
@@ -111,19 +187,40 @@ impl Default for RepositoryBrowser {
 }
 
 impl RepositoryBrowser {
-    pub(crate) fn open(&mut self, root: &Path, branches: &[Branch]) {
+    pub(crate) fn open(&mut self, root: &Path, branches: &[Branch], prefetch: bool) {
         self.tab = BrowserTab::Branches;
         self.query.clear();
         self.branches = branches.to_vec();
         self.select_first();
+        self.activate_root(root);
+        if prefetch {
+            self.refresh_all();
+        }
+    }
 
+    pub(crate) fn prefetch(&mut self, root: &Path) {
+        self.activate_root(root);
+        self.refresh_all();
+    }
+
+    fn activate_root(&mut self, root: &Path) {
         if self.root.as_deref() == Some(root) {
             return;
         }
+        if let Some(previous_root) = self.root.take() {
+            self.cache.insert(
+                previous_root,
+                RemoteCache {
+                    pull_requests: self.pull_requests.paused(),
+                    issues: self.issues.paused(),
+                },
+            );
+        }
         self.root = Some(root.to_owned());
         self.generation = self.generation.wrapping_add(1);
-        self.pull_requests = RemoteItems::NotLoaded;
-        self.issues = RemoteItems::NotLoaded;
+        let cached = self.cache.get(root).cloned().unwrap_or_default();
+        self.pull_requests = cached.pull_requests;
+        self.issues = cached.issues;
     }
 
     pub(crate) fn poll(&mut self) -> bool {
@@ -132,38 +229,29 @@ impl RepositoryBrowser {
             if completion.generation != self.generation {
                 continue;
             }
+            let now = Instant::now();
             match completion.result {
                 RemoteResult::PullRequests(result) => {
-                    self.pull_requests = result
-                        .map(RemoteItems::Ready)
-                        .unwrap_or_else(RemoteItems::Error);
+                    self.pull_requests.finish(result, now);
                 }
                 RemoteResult::Issues(result) => {
-                    self.issues = result
-                        .map(RemoteItems::Ready)
-                        .unwrap_or_else(RemoteItems::Error);
+                    self.issues.finish(result, now);
                 }
             }
             changed = true;
+        }
+        if changed {
+            self.clamp_selection();
         }
         changed
     }
 
     pub(crate) fn set_tab(&mut self, tab: BrowserTab) {
         self.tab = tab;
-        let remote_kind = match tab {
-            BrowserTab::PullRequests if matches!(self.pull_requests, RemoteItems::NotLoaded) => {
-                self.pull_requests = RemoteItems::Loading;
-                Some(RemoteKind::PullRequests)
-            }
-            BrowserTab::Issues if matches!(self.issues, RemoteItems::NotLoaded) => {
-                self.issues = RemoteItems::Loading;
-                Some(RemoteKind::Issues)
-            }
-            BrowserTab::Branches | BrowserTab::PullRequests | BrowserTab::Issues => None,
-        };
-        if let (Some(root), Some(kind)) = (self.root.as_deref(), remote_kind) {
-            self.start_remote_load(root, kind);
+        match tab {
+            BrowserTab::PullRequests => self.refresh(RemoteKind::PullRequests),
+            BrowserTab::Issues => self.refresh(RemoteKind::Issues),
+            BrowserTab::Branches => {}
         }
         self.select_first();
     }
@@ -237,32 +325,55 @@ impl RepositoryBrowser {
     }
 
     pub(crate) fn pull_request_indices(&self) -> Vec<usize> {
-        match &self.pull_requests {
-            RemoteItems::Ready(items) => matching_indices(&self.query, items, |item| {
+        self.pull_requests.items().map_or_else(Vec::new, |items| {
+            matching_indices(&self.query, items, |item| {
                 format!(
                     "{} {} {} {}",
                     item.number, item.title, item.branch, item.author
                 )
-            }),
-            RemoteItems::NotLoaded | RemoteItems::Loading | RemoteItems::Error(_) => Vec::new(),
-        }
+            })
+        })
     }
 
     pub(crate) fn issue_indices(&self) -> Vec<usize> {
-        match &self.issues {
-            RemoteItems::Ready(items) => matching_indices(&self.query, items, |item| {
+        self.issues.items().map_or_else(Vec::new, |items| {
+            matching_indices(&self.query, items, |item| {
                 format!(
                     "{} {} {} {}",
                     item.number, item.title, item.author, item.labels
                 )
-            }),
-            RemoteItems::NotLoaded | RemoteItems::Loading | RemoteItems::Error(_) => Vec::new(),
-        }
+            })
+        })
     }
 
     fn select_first(&mut self) {
         self.state = ListState::default();
         self.state.select((self.result_count() > 0).then_some(0));
+    }
+
+    fn clamp_selection(&mut self) {
+        let count = self.result_count();
+        if count == 0 {
+            self.state.select(None);
+        } else {
+            self.state
+                .select(Some(self.state.selected().unwrap_or(0).min(count - 1)));
+        }
+    }
+
+    fn refresh_all(&mut self) {
+        self.refresh(RemoteKind::PullRequests);
+        self.refresh(RemoteKind::Issues);
+    }
+
+    fn refresh(&mut self, kind: RemoteKind) {
+        let should_start = match kind {
+            RemoteKind::PullRequests => self.pull_requests.start_if_stale(Instant::now()),
+            RemoteKind::Issues => self.issues.start_if_stale(Instant::now()),
+        };
+        if should_start && let Some(root) = self.root.clone() {
+            self.start_remote_load(&root, kind);
+        }
     }
 
     fn start_remote_load(&self, root: &Path, kind: RemoteKind) {
@@ -431,11 +542,58 @@ mod tests {
                 remote: false,
                 current: true,
             }],
+            false,
         );
-        assert!(matches!(browser.pull_requests, RemoteItems::NotLoaded));
+        assert_eq!(browser.pull_requests.count(), None);
+        assert!(!browser.pull_requests.is_loading());
         browser.push('x');
         assert_eq!(browser.result_count(), 0);
         browser.clear();
         assert_eq!(browser.result_count(), 1);
+    }
+
+    #[test]
+    fn keeps_stale_items_visible_while_refreshing_and_after_errors() {
+        let now = Instant::now();
+        let mut items = RemoteItems {
+            items: vec![PullRequest {
+                number: 42,
+                title: "Cached pull request".to_owned(),
+                branch: "feature/cache".to_owned(),
+                author: "octo".to_owned(),
+                draft: false,
+            }],
+            fetched_at: Some(now - REMOTE_CACHE_TTL),
+            loading: false,
+            error: None,
+        };
+
+        assert!(items.start_if_stale(now));
+        assert_eq!(items.count(), Some(1));
+        assert_eq!(items.items().unwrap()[0].number, 42);
+        items.finish(Err("offline".to_owned()), now);
+        assert_eq!(items.count(), Some(1));
+        assert_eq!(items.error(), Some("offline"));
+    }
+
+    #[test]
+    fn caches_remote_items_per_repository() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let mut browser = RepositoryBrowser::default();
+        browser.activate_root(first.path());
+        browser.pull_requests = RemoteItems::ready(vec![PullRequest {
+            number: 7,
+            title: "Remember me".to_owned(),
+            branch: "feature/cache".to_owned(),
+            author: "octo".to_owned(),
+            draft: false,
+        }]);
+
+        browser.activate_root(second.path());
+        assert_eq!(browser.pull_requests.count(), None);
+        browser.activate_root(first.path());
+        assert_eq!(browser.pull_requests.count(), Some(1));
+        assert_eq!(browser.pull_requests.items().unwrap()[0].number, 7);
     }
 }

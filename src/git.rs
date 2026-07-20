@@ -33,6 +33,7 @@ pub struct RepositoryData {
     pub graph_width: usize,
     pub graph_truncated: bool,
     pub branches: Vec<Branch>,
+    pub github_remote: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -129,43 +130,48 @@ pub fn load_or_local(path: &Path) -> Result<RepositoryData> {
 }
 
 fn load_git_root(root: PathBuf) -> Result<RepositoryData> {
-    let (branch, changes, files, history, commits, branches) = thread::scope(|scope| {
-        let branch = scope.spawn(|| branch_name(&root));
-        let changes = scope.spawn(|| -> Result<Vec<Change>> {
-            let mut changes = status(&root)?;
-            populate_diff_stats(&root, &mut changes)?;
-            Ok(changes)
-        });
-        let files = scope.spawn(|| git_repository_entries(&root));
-        let history = scope.spawn(|| branch_history(&root));
-        let commits = scope.spawn(|| -> Result<(Vec<Commit>, bool)> {
-            let (mut commits, truncated) = log(&root)?;
-            layout_graph(&mut commits);
-            Ok((commits, truncated))
-        });
-        let branches = scope.spawn(|| repository_branches(&root));
+    let (branch, changes, files, history, commits, branches, github_remote) =
+        thread::scope(|scope| {
+            let branch = scope.spawn(|| branch_name(&root));
+            let changes = scope.spawn(|| -> Result<Vec<Change>> {
+                let mut changes = status(&root)?;
+                populate_diff_stats(&root, &mut changes)?;
+                Ok(changes)
+            });
+            let files = scope.spawn(|| git_repository_entries(&root));
+            let history = scope.spawn(|| branch_history(&root));
+            let commits = scope.spawn(|| -> Result<(Vec<Commit>, bool)> {
+                let (mut commits, truncated) = log(&root)?;
+                layout_graph(&mut commits);
+                Ok((commits, truncated))
+            });
+            let branches = scope.spawn(|| repository_branches(&root));
+            let github_remote = scope.spawn(|| repository_has_github_remote(&root));
 
-        Ok::<_, anyhow::Error>((
-            branch
-                .join()
-                .map_err(|_| anyhow!("branch worker panicked"))??,
-            changes
-                .join()
-                .map_err(|_| anyhow!("status worker panicked"))??,
-            files
-                .join()
-                .map_err(|_| anyhow!("file worker panicked"))??,
-            history
-                .join()
-                .map_err(|_| anyhow!("history worker panicked"))??,
-            commits
-                .join()
-                .map_err(|_| anyhow!("graph worker panicked"))??,
-            branches
-                .join()
-                .map_err(|_| anyhow!("branch list worker panicked"))??,
-        ))
-    })?;
+            Ok::<_, anyhow::Error>((
+                branch
+                    .join()
+                    .map_err(|_| anyhow!("branch worker panicked"))??,
+                changes
+                    .join()
+                    .map_err(|_| anyhow!("status worker panicked"))??,
+                files
+                    .join()
+                    .map_err(|_| anyhow!("file worker panicked"))??,
+                history
+                    .join()
+                    .map_err(|_| anyhow!("history worker panicked"))??,
+                commits
+                    .join()
+                    .map_err(|_| anyhow!("graph worker panicked"))??,
+                branches
+                    .join()
+                    .map_err(|_| anyhow!("branch list worker panicked"))??,
+                github_remote
+                    .join()
+                    .map_err(|_| anyhow!("remote worker panicked"))??,
+            ))
+        })?;
 
     let (commits, graph_truncated) = commits;
     let (files, directories) = files;
@@ -189,6 +195,7 @@ fn load_git_root(root: PathBuf) -> Result<RepositoryData> {
         graph_width,
         graph_truncated,
         branches,
+        github_remote,
     })
 }
 
@@ -214,7 +221,27 @@ fn local_workspace(path: &Path) -> Result<RepositoryData> {
         graph_width: 0,
         graph_truncated: false,
         branches: Vec::new(),
+        github_remote: false,
     })
+}
+
+fn repository_has_github_remote(root: &Path) -> Result<bool> {
+    let output = run(root, &["remote", "-v"])?;
+    if !output.status.success() {
+        bail!("{}", clean_stderr(&output));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .any(is_github_remote_url))
+}
+
+fn is_github_remote_url(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.starts_with("git@github.com:")
+        || value.starts_with("https://github.com/")
+        || value.starts_with("http://github.com/")
+        || value.starts_with("ssh://git@github.com/")
+        || value.starts_with("git://github.com/")
 }
 
 fn repository_branches(root: &Path) -> Result<Vec<Branch>> {
@@ -1443,6 +1470,14 @@ mod tests {
                 .iter()
                 .all(|commit| { commit.graph.len() == 1 && commit.graph[0].symbol == '●' })
         );
+    }
+
+    #[test]
+    fn recognizes_github_remote_urls() {
+        assert!(is_github_remote_url("git@github.com:owner/repo.git"));
+        assert!(is_github_remote_url("https://github.com/owner/repo.git"));
+        assert!(is_github_remote_url("ssh://git@github.com/owner/repo.git"));
+        assert!(!is_github_remote_url("https://gitlab.com/owner/repo.git"));
     }
 
     fn commit(oid: &str, parents: &[&str]) -> Commit {

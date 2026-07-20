@@ -1141,6 +1141,7 @@ mod tests {
             kind: RepositoryKind::Git,
             branch: "main".to_owned(),
             branches: Vec::new(),
+            github_remote: false,
             changes: vec![Change {
                 path: "src/main.rs".to_owned(),
                 original_path: None,

@@ -755,7 +755,7 @@ fn renders_every_primary_surface() {
     assert_eq!(modal.bg, super::palette().surface_alt);
     assert!(!modal.modifier.contains(Modifier::DIM));
 
-    app.repository_browser.pull_requests = RemoteItems::Ready(vec![
+    app.repository_browser.pull_requests = RemoteItems::ready(vec![
         PullRequest {
             number: 42,
             title: "Improve browser readability".to_owned(),

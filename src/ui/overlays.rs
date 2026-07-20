@@ -149,6 +149,11 @@ pub(super) fn draw_repository_browser(
         BrowserTab::PullRequests => "OPEN PULL REQUESTS",
         BrowserTab::Issues => "OPEN ISSUES",
     };
+    let (result_summary, result_color) = match browser.tab {
+        BrowserTab::Branches => (format!("{result_count} shown"), palette().faint),
+        BrowserTab::PullRequests => remote_result_summary(&browser.pull_requests, result_count),
+        BrowserTab::Issues => remote_result_summary(&browser.issues, result_count),
+    };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
@@ -158,8 +163,8 @@ pub(super) fn draw_repository_browser(
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("  {result_count} shown"),
-                Style::default().fg(palette().faint),
+                format!("  {result_summary}"),
+                Style::default().fg(result_color),
             ),
         ])),
         Rect::new(inner_x, area.y.saturating_add(8), inner_width, 1),
@@ -202,44 +207,56 @@ pub(super) fn draw_repository_browser(
                 )
             })
             .collect(),
-        BrowserTab::PullRequests => match &browser.pull_requests {
-            RemoteItems::Ready(pull_requests) => browser
-                .pull_request_indices()
-                .into_iter()
-                .filter_map(|index| pull_requests.get(index))
-                .enumerate()
-                .map(|(row, pull_request)| pull_request_row(pull_request, selected == Some(row)))
-                .collect(),
-            RemoteItems::NotLoaded => Vec::new(),
-            RemoteItems::Loading => vec![status_row("Loading pull requests…", palette().muted)],
-            RemoteItems::Error(error) => vec![status_row(error, palette().red)],
-        },
-        BrowserTab::Issues => match &browser.issues {
-            RemoteItems::Ready(issues) => browser
-                .issue_indices()
-                .into_iter()
-                .filter_map(|index| issues.get(index))
-                .enumerate()
-                .map(|(row, issue)| {
-                    let detail = if issue.labels.is_empty() {
-                        issue.author.clone()
-                    } else {
-                        format!("{} · {}", issue.author, issue.labels)
-                    };
-                    browser_row(
-                        format!("#{}  {}", issue.number, issue.title),
-                        detail,
-                        usize::from(list.width),
-                        false,
-                        selected == Some(row),
-                        palette().purple,
-                    )
-                })
-                .collect(),
-            RemoteItems::NotLoaded => Vec::new(),
-            RemoteItems::Loading => vec![status_row("Loading issues…", palette().muted)],
-            RemoteItems::Error(error) => vec![status_row(error, palette().red)],
-        },
+        BrowserTab::PullRequests => {
+            if let Some(pull_requests) = browser.pull_requests.items() {
+                browser
+                    .pull_request_indices()
+                    .into_iter()
+                    .filter_map(|index| pull_requests.get(index))
+                    .enumerate()
+                    .map(|(row, pull_request)| {
+                        pull_request_row(pull_request, selected == Some(row))
+                    })
+                    .collect()
+            } else if browser.pull_requests.is_loading() {
+                vec![status_row("Loading pull requests…", palette().muted)]
+            } else if let Some(error) = browser.pull_requests.error() {
+                vec![status_row(error, palette().red)]
+            } else {
+                Vec::new()
+            }
+        }
+        BrowserTab::Issues => {
+            if let Some(issues) = browser.issues.items() {
+                browser
+                    .issue_indices()
+                    .into_iter()
+                    .filter_map(|index| issues.get(index))
+                    .enumerate()
+                    .map(|(row, issue)| {
+                        let detail = if issue.labels.is_empty() {
+                            issue.author.clone()
+                        } else {
+                            format!("{} · {}", issue.author, issue.labels)
+                        };
+                        browser_row(
+                            format!("#{}  {}", issue.number, issue.title),
+                            detail,
+                            usize::from(list.width),
+                            false,
+                            selected == Some(row),
+                            palette().purple,
+                        )
+                    })
+                    .collect()
+            } else if browser.issues.is_loading() {
+                vec![status_row("Loading issues…", palette().muted)]
+            } else if let Some(error) = browser.issues.error() {
+                vec![status_row(error, palette().red)]
+            } else {
+                Vec::new()
+            }
+        }
     };
     frame.render_stateful_widget(
         List::new(items).highlight_style(Style::default().bg(palette().selected)),
@@ -262,15 +279,32 @@ pub(super) fn draw_repository_browser(
 }
 
 fn remote_tab_label<T>(label: &str, items: &RemoteItems<T>) -> String {
-    items.count().map_or_else(
-        || match items {
-            RemoteItems::NotLoaded => label.to_owned(),
-            RemoteItems::Loading => format!("{label} …"),
-            RemoteItems::Error(_) => format!("{label} !"),
-            RemoteItems::Ready(_) => unreachable!(),
-        },
-        |count| format!("{label} {count}"),
-    )
+    match (items.count(), items.is_loading(), items.error()) {
+        (Some(count), true, _) => format!("{label} {count} …"),
+        (Some(count), false, Some(_)) => format!("{label} {count} !"),
+        (Some(count), false, None) => format!("{label} {count}"),
+        (None, true, _) => format!("{label} …"),
+        (None, false, Some(_)) => format!("{label} !"),
+        (None, false, None) => label.to_owned(),
+    }
+}
+
+fn remote_result_summary<T>(items: &RemoteItems<T>, shown: usize) -> (String, Color) {
+    if items.count().is_some() {
+        if items.is_loading() {
+            (format!("{shown} shown · refreshing…"), palette().muted)
+        } else if items.error().is_some() {
+            (format!("{shown} shown · refresh failed"), palette().red)
+        } else {
+            (format!("{shown} shown"), palette().faint)
+        }
+    } else if items.is_loading() {
+        ("loading…".to_owned(), palette().muted)
+    } else if items.error().is_some() {
+        ("unavailable".to_owned(), palette().red)
+    } else {
+        ("not loaded".to_owned(), palette().faint)
+    }
 }
 
 fn browser_row(
