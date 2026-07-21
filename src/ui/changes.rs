@@ -798,6 +798,16 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
     };
     let markdown_available = app.markdown_preview_available();
     let markdown_rendered = app.markdown_preview_rendered();
+    let source_line_count = app.changes.diff.lines().count();
+    let line_count_label = format!(
+        "{} {}",
+        source_line_count,
+        if source_line_count == 1 {
+            "line"
+        } else {
+            "lines"
+        }
+    );
     let markdown_button_width = if markdown_available { 11 } else { 0 };
     let header_content_width = preview_header
         .width
@@ -805,8 +815,11 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
         .saturating_sub(u16::from(markdown_available));
     let display_path = truncate_width(
         &selected_path,
-        usize::from(header_content_width)
-            .saturating_sub(7 + "read-only".len() + UnicodeWidthStr::width(wrap_label)),
+        usize::from(header_content_width).saturating_sub(
+            8 + UnicodeWidthStr::width(line_count_label.as_str())
+                + "read-only".len()
+                + UnicodeWidthStr::width(wrap_label),
+        ),
     );
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -817,7 +830,13 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                display_path,
+                line_count_label,
+                Style::default()
+                    .fg(palette().muted)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  {display_path}"),
                 Style::default()
                     .fg(palette().ink)
                     .add_modifier(Modifier::BOLD),

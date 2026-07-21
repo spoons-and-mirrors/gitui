@@ -1838,6 +1838,7 @@ fn renders_markdown_files_and_toggles_back_to_source() {
         .expect("Markdown files should show a Preview button");
     let source: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
     assert!(source.contains("# Markdown Title"));
+    assert!(source.contains("3 lines"));
 
     app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
     assert!(app.markdown_preview_rendered());
@@ -1853,6 +1854,7 @@ fn renders_markdown_files_and_toggles_back_to_source() {
     assert!(rendered.contains("Markdown Title"));
     assert!(!rendered.contains("# Markdown Title"));
     assert!(rendered.contains("https://"));
+    assert!(rendered.contains("3 lines"));
 
     click(&mut app, preview_button.0, preview_button.1);
     assert!(!app.markdown_preview_rendered());
