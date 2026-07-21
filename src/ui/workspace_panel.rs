@@ -41,7 +41,6 @@ pub(super) fn draw(
     );
 
     keep_selection_visible(panel, usize::from(body.height));
-    let selected_row = focused.then(|| panel.selected_visual_row()).flatten();
     let rows = panel.rows();
     let mut create_button = None;
     for (visual_row, row) in rows.iter().copied().enumerate().skip(panel.scroll) {
@@ -94,6 +93,7 @@ pub(super) fn draw(
                 ));
             }
             WorkspacePanelRow::Workspace(index) => {
+                let state = panel.workspace_entry_state(index, focused);
                 let workspace = &panel.workspaces[index];
                 let indent = panel.workspace_indent(index);
                 let label = format!("{indent}{}", workspace.label);
@@ -106,8 +106,8 @@ pub(super) fn draw(
                     &label,
                     workspace.branch.as_deref(),
                     workspace.status,
-                    panel.workspace_is_active(index),
-                    selected_row == Some(visual_row) || ungrouped_drop,
+                    state.active,
+                    state.selected || ungrouped_drop,
                 );
                 targets.push((
                     HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Workspace(index)),
@@ -126,6 +126,7 @@ pub(super) fn draw(
                 );
             }
             WorkspacePanelRow::Agent(index) => {
+                let state = panel.agent_entry_state(index, focused);
                 let agent = &panel.agents[index];
                 let workspace = panel
                     .workspaces
@@ -143,8 +144,8 @@ pub(super) fn draw(
                     &label,
                     None,
                     agent.status,
-                    agent.focused,
-                    selected_row == Some(visual_row),
+                    state.active,
+                    state.selected,
                 );
                 targets.push((
                     HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(index)),

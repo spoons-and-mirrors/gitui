@@ -143,6 +143,81 @@ struct PendingWorkspaceFocus {
     workspace_id: String,
 }
 
+#[derive(Default)]
+struct WorkspaceFocusState {
+    host_workspace_id: Option<String>,
+    observed_workspace_id: Option<String>,
+    pending: Option<PendingWorkspaceFocus>,
+    next_request_id: u64,
+}
+
+enum WorkspaceFocusCompletion {
+    Ignored,
+    Succeeded,
+    Failed(String),
+}
+
+impl WorkspaceFocusState {
+    fn set_host(&mut self, workspace_id: Option<String>) {
+        self.host_workspace_id = workspace_id;
+    }
+
+    fn host(&self) -> Option<&str> {
+        self.host_workspace_id.as_deref()
+    }
+
+    fn apply_snapshot(&mut self, workspaces: &[HerdrWorkspace]) {
+        self.observed_workspace_id = workspaces
+            .iter()
+            .find(|workspace| workspace.focused)
+            .map(|workspace| workspace.id.clone());
+        if self.pending.as_ref().is_some_and(|pending| {
+            !workspaces
+                .iter()
+                .any(|workspace| workspace.id == pending.workspace_id)
+        }) {
+            self.pending = None;
+        }
+    }
+
+    fn begin(&mut self, workspace_id: String) -> u64 {
+        self.next_request_id = self.next_request_id.wrapping_add(1);
+        let request_id = self.next_request_id;
+        self.pending = Some(PendingWorkspaceFocus {
+            request_id,
+            workspace_id,
+        });
+        request_id
+    }
+
+    fn complete(
+        &mut self,
+        request_id: u64,
+        result: Result<(), String>,
+    ) -> WorkspaceFocusCompletion {
+        if self
+            .pending
+            .as_ref()
+            .is_none_or(|pending| pending.request_id != request_id)
+        {
+            return WorkspaceFocusCompletion::Ignored;
+        }
+        self.pending = None;
+        match result {
+            Ok(()) => WorkspaceFocusCompletion::Succeeded,
+            Err(error) => WorkspaceFocusCompletion::Failed(error),
+        }
+    }
+
+    fn active_workspace_id(&self) -> Option<&str> {
+        self.pending
+            .as_ref()
+            .map(|pending| pending.workspace_id.as_str())
+            .or(self.host_workspace_id.as_deref())
+            .or(self.observed_workspace_id.as_deref())
+    }
+}
+
 pub(crate) struct WorkspacePanel {
     enabled: bool,
     layout_available: bool,
@@ -163,12 +238,15 @@ pub(crate) struct WorkspacePanel {
     groups_path: Option<PathBuf>,
     workspace_drag: Option<WorkspaceDrag>,
     last_click: Option<(SelectionKey, Instant)>,
-    host_workspace_id: Option<String>,
-    pending_workspace_focus: Option<PendingWorkspaceFocus>,
-    next_focus_request_id: u64,
+    focus: WorkspaceFocusState,
     sender: Sender<Completion>,
     receiver: Receiver<Completion>,
     next_refresh: Instant,
+}
+
+pub(crate) struct WorkspacePanelEntryState {
+    pub(crate) active: bool,
+    pub(crate) selected: bool,
 }
 
 impl WorkspacePanel {
@@ -179,7 +257,9 @@ impl WorkspacePanel {
         let enabled = std::env::var("HERDR_ENV").ok().as_deref() == Some("1");
         let mut panel = Self::new(enabled, groups_path);
         if enabled {
-            panel.host_workspace_id = std::env::var("HERDR_WORKSPACE_ID").ok();
+            panel
+                .focus
+                .set_host(std::env::var("HERDR_WORKSPACE_ID").ok());
         }
         panel
     }
@@ -216,9 +296,7 @@ impl WorkspacePanel {
             groups_path,
             workspace_drag: None,
             last_click: None,
-            host_workspace_id: None,
-            pending_workspace_focus: None,
-            next_focus_request_id: 0,
+            focus: WorkspaceFocusState::default(),
             sender,
             receiver,
             next_refresh: Instant::now(),
@@ -325,9 +403,9 @@ impl WorkspacePanel {
                     match result {
                         Ok((workspaces, agents)) => {
                             let previous = self.selection_key();
+                            self.focus.apply_snapshot(&workspaces);
                             self.workspaces = workspaces;
                             self.agents = agents;
-                            self.reconcile_pending_workspace_focus();
                             self.error = None;
                             if self.reconcile_group_workspace_ids()
                                 && let Err(error) = self.persist_groups()
@@ -340,21 +418,14 @@ impl WorkspacePanel {
                     }
                 }
                 Completion::WorkspaceFocus { request_id, result } => {
-                    let is_current = self
-                        .pending_workspace_focus
-                        .as_ref()
-                        .is_some_and(|pending| pending.request_id == request_id);
-                    if is_current {
-                        match result {
-                            Ok(()) => {
-                                self.pending_workspace_focus = None;
-                                self.select_host_workspace();
-                                self.next_refresh = Instant::now();
-                            }
-                            Err(error) => {
-                                self.pending_workspace_focus = None;
-                                action_error = Some(error);
-                            }
+                    match self.focus.complete(request_id, result) {
+                        WorkspaceFocusCompletion::Ignored => {}
+                        WorkspaceFocusCompletion::Succeeded => {
+                            self.select_host_workspace();
+                            self.next_refresh = Instant::now();
+                        }
+                        WorkspaceFocusCompletion::Failed(error) => {
+                            action_error = Some(error);
                         }
                     }
                 }
@@ -727,16 +798,34 @@ impl WorkspacePanel {
         }
     }
 
-    pub(crate) fn workspace_is_active(&self, index: usize) -> bool {
-        let Some(workspace) = self.workspaces.get(index) else {
-            return false;
-        };
-        if let Some(pending) = self.pending_workspace_focus.as_ref() {
-            return workspace.id == pending.workspace_id;
+    pub(crate) fn workspace_entry_state(
+        &self,
+        index: usize,
+        panel_focused: bool,
+    ) -> WorkspacePanelEntryState {
+        WorkspacePanelEntryState {
+            active: self.workspaces.get(index).is_some_and(|workspace| {
+                self.focus.active_workspace_id() == Some(workspace.id.as_str())
+            }),
+            selected: panel_focused && self.selected == Some(index),
         }
-        self.host_workspace_id
-            .as_ref()
-            .map_or(workspace.focused, |host| workspace.id == *host)
+    }
+
+    pub(crate) fn agent_entry_state(
+        &self,
+        index: usize,
+        panel_focused: bool,
+    ) -> WorkspacePanelEntryState {
+        WorkspacePanelEntryState {
+            active: self.agents.get(index).is_some_and(|agent| agent.focused),
+            selected: panel_focused
+                && self.selected == Some(self.workspaces.len().saturating_add(index)),
+        }
+    }
+
+    #[cfg(test)]
+    fn workspace_is_active(&self, index: usize) -> bool {
+        self.workspace_entry_state(index, false).active
     }
 
     fn group_for_workspace_id(&self, id: &str) -> Option<usize> {
@@ -890,40 +979,13 @@ impl WorkspacePanel {
     }
 
     fn start_workspace_focus(&mut self, workspace_id: String) {
-        let request_id = self.mark_workspace_focus_pending(workspace_id.clone());
+        let request_id = self.focus.begin(workspace_id.clone());
         let sender = self.sender.clone();
         thread::spawn(move || {
             let result =
                 run_herdr(&["workspace".to_owned(), "focus".to_owned(), workspace_id]).map(|_| ());
             let _ = sender.send(Completion::WorkspaceFocus { request_id, result });
         });
-    }
-
-    fn mark_workspace_focus_pending(&mut self, workspace_id: String) -> u64 {
-        self.next_focus_request_id = self.next_focus_request_id.wrapping_add(1);
-        let request_id = self.next_focus_request_id;
-        self.pending_workspace_focus = Some(PendingWorkspaceFocus {
-            request_id,
-            workspace_id,
-        });
-        request_id
-    }
-
-    fn reconcile_pending_workspace_focus(&mut self) {
-        let Some(pending) = self.pending_workspace_focus.as_ref() else {
-            return;
-        };
-        let Some(workspace) = self
-            .workspaces
-            .iter()
-            .find(|workspace| workspace.id == pending.workspace_id)
-        else {
-            self.pending_workspace_focus = None;
-            return;
-        };
-        if workspace.focused {
-            self.pending_workspace_focus = None;
-        }
     }
 
     fn start_action(&self, args: Vec<String>) {
@@ -1024,7 +1086,7 @@ impl WorkspacePanel {
                     .map(|index| self.workspaces.len().saturating_add(index)),
             })
             .or_else(|| {
-                let host = self.host_workspace_id.as_deref()?;
+                let host = self.focus.host()?;
                 self.workspaces
                     .iter()
                     .position(|workspace| workspace.id == host)
@@ -1040,7 +1102,7 @@ impl WorkspacePanel {
     }
 
     fn select_host_workspace(&mut self) {
-        let Some(host) = self.host_workspace_id.as_deref() else {
+        let Some(host) = self.focus.host() else {
             return;
         };
         if let Some(index) = self
@@ -1072,6 +1134,7 @@ impl WorkspacePanel {
         let mut panel = Self::new(true, None);
         panel.placement = WorkspacePanelPlacement::Left;
         let (workspaces, agents) = parse_snapshot(value).unwrap();
+        panel.focus.apply_snapshot(&workspaces);
         panel.workspaces = workspaces;
         panel.agents = agents;
         panel.restore_selection(None);
@@ -1463,7 +1526,7 @@ mod tests {
         let mut panel = WorkspacePanel::ready_for_test(&snapshot());
         panel.next_refresh = Instant::now() + Duration::from_secs(60);
         assert!(panel.select_workspace(1));
-        panel.mark_workspace_focus_pending("w2".to_owned());
+        let request_id = panel.focus.begin("w2".to_owned());
 
         assert!(!panel.workspace_is_active(0));
         assert!(panel.workspace_is_active(1));
@@ -1476,7 +1539,7 @@ mod tests {
         assert_eq!(panel.selected, Some(1));
         assert!(!panel.workspace_is_active(0));
         assert!(panel.workspace_is_active(1));
-        assert!(panel.pending_workspace_focus.is_some());
+        assert!(panel.focus.pending.is_some());
 
         let mut confirmed = snapshot();
         confirmed["result"]["snapshot"]["workspaces"][0]["focused"] = false.into();
@@ -1489,7 +1552,19 @@ mod tests {
             .unwrap();
         panel.poll();
 
-        assert!(panel.pending_workspace_focus.is_none());
+        assert!(panel.focus.pending.is_some());
+        assert!(!panel.workspace_is_active(0));
+        assert!(panel.workspace_is_active(1));
+
+        panel
+            .sender
+            .send(Completion::WorkspaceFocus {
+                request_id,
+                result: Ok(()),
+            })
+            .unwrap();
+        panel.poll();
+        assert!(panel.focus.pending.is_none());
         assert!(!panel.workspace_is_active(0));
         assert!(panel.workspace_is_active(1));
     }
@@ -1497,7 +1572,7 @@ mod tests {
     #[test]
     fn prehighlights_the_workspace_that_hosts_this_hunkle_process() {
         let mut panel = WorkspacePanel::ready_for_test(&snapshot());
-        panel.host_workspace_id = Some("w2".to_owned());
+        panel.focus.set_host(Some("w2".to_owned()));
         panel.restore_selection(None);
 
         assert!(!panel.workspace_is_active(0));
@@ -1513,10 +1588,10 @@ mod tests {
     #[test]
     fn prepares_the_hidden_process_cursor_after_focusing_away() {
         let mut panel = WorkspacePanel::ready_for_test(&snapshot());
-        panel.host_workspace_id = Some("w1".to_owned());
+        panel.focus.set_host(Some("w1".to_owned()));
         assert!(panel.select_workspace(1));
         panel.loading = true;
-        let request_id = panel.mark_workspace_focus_pending("w2".to_owned());
+        let request_id = panel.focus.begin("w2".to_owned());
         panel
             .sender
             .send(Completion::WorkspaceFocus {
@@ -1527,7 +1602,7 @@ mod tests {
 
         panel.poll();
 
-        assert!(panel.pending_workspace_focus.is_none());
+        assert!(panel.focus.pending.is_none());
         assert_eq!(panel.selected, Some(0));
         assert_eq!(panel.selected_workspace_id(), Some("w1"));
         assert!(panel.workspace_is_active(0));
@@ -1537,8 +1612,8 @@ mod tests {
     fn rolls_back_only_the_current_failed_workspace_focus() {
         let mut panel = WorkspacePanel::ready_for_test(&snapshot());
         panel.loading = true;
-        let old_request = panel.mark_workspace_focus_pending("w2".to_owned());
-        let current_request = panel.mark_workspace_focus_pending("w1".to_owned());
+        let old_request = panel.focus.begin("w2".to_owned());
+        let current_request = panel.focus.begin("w1".to_owned());
         panel
             .sender
             .send(Completion::WorkspaceFocus {
@@ -1550,7 +1625,8 @@ mod tests {
         assert!(error.is_none());
         assert_eq!(
             panel
-                .pending_workspace_focus
+                .focus
+                .pending
                 .as_ref()
                 .map(|pending| pending.request_id),
             Some(current_request)
@@ -1566,7 +1642,7 @@ mod tests {
             .unwrap();
         let (_, error, _) = panel.poll();
         assert_eq!(error.as_deref(), Some("focus failed"));
-        assert!(panel.pending_workspace_focus.is_none());
+        assert!(panel.focus.pending.is_none());
         assert!(panel.workspace_is_active(0));
         assert!(!panel.workspace_is_active(1));
     }
