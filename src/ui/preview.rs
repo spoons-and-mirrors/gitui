@@ -41,6 +41,7 @@ struct PreviewCache {
     path: String,
     is_diff: bool,
     markdown: bool,
+    markdown_wrapped: bool,
     show_initial_diff_header: bool,
     width: usize,
     lines: Vec<Line<'static>>,
@@ -63,16 +64,18 @@ impl PreviewPresentation {
         scroll: &mut usize,
     ) -> PreparedPreview {
         let cache_matches = self.cache.as_ref().is_some_and(|cache| {
+            let markdown_wrapped = input.markdown && input.wrapped;
             cache.generation == input.generation
                 && cache.path == input.path
                 && cache.is_diff == input.is_diff
                 && cache.markdown == input.markdown
+                && cache.markdown_wrapped == markdown_wrapped
                 && cache.show_initial_diff_header == input.show_initial_diff_header
                 && cache.width == input.width
         });
         if !cache_matches {
             let (display_count, fully_styled, lines) = if input.markdown {
-                let lines = styled_markdown(input.content, input.width);
+                let lines = styled_markdown(input.content, input.width, input.wrapped);
                 (lines.len(), true, lines)
             } else {
                 let display_count = if input.is_diff {
@@ -102,6 +105,7 @@ impl PreviewPresentation {
                 path: input.path.to_owned(),
                 is_diff: input.is_diff,
                 markdown: input.markdown,
+                markdown_wrapped: input.markdown && input.wrapped,
                 show_initial_diff_header: input.show_initial_diff_header,
                 width: input.width,
                 lines,
@@ -700,6 +704,7 @@ mod tests {
         let lines = styled_markdown(
             "- This list item contains enough words to wrap.\n\n> This quote also contains enough words to wrap.\n",
             80,
+            false,
         );
         let wrapped = hard_wrap_lines(lines, 18, 0, 20, false, true)
             .iter()
@@ -722,5 +727,46 @@ mod tests {
                 .get(quote + 1)
                 .is_some_and(|line| line.starts_with("> "))
         );
+    }
+
+    #[test]
+    fn markdown_table_cache_tracks_wrap_mode() {
+        let content = "| Key | Description |\n| --- | --- |\n| alpha | beginning words continue across rows until TAIL |\n";
+        let mut presentation = PreviewPresentation::default();
+        let mut scroll = 0;
+        let mut prepare = |presentation: &mut PreviewPresentation, wrapped| {
+            presentation.prepare(
+                PreviewInput {
+                    content,
+                    generation: 1,
+                    path: "README.md",
+                    is_diff: false,
+                    markdown: true,
+                    show_initial_diff_header: false,
+                    width: 30,
+                    viewport_height: 30,
+                    wrapped,
+                    hunk_selected: false,
+                },
+                &mut scroll,
+            )
+        };
+        let contains_tail = |preview: &PreparedPreview| {
+            preview
+                .lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .any(|span| span.content.contains("TAIL"))
+        };
+
+        let unwrapped = prepare(&mut presentation, false);
+        assert!(!contains_tail(&unwrapped));
+
+        let wrapped = prepare(&mut presentation, true);
+        assert!(contains_tail(&wrapped));
+        assert!(wrapped.rendered_height > unwrapped.rendered_height);
+
+        let unwrapped_again = prepare(&mut presentation, false);
+        assert!(!contains_tail(&unwrapped_again));
     }
 }

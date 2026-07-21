@@ -13,8 +13,12 @@ use super::super::palette;
 
 const MAX_RENDERED_LINES: usize = 30_000;
 
-pub(crate) fn styled_markdown(markdown: &str, width: usize) -> Vec<Line<'static>> {
-    let mut renderer = MarkdownRenderer::new(width);
+pub(crate) fn styled_markdown(
+    markdown: &str,
+    width: usize,
+    wrap_tables: bool,
+) -> Vec<Line<'static>> {
+    let mut renderer = MarkdownRenderer::new(width, wrap_tables);
     for event in Parser::new_ext(markdown, markdown_options()) {
         if renderer.at_line_limit() {
             renderer.truncated = true;
@@ -77,6 +81,7 @@ struct TableState {
 
 struct MarkdownRenderer {
     width: usize,
+    wrap_tables: bool,
     lines: Vec<Line<'static>>,
     spans: Vec<Span<'static>>,
     styles: Vec<Style>,
@@ -89,9 +94,10 @@ struct MarkdownRenderer {
 }
 
 impl MarkdownRenderer {
-    fn new(width: usize) -> Self {
+    fn new(width: usize, wrap_tables: bool) -> Self {
         Self {
             width,
+            wrap_tables,
             lines: Vec::new(),
             spans: Vec::new(),
             styles: Vec::new(),
@@ -619,23 +625,36 @@ impl MarkdownRenderer {
 
         self.push_table_border(&widths, '┌', '┬', '┐');
         for (row_index, row) in table.rows.iter().enumerate() {
-            let mut spans = vec![table_border("│")];
-            for column in 0..column_count {
-                let cell = row.get(column).map_or(&[][..], Vec::as_slice);
-                spans.push(Span::raw(" "));
-                spans.extend(aligned_cell(
-                    cell,
-                    widths[column],
-                    table
-                        .alignments
-                        .get(column)
-                        .copied()
-                        .unwrap_or(MarkdownAlignment::None),
-                ));
-                spans.push(Span::raw(" "));
-                spans.push(table_border("│"));
+            let cells = (0..column_count)
+                .map(|column| {
+                    let cell = row.get(column).map_or(&[][..], Vec::as_slice);
+                    if self.wrap_tables {
+                        wrap_spans(cell, widths[column])
+                    } else {
+                        vec![truncate_spans(cell, widths[column])]
+                    }
+                })
+                .collect::<Vec<_>>();
+            let row_height = cells.iter().map(Vec::len).max().unwrap_or(1);
+            for line_index in 0..row_height {
+                let mut spans = vec![table_border("│")];
+                for column in 0..column_count {
+                    let cell = cells[column].get(line_index).map_or(&[][..], Vec::as_slice);
+                    spans.push(Span::raw(" "));
+                    spans.extend(aligned_cell(
+                        cell,
+                        widths[column],
+                        table
+                            .alignments
+                            .get(column)
+                            .copied()
+                            .unwrap_or(MarkdownAlignment::None),
+                    ));
+                    spans.push(Span::raw(" "));
+                    spans.push(table_border("│"));
+                }
+                self.push_block_line(spans);
             }
-            self.push_block_line(spans);
             if row_index.saturating_add(1) == table.header_rows {
                 self.push_table_border(&widths, '├', '┼', '┤');
             }
@@ -686,8 +705,15 @@ impl MarkdownRenderer {
                     spans.push(Span::styled(": ", Style::default().fg(palette().faint)));
                 }
                 let used = spans_width(&spans);
-                spans.extend(truncate_spans(cell, available_width.saturating_sub(used)));
-                self.push_block_line(spans);
+                if self.wrap_tables {
+                    spans.extend(cell.iter().cloned());
+                    for line in wrap_spans(&spans, available_width) {
+                        self.push_block_line(line);
+                    }
+                } else {
+                    spans.extend(truncate_spans(cell, available_width.saturating_sub(used)));
+                    self.push_block_line(spans);
+                }
             }
             if row_index + 1 < rows.len() {
                 self.lines.push(Line::default());
@@ -909,6 +935,72 @@ fn truncate_spans(spans: &[Span<'static>], width: usize) -> Vec<Span<'static>> {
     result
 }
 
+fn wrap_spans(spans: &[Span<'static>], width: usize) -> Vec<Vec<Span<'static>>> {
+    let width = width.max(1);
+    let mut lines = vec![Vec::new()];
+    let mut line_width = 0_usize;
+    let mut pending_space = None;
+
+    for span in spans {
+        for segment in span.content.split_word_bounds() {
+            if segment.chars().all(char::is_whitespace) {
+                if line_width > 0 {
+                    pending_space = Some(span.style);
+                }
+                continue;
+            }
+
+            let segment_width = UnicodeWidthStr::width(segment);
+            if line_width > 0
+                && line_width
+                    .saturating_add(usize::from(pending_space.is_some()))
+                    .saturating_add(segment_width)
+                    > width
+                && segment_width <= width
+            {
+                lines.push(Vec::new());
+                line_width = 0;
+                pending_space = None;
+            }
+            if line_width > 0
+                && let Some(style) = pending_space.take()
+            {
+                if line_width < width {
+                    push_span_content(lines.last_mut().expect("line exists"), " ", style);
+                    line_width += 1;
+                } else {
+                    lines.push(Vec::new());
+                    line_width = 0;
+                }
+            }
+
+            for grapheme in segment.graphemes(true) {
+                let grapheme_width = UnicodeWidthStr::width(grapheme);
+                if line_width > 0 && line_width.saturating_add(grapheme_width) > width {
+                    lines.push(Vec::new());
+                    line_width = 0;
+                }
+                if grapheme_width <= width {
+                    push_span_content(lines.last_mut().expect("line exists"), grapheme, span.style);
+                    line_width = line_width.saturating_add(grapheme_width);
+                }
+            }
+            pending_space = None;
+        }
+    }
+    lines
+}
+
+fn push_span_content(spans: &mut Vec<Span<'static>>, content: &str, style: Style) {
+    if let Some(last) = spans.last_mut()
+        && last.style == style
+    {
+        last.content.to_mut().push_str(content);
+    } else {
+        spans.push(Span::styled(content.to_owned(), style));
+    }
+}
+
 fn table_border(content: impl Into<String>) -> Span<'static> {
     Span::styled(content.into(), Style::default().fg(palette().faint))
 }
@@ -930,7 +1022,7 @@ mod tests {
     use super::*;
 
     fn rendered_lines(markdown: &str, width: usize) -> Vec<String> {
-        styled_markdown(markdown, width)
+        styled_markdown(markdown, width, false)
             .iter()
             .map(|line| {
                 line.spans
@@ -946,6 +1038,7 @@ mod tests {
         let lines = styled_markdown(
             "# Title\n\nA **strong** [link](https://example.com).\n\n- one\n- two\n\n```rs\nfn main() {}\n```\n",
             80,
+            false,
         );
         let text = lines
             .iter()
@@ -970,6 +1063,7 @@ mod tests {
         let lines = styled_markdown(
             "| Name | Count |\n| :--- | ---: |\n| apples | 12 |\n| pears | 3 |\n",
             40,
+            false,
         );
         let text = lines
             .iter()
@@ -992,6 +1086,60 @@ mod tests {
         );
         assert!(text.iter().any(|line| line.starts_with('├')));
         assert!(text.last().is_some_and(|line| line.starts_with('└')));
+    }
+
+    #[test]
+    fn wraps_table_cells_without_losing_content() {
+        let markdown = "| Key | Description |\n| :--- | :--- |\n| alpha | beginning words continue across rows until TAIL |\n";
+        let unwrapped = styled_markdown(markdown, 32, false);
+        let wrapped = styled_markdown(markdown, 32, true);
+        let wrapped_text = wrapped
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            !unwrapped
+                .iter()
+                .any(|line| line.spans.iter().any(|span| span.content.contains("TAIL")))
+        );
+        assert!(
+            wrapped_text.iter().any(|line| line.contains("TAIL")),
+            "{wrapped_text:#?}"
+        );
+        assert!(wrapped.len() > unwrapped.len());
+        assert!(wrapped.iter().all(|line| spans_width(&line.spans) <= 32));
+        assert!(
+            wrapped_text
+                .iter()
+                .filter(|line| line.starts_with('│'))
+                .all(|line| line.ends_with('│'))
+        );
+    }
+
+    #[test]
+    fn wraps_stacked_table_values_on_narrow_screens() {
+        let markdown =
+            "| Key | Description |\n| --- | --- |\n| alpha | words continue until TAIL |\n";
+        let wrapped = styled_markdown(markdown, 8, true);
+        let text = wrapped
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(text.iter().any(|line| line.contains("TAIL")), "{text:#?}");
+        assert!(wrapped.iter().all(|line| spans_width(&line.spans) <= 8));
+        assert!(text.iter().all(|line| !line.contains('│')));
     }
 
     #[test]
@@ -1039,7 +1187,7 @@ mod tests {
     fn tables_fit_every_viewport_width() {
         let markdown = "| Very long heading | Count | Status |\n| :--- | ---: | :---: |\n| a very long value that needs truncation | 12345 | ready |\n";
         for width in 1..=50 {
-            let lines = styled_markdown(markdown, width);
+            let lines = styled_markdown(markdown, width, false);
             assert!(
                 lines.iter().all(|line| spans_width(&line.spans) <= width),
                 "table exceeded width {width}: {:#?}",
@@ -1064,7 +1212,7 @@ mod tests {
     #[test]
     fn bounds_rendering_for_pathological_documents() {
         let markdown = "# heading\n\n".repeat(MAX_RENDERED_LINES);
-        let lines = styled_markdown(&markdown, 80);
+        let lines = styled_markdown(&markdown, 80, false);
 
         assert!(lines.len() <= MAX_RENDERED_LINES);
         assert!(lines.last().is_some_and(|line| {
