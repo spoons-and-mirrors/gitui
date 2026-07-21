@@ -117,6 +117,7 @@ pub struct DiffHunkRegion {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HitTarget {
     CommitMessageGenerate,
+    MarkdownPreviewToggle,
     Graph(GraphHitTarget),
     RepositoryBrowser(RepositoryBrowserHitTarget),
     WorkspacePanel(WorkspacePanelHitTarget),
@@ -982,15 +983,19 @@ impl App {
                     && (self.view == View::Changes || self.graph_commit_open) =>
             {
                 let wrapped = self.changes.toggle_wrap();
-                self.notice = Some(
-                    if wrapped {
-                        "Diff wrap enabled"
-                    } else {
-                        "Diff wrap disabled"
-                    }
-                    .to_owned(),
-                );
+                let subject = if self.view == View::Changes && self.changes.pane == LeftPane::Files
+                {
+                    "Preview"
+                } else {
+                    "Diff"
+                };
+                self.notice = Some(if wrapped {
+                    format!("{subject} wrap enabled")
+                } else {
+                    format!("{subject} wrap disabled")
+                });
             }
+            KeyCode::Char('m') => self.toggle_markdown_preview(),
             KeyCode::F(2) if self.changes.pane == LeftPane::Files => {
                 self.open_rename_dialog();
             }
@@ -2085,6 +2090,28 @@ impl App {
             .selected_explorer_file_path(self.session.data()?)
     }
 
+    pub(crate) fn markdown_preview_available(&self) -> bool {
+        self.view == View::Changes
+            && self.changes.pane == LeftPane::Files
+            && self
+                .selected_explorer_file_path()
+                .is_some_and(is_markdown_path)
+    }
+
+    pub(crate) fn markdown_preview_rendered(&self) -> bool {
+        self.markdown_preview_available() && self.changes.markdown_rendered
+    }
+
+    fn toggle_markdown_preview(&mut self) {
+        if !self.markdown_preview_available() {
+            return;
+        }
+        self.changes.markdown_rendered = !self.changes.markdown_rendered;
+        self.changes.diff_scroll = 0;
+        self.changes.hunk_selection = None;
+        self.changes.preview_presentation.clear();
+    }
+
     fn set_left_pane(&mut self, pane: LeftPane) {
         if self.changes.set_pane(pane, self.session.data()) {
             self.mode = Mode::Normal;
@@ -2283,13 +2310,25 @@ fn first_error(stderr: &str, fallback: &str) -> String {
         .to_owned()
 }
 
+fn is_markdown_path(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            ["md", "markdown", "mdown", "mkd", "mkdn"]
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        })
+}
+
 fn is_workspace_passthrough_shortcut(key: KeyEvent) -> bool {
     match key.code {
         KeyCode::F(2) | KeyCode::F(3) | KeyCode::Tab | KeyCode::PageUp | KeyCode::PageDown => true,
         KeyCode::Delete => key.modifiers.contains(KeyModifiers::CONTROL),
         KeyCode::Char('w') => key.modifiers.contains(KeyModifiers::ALT),
         KeyCode::Char(
-            'q' | '1' | '2' | 'o' | 's' | 'b' | 'x' | '?' | 'e' | 'E' | 'f' | 'c' | 'a' | 'u' | ' ',
+            'q' | '1' | '2' | 'o' | 's' | 'b' | 'x' | '?' | 'e' | 'E' | 'f' | 'm' | 'c' | 'a' | 'u'
+            | ' ',
         ) => true,
         _ => false,
     }

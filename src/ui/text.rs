@@ -6,7 +6,9 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+mod markdown;
 mod syntax;
+pub(super) use markdown::{markdown_prefix_style, styled_markdown};
 use syntax::syntax_spans;
 
 pub(super) fn styled_source(source: &str, path: &str, width: usize) -> Vec<Line<'static>> {

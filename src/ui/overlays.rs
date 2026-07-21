@@ -1870,8 +1870,9 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
         help_line("g", "Git command"),
         help_line("e / E", "Edit / configure editor"),
         help_line("f", "Changes / files"),
+        help_line("m", "Markdown preview / source"),
         help_line("F3", "Find repository file"),
-        help_line("Alt+w", "Wrap diff"),
+        help_line("Alt+w", "Wrap preview"),
     ];
     let worktree = vec![
         Line::styled(

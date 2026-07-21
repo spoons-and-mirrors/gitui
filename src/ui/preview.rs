@@ -6,8 +6,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use super::text::{
-    diff_display_line_count, styled_diff, styled_diff_window, styled_source, styled_source_window,
-    wrapped_preview_line_starts,
+    diff_display_line_count, markdown_prefix_style, styled_diff, styled_diff_window,
+    styled_markdown, styled_source, styled_source_window, wrapped_preview_line_starts,
 };
 
 const MAX_CACHED_PREVIEW_LINES: usize = 30_000;
@@ -17,6 +17,7 @@ pub(crate) struct PreviewInput<'a> {
     pub(crate) generation: u64,
     pub(crate) path: &'a str,
     pub(crate) is_diff: bool,
+    pub(crate) markdown: bool,
     pub(crate) show_initial_diff_header: bool,
     pub(crate) width: usize,
     pub(crate) viewport_height: usize,
@@ -39,6 +40,7 @@ struct PreviewCache {
     generation: u64,
     path: String,
     is_diff: bool,
+    markdown: bool,
     show_initial_diff_header: bool,
     width: usize,
     lines: Vec<Line<'static>>,
@@ -64,34 +66,42 @@ impl PreviewPresentation {
             cache.generation == input.generation
                 && cache.path == input.path
                 && cache.is_diff == input.is_diff
+                && cache.markdown == input.markdown
                 && cache.show_initial_diff_header == input.show_initial_diff_header
                 && cache.width == input.width
         });
         if !cache_matches {
-            let display_count = if input.is_diff {
-                diff_display_line_count(input.content, input.show_initial_diff_header)
+            let (display_count, fully_styled, lines) = if input.markdown {
+                let lines = styled_markdown(input.content, input.width);
+                (lines.len(), true, lines)
             } else {
-                input.content.lines().count()
-            };
-            let fully_styled = display_count <= MAX_CACHED_PREVIEW_LINES;
-            let lines = if fully_styled {
-                if input.is_diff {
-                    styled_diff(
-                        input.content,
-                        input.path,
-                        input.width,
-                        input.show_initial_diff_header,
-                    )
+                let display_count = if input.is_diff {
+                    diff_display_line_count(input.content, input.show_initial_diff_header)
                 } else {
-                    styled_source(input.content, input.path, input.width)
-                }
-            } else {
-                Vec::new()
+                    input.content.lines().count()
+                };
+                let fully_styled = display_count <= MAX_CACHED_PREVIEW_LINES;
+                let lines = if fully_styled {
+                    if input.is_diff {
+                        styled_diff(
+                            input.content,
+                            input.path,
+                            input.width,
+                            input.show_initial_diff_header,
+                        )
+                    } else {
+                        styled_source(input.content, input.path, input.width)
+                    }
+                } else {
+                    Vec::new()
+                };
+                (display_count, fully_styled, lines)
             };
             self.cache = Some(PreviewCache {
                 generation: input.generation,
                 path: input.path.to_owned(),
                 is_diff: input.is_diff,
+                markdown: input.markdown,
                 show_initial_diff_header: input.show_initial_diff_header,
                 width: input.width,
                 lines,
@@ -110,12 +120,23 @@ impl PreviewPresentation {
                 .as_ref()
                 .is_some_and(|cache| cache.wrapped_line_starts.is_none())
             {
-                let starts = wrapped_preview_line_starts(
-                    input.content,
-                    input.is_diff,
-                    input.width,
-                    input.show_initial_diff_header,
-                );
+                let starts = if input.markdown {
+                    wrapped_styled_line_starts(
+                        &self
+                            .cache
+                            .as_ref()
+                            .expect("preview cache was initialized")
+                            .lines,
+                        input.width,
+                    )
+                } else {
+                    wrapped_preview_line_starts(
+                        input.content,
+                        input.is_diff,
+                        input.width,
+                        input.show_initial_diff_header,
+                    )
+                };
                 self.cache
                     .as_mut()
                     .expect("preview cache was initialized")
@@ -157,6 +178,7 @@ impl PreviewPresentation {
                     local_scroll,
                     input.viewport_height,
                     input.is_diff,
+                    input.markdown,
                 ),
                 rendered_height,
                 wrapped: true,
@@ -281,6 +303,18 @@ impl PreviewPresentation {
     }
 }
 
+fn wrapped_styled_line_starts(lines: &[Line<'static>], width: usize) -> Vec<usize> {
+    let mut starts: Vec<usize> = Vec::with_capacity(lines.len().saturating_add(1));
+    starts.push(0);
+    for line in lines {
+        let height = hard_wrap_lines(vec![line.clone()], width, 0, usize::MAX, false, true)
+            .len()
+            .max(1);
+        starts.push(starts.last().copied().unwrap_or(0).saturating_add(height));
+    }
+    starts
+}
+
 type StyledGrapheme = (String, Style, usize);
 type WrapToken = (bool, Vec<StyledGrapheme>);
 
@@ -290,20 +324,21 @@ fn hard_wrap_lines(
     skip: usize,
     take: usize,
     is_diff: bool,
+    markdown: bool,
 ) -> Vec<Line<'static>> {
     if take == 0 {
         return Vec::new();
     }
     let width = width.max(1);
-    let mut wrapped = Vec::with_capacity(take);
+    let mut wrapped = Vec::new();
     let mut rendered = 0_usize;
     for line in lines {
         let line_style = line.style;
-        let (gutter, prefix_spans) = line_gutter(&line, width, is_diff);
-        let mut output_spans = line.spans[..prefix_spans].to_vec();
-        let mut output_width = gutter;
+        let gutter = line_gutter(&line, width, is_diff, markdown);
+        let mut output_spans = line.spans[..gutter.span_count].to_vec();
+        let mut output_width = gutter.width;
         let mut tokens: Vec<WrapToken> = Vec::new();
-        for span in &line.spans[prefix_spans..] {
+        for span in &line.spans[gutter.span_count..] {
             for grapheme in span.content.graphemes(true) {
                 let grapheme_width = UnicodeWidthStr::width(grapheme);
                 let whitespace = grapheme.chars().all(char::is_whitespace);
@@ -333,7 +368,7 @@ fn hard_wrap_lines(
                 });
             if !whitespace
                 && has_word
-                && token_width <= width.saturating_sub(gutter)
+                && token_width <= width.saturating_sub(gutter.width)
                 && output_width
                     .saturating_add(whitespace_width)
                     .saturating_add(token_width)
@@ -349,14 +384,14 @@ fn hard_wrap_lines(
                 ) {
                     return wrapped;
                 }
-                start_continuation(&mut output_spans, &mut output_width, gutter);
+                start_continuation(&mut output_spans, &mut output_width, &gutter);
                 pending_whitespace = None;
             } else if let Some(whitespace) = pending_whitespace.take()
                 && append_wrap_token(
                     whitespace,
                     &mut output_spans,
                     &mut output_width,
-                    gutter,
+                    &gutter,
                     width,
                     line_style,
                     &mut wrapped,
@@ -371,7 +406,7 @@ fn hard_wrap_lines(
                 token,
                 &mut output_spans,
                 &mut output_width,
-                gutter,
+                &gutter,
                 width,
                 line_style,
                 &mut wrapped,
@@ -402,7 +437,7 @@ fn append_wrap_token(
     token: Vec<StyledGrapheme>,
     output_spans: &mut Vec<Span<'static>>,
     output_width: &mut usize,
-    gutter: usize,
+    gutter: &WrapGutter,
     width: usize,
     line_style: Style,
     wrapped: &mut Vec<Line<'static>>,
@@ -411,7 +446,7 @@ fn append_wrap_token(
     take: usize,
 ) -> bool {
     for (content, style, grapheme_width) in token {
-        if *output_width > gutter && output_width.saturating_add(grapheme_width) > width {
+        if *output_width > gutter.width && output_width.saturating_add(grapheme_width) > width {
             if emit_wrapped_row(wrapped, rendered, skip, take, output_spans, line_style) {
                 return true;
             }
@@ -449,15 +484,40 @@ fn emit_wrapped_row(
 fn start_continuation(
     output_spans: &mut Vec<Span<'static>>,
     output_width: &mut usize,
-    gutter: usize,
+    gutter: &WrapGutter,
 ) {
-    if gutter > 0 {
-        output_spans.push(Span::raw(" ".repeat(gutter)));
-    }
-    *output_width = gutter;
+    output_spans.extend(gutter.continuation.iter().cloned());
+    *output_width = gutter.width;
 }
 
-fn line_gutter(line: &Line<'_>, width: usize, is_diff: bool) -> (usize, usize) {
+struct WrapGutter {
+    width: usize,
+    span_count: usize,
+    continuation: Vec<Span<'static>>,
+}
+
+fn line_gutter(line: &Line<'_>, width: usize, is_diff: bool, markdown: bool) -> WrapGutter {
+    if markdown {
+        let Some(prefix) = line
+            .spans
+            .first()
+            .filter(|span| span.style == markdown_prefix_style())
+        else {
+            return WrapGutter::default();
+        };
+        let gutter = UnicodeWidthStr::width(prefix.content.as_ref());
+        if width <= gutter {
+            return WrapGutter::default();
+        }
+        return WrapGutter {
+            width: gutter,
+            span_count: 1,
+            continuation: vec![Span::styled(
+                markdown_continuation_prefix(prefix.content.as_ref()),
+                prefix.style,
+            )],
+        };
+    }
     if !is_diff {
         let gutter = line
             .spans
@@ -469,9 +529,9 @@ fn line_gutter(line: &Line<'_>, width: usize, is_diff: bool) -> (usize, usize) {
             })
             .map_or(0, |span| UnicodeWidthStr::width(span.content.as_ref()));
         return if width > gutter && gutter > 0 {
-            (gutter, 1)
+            WrapGutter::spaces(gutter, 1)
         } else {
-            (0, 0)
+            WrapGutter::default()
         };
     }
     let marker = |span: &Span<'_>| matches!(span.content.as_ref(), "+" | "-" | " ");
@@ -485,10 +545,48 @@ fn line_gutter(line: &Line<'_>, width: usize, is_diff: bool) -> (usize, usize) {
         _ => (0, 0),
     };
     if width > gutter {
-        (gutter, spans)
+        WrapGutter::spaces(gutter, spans)
     } else {
-        (0, 0)
+        WrapGutter::default()
     }
+}
+
+impl Default for WrapGutter {
+    fn default() -> Self {
+        Self {
+            width: 0,
+            span_count: 0,
+            continuation: Vec::new(),
+        }
+    }
+}
+
+impl WrapGutter {
+    fn spaces(width: usize, span_count: usize) -> Self {
+        Self {
+            width,
+            span_count,
+            continuation: vec![Span::raw(" ".repeat(width))],
+        }
+    }
+}
+
+fn markdown_continuation_prefix(prefix: &str) -> String {
+    let mut continuation = String::with_capacity(prefix.len());
+    let mut remaining = prefix;
+    while !remaining.is_empty() {
+        if remaining.starts_with("> ") {
+            continuation.push_str("> ");
+            remaining = &remaining[2..];
+        } else {
+            let character = remaining.chars().next().expect("prefix is not empty");
+            continuation.push_str(
+                &" ".repeat(unicode_width::UnicodeWidthChar::width(character).unwrap_or(0)),
+            );
+            remaining = &remaining[character.len_utf8()..];
+        }
+    }
+    continuation
 }
 
 fn rendered_hunk_rows(
@@ -552,7 +650,7 @@ mod tests {
             Span::raw("abcdefghijklmnop"),
         ])];
 
-        let wrapped = hard_wrap_lines(lines, 12, 0, 10, false);
+        let wrapped = hard_wrap_lines(lines, 12, 0, 10, false, false);
 
         assert_eq!(wrapped.len(), 4);
         assert!(wrapped[0].spans[0].content.starts_with("    1  "));
@@ -566,8 +664,63 @@ mod tests {
             Span::raw("    1  "),
             Span::raw("word committing"),
         ])];
-        let wrapped = hard_wrap_lines(lines, 18, 0, 10, false);
+        let wrapped = hard_wrap_lines(lines, 18, 0, 10, false, false);
         assert_eq!(wrapped.len(), 2);
         assert_eq!(wrapped[1].spans[0].content, "       committing");
+    }
+
+    #[test]
+    fn measures_wrapped_markdown_without_unbounded_allocation() {
+        let mut presentation = PreviewPresentation::default();
+        let mut scroll = 0;
+
+        let preview = presentation.prepare(
+            PreviewInput {
+                content: "# Heading\n\nA paragraph that wraps across multiple rows.",
+                generation: 1,
+                path: "README.md",
+                is_diff: false,
+                markdown: true,
+                show_initial_diff_header: false,
+                width: 16,
+                viewport_height: 8,
+                wrapped: true,
+                hunk_selected: false,
+            },
+            &mut scroll,
+        );
+
+        assert!(preview.wrapped);
+        assert!(preview.rendered_height > 3);
+        assert!(!preview.lines.is_empty());
+    }
+
+    #[test]
+    fn wrapped_markdown_uses_hanging_list_and_quote_prefixes() {
+        let lines = styled_markdown(
+            "- This list item contains enough words to wrap.\n\n> This quote also contains enough words to wrap.\n",
+            80,
+        );
+        let wrapped = hard_wrap_lines(lines, 18, 0, 20, false, true)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(wrapped.first().is_some_and(|line| line.starts_with("* ")));
+        assert!(wrapped.get(1).is_some_and(|line| line.starts_with("  ")));
+        let quote = wrapped
+            .iter()
+            .position(|line| line.starts_with("> This"))
+            .expect("quote should be rendered");
+        assert!(
+            wrapped
+                .get(quote + 1)
+                .is_some_and(|line| line.starts_with("> "))
+        );
     }
 }

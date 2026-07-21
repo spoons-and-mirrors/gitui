@@ -31,6 +31,8 @@ fn palette() -> &'static Palette {
 }
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
+    app.regions = Regions::default();
+    app.regions.screen = Some(frame.area());
     frame.render_widget(
         Block::default().style(Style::default().bg(palette().canvas).fg(palette().ink)),
         frame.area(),
@@ -54,8 +56,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     ])
     .split(frame.area());
 
-    app.regions = Regions::default();
-    app.regions.screen = Some(frame.area());
     draw_header(frame, app, layout[0]);
     let content = layout[1];
     const MINIMUM_MAIN_WIDTH: u16 = 60;

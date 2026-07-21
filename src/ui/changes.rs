@@ -427,7 +427,8 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
     let show_hunk_actions =
         !inspecting_commit && selected_change.is_some_and(|change| !change.staged);
-    let mut preview = prepare_preview_lines(app, diff_body, &syntax_path, true, inspecting_commit);
+    let mut preview =
+        prepare_preview_lines(app, diff_body, &syntax_path, true, inspecting_commit, false);
     let (hunk_rows, rendered_height) = if show_hunk_actions {
         app.changes
             .preview_presentation
@@ -443,7 +444,8 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         let old_scroll = app.changes.diff_scroll;
         app.changes.diff_scroll = scroll_to_row(*row, rendered_height);
         if app.changes.diff_scroll != old_scroll {
-            preview = prepare_preview_lines(app, diff_body, &syntax_path, true, inspecting_commit);
+            preview =
+                prepare_preview_lines(app, diff_body, &syntax_path, true, inspecting_commit, false);
         }
     }
     let visible_hunks = visible_hunks(
@@ -794,9 +796,16 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
     } else {
         "  alt+w:off"
     };
+    let markdown_available = app.markdown_preview_available();
+    let markdown_rendered = app.markdown_preview_rendered();
+    let markdown_button_width = if markdown_available { 11 } else { 0 };
+    let header_content_width = preview_header
+        .width
+        .saturating_sub(markdown_button_width)
+        .saturating_sub(u16::from(markdown_available));
     let display_path = truncate_width(
         &selected_path,
-        usize::from(preview_header.width)
+        usize::from(header_content_width)
             .saturating_sub(7 + "read-only".len() + UnicodeWidthStr::width(wrap_label)),
     );
     frame.render_widget(
@@ -823,13 +832,53 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
                 }),
             ),
         ])),
-        preview_header,
+        Rect::new(
+            preview_header.x,
+            preview_header.y,
+            header_content_width,
+            preview_header.height,
+        ),
     );
+    if markdown_available {
+        let button = Rect::new(
+            preview_header.right().saturating_sub(markdown_button_width),
+            preview_header.y,
+            markdown_button_width,
+            1,
+        );
+        app.regions
+            .register_hit_target(HitTarget::MarkdownPreviewToggle, button);
+        let highlighted =
+            markdown_rendered || app.hovered_hit_target == Some(HitTarget::MarkdownPreviewToggle);
+        frame.render_widget(
+            Paragraph::new(if markdown_rendered {
+                " m Source  "
+            } else {
+                " m Preview "
+            })
+            .alignment(Alignment::Center)
+            .style(
+                Style::default()
+                    .fg(if highlighted {
+                        palette().canvas
+                    } else {
+                        palette().accent
+                    })
+                    .bg(if highlighted {
+                        palette().accent
+                    } else {
+                        palette().raised
+                    })
+                    .add_modifier(Modifier::BOLD),
+            ),
+            button,
+        );
+    }
     let path = app
         .selected_explorer_file_path()
         .unwrap_or_default()
         .to_owned();
-    let preview = prepare_preview_lines(app, preview_body, &path, false, false);
+    let preview = prepare_preview_lines(app, preview_body, &path, false, false, markdown_rendered);
     render_scrollable_content(frame, app, columns[1], preview_body, preview);
 }
 
@@ -839,6 +888,7 @@ fn prepare_preview_lines(
     path: &str,
     is_diff: bool,
     show_initial_diff_header: bool,
+    markdown: bool,
 ) -> PreparedPreview {
     app.changes.preview_presentation.prepare(
         PreviewInput {
@@ -846,6 +896,7 @@ fn prepare_preview_lines(
             generation: app.changes.preview_content_generation,
             path,
             is_diff,
+            markdown,
             show_initial_diff_header,
             width: usize::from(body.width),
             viewport_height: usize::from(body.height),

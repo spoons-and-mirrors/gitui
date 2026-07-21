@@ -4,6 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::{
     Terminal,
     backend::TestBackend,
+    layout::Position,
     style::{Color, Modifier},
 };
 
@@ -1751,6 +1752,73 @@ fn left_pane_files_take_over_the_preview_from_graph() {
     assert_eq!(app.view, View::Changes);
     assert!(!app.graph_commit_open);
     assert_eq!(app.changes.diff, "changed\n");
+}
+
+#[test]
+fn renders_markdown_files_and_toggles_back_to_source() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    fs::write(
+        root.join("README.md"),
+        "# Markdown Title\n\nA **strong** [link](https://example.com).\n",
+    )
+    .unwrap();
+
+    let mut app = App::new(root.to_path_buf());
+    app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+    wait_for_preview(&mut app);
+    assert_eq!(app.changes.pane, LeftPane::Files);
+    assert_eq!(app.selected_explorer_file_path(), Some("README.md"));
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let preview_button = (0..30)
+        .find_map(|row| {
+            let text: String = (0..100)
+                .map(|column| buffer[(column, row)].symbol())
+                .collect();
+            text.find("Preview").map(|column| (column as u16 + 1, row))
+        })
+        .expect("Markdown files should show a Preview button");
+    let source: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+    assert!(source.contains("# Markdown Title"));
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+    assert!(app.markdown_preview_rendered());
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(rendered.contains("Source"));
+    assert!(rendered.contains("Markdown Title"));
+    assert!(!rendered.contains("# Markdown Title"));
+    assert!(rendered.contains("https://example.com"));
+
+    click(&mut app, preview_button.0, preview_button.1);
+    assert!(!app.markdown_preview_rendered());
+
+    terminal.backend_mut().resize(50, 10);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(
+        app.regions
+            .hit_target_at(Position::new(preview_button.0, preview_button.1))
+            .is_none()
+    );
+
+    terminal.backend_mut().resize(100, 30);
+    app.view = View::Graph;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(
+        app.regions
+            .hit_target_at(Position::new(preview_button.0, preview_button.1))
+            .is_none()
+    );
 }
 
 #[test]

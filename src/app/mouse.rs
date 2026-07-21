@@ -343,6 +343,10 @@ impl App {
                 self.generate_commit_message();
                 return;
             }
+            Some(HitTarget::MarkdownPreviewToggle) => {
+                self.toggle_markdown_preview();
+                return;
+            }
             Some(HitTarget::Graph(GraphHitTarget::AuthorHeader)) => {
                 self.open_author_filter();
                 return;
@@ -693,6 +697,7 @@ impl App {
                 Some(HitTarget::Graph(_)) => {}
                 Some(HitTarget::WorkspacePanel(_)) => {}
                 Some(HitTarget::CommitMessageGenerate) => {}
+                Some(HitTarget::MarkdownPreviewToggle) => {}
             },
             _ => {}
         }

@@ -1,7 +1,7 @@
 # hunkle
 
 - A collapsible worktree tree with per-file added/deleted line counts for inspecting, staging, unstaging, and committing changes.
-- A switchable repository file tree that includes tracked, untracked, and Git-ignored content, with read-only, syntax-colored previews.
+- A switchable repository file tree that includes tracked, untracked, and Git-ignored content, with read-only, syntax-colored previews and rendered Markdown.
 - Local workspaces for browsing, searching, and previewing directories that are not Git repositories.
 - A resizable current-branch history shelf with HEAD, branch, remote, and tag decorations; selecting a commit shows its patch.
 - A repository Actions menu for committing, pushing, fetching, pulling with rebase, and running non-interactive Git commands with captured output.
@@ -30,9 +30,10 @@ hunkle opens exactly the current or requested directory. When that directory is 
 | `j`, `k` | Move selection; scroll oversized hunks by 10 rows |
 | `Home`, `G` | First or last row |
 | `PageUp`, `PageDown` | Scroll the selected file's diff |
-| `Alt+w` | Toggle patch and changed-file wrapping in the Diff panel |
+| `Alt+w` | Toggle wrapping in the Diff or File preview |
 | `e`, `E` | Open the selected file in your editor, or configure the editor |
 | `f` | Switch the left pane between Changes and Files |
+| `m` | Toggle rendered Markdown and source for Markdown files in Files |
 | `F3` | Fuzzy-search repository files from anywhere |
 | `F2` | Rename the selected file or folder in Files |
 | `Ctrl+Delete` | Delete the selected file or folder after confirmation |
@@ -75,6 +76,7 @@ The rail starts on the left. Press `w` to cycle it through the right side, off, 
 - Click or scroll History to inspect a commit's patch; click a Changes file to return to its current diff.
 - Click a directory to expand or collapse it. Click a file's right-aligned checkbox or right-click its row to stage or unstage it.
 - Click `CHANGES` or `FILES` in the left header to switch modes; clicking a repository file previews its contents.
+- Markdown files in Files show a top-right `Preview` button for switching between rendered Markdown and source.
 - Click `+` in the Files header to create a file or folder. Drag a Files entry onto a folder or the Files header to move it.
 - The wheel pans Changes and Files as viewports without changing the selected file; click a visible row to select it.
 - Right-click interactions are delivered to hunkle while terminal mouse capture is enabled; Herdr does not consume them first.
