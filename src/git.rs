@@ -112,6 +112,22 @@ pub struct Branch {
     pub subject: String,
     pub remote: bool,
     pub current: bool,
+    pub default: bool,
+}
+
+pub(crate) fn branch_delete_protection(branch: &Branch) -> Option<String> {
+    if branch.current {
+        return Some("Cannot delete the checked-out branch".to_owned());
+    }
+    if matches!(branch.name.as_str(), "main" | "master" | "dev") {
+        return Some(format!("Cannot delete protected branch {}", branch.name));
+    }
+    branch.default.then(|| {
+        format!(
+            "Cannot delete the repository's default branch {}",
+            branch.name
+        )
+    })
 }
 
 impl RepositoryData {
@@ -224,6 +240,13 @@ pub(crate) fn delete_branch(
     remote: Option<(&str, &str)>,
     force: bool,
 ) -> Result<()> {
+    if let Some(branch) = repository_branches(root)?
+        .iter()
+        .find(|candidate| !candidate.remote && candidate.name == branch)
+        && let Some(reason) = branch_delete_protection(branch)
+    {
+        bail!(reason);
+    }
     let mut args = vec!["branch", "--delete"];
     if force {
         args.push("--force");
@@ -495,7 +518,7 @@ fn repository_branches(root: &Path) -> Result<Vec<Branch>> {
         root,
         &[
             "for-each-ref",
-            "--format=%(HEAD)%1f%(refname)%1f%(refname:short)%1f%(objectname:short)%1f%(upstream:short)%1f%(committerdate:relative)%1f%(subject)%1e",
+            "--format=%(HEAD)%1f%(refname)%1f%(refname:short)%1f%(objectname:short)%1f%(upstream:short)%1f%(committerdate:relative)%1f%(subject)%1f%(symref:short)%1e",
             "refs/heads",
             "refs/remotes",
         ],
@@ -503,6 +526,8 @@ fn repository_branches(root: &Path) -> Result<Vec<Branch>> {
     if !output.status.success() {
         bail!("{}", clean_stderr(&output));
     }
+    let mut default_branch = None;
+    let mut default_from_origin = false;
     let mut branches = output
         .stdout
         .split(|byte| *byte == 0x1e)
@@ -512,13 +537,24 @@ fn repository_branches(root: &Path) -> Result<Vec<Branch>> {
                 return None;
             }
             let fields: Vec<_> = record.split(|byte| *byte == 0x1f).collect();
-            if fields.len() != 7 {
+            if fields.len() != 8 {
                 return None;
             }
             let text = |field: &[u8]| String::from_utf8_lossy(field).into_owned();
             let refname = text(fields[1]);
             let name = text(fields[2]);
-            if refname.starts_with("refs/remotes/") && name.ends_with("/HEAD") {
+            if let Some(remote) = refname
+                .strip_prefix("refs/remotes/")
+                .and_then(|name| name.strip_suffix("/HEAD"))
+            {
+                let symref = text(fields[7]);
+                if let Some(target) = symref.strip_prefix(&format!("{remote}/")) {
+                    let from_origin = remote == "origin";
+                    if default_branch.is_none() || (from_origin && !default_from_origin) {
+                        default_branch = Some(target.to_owned());
+                        default_from_origin = from_origin;
+                    }
+                }
                 return None;
             }
             Some(Branch {
@@ -529,9 +565,15 @@ fn repository_branches(root: &Path) -> Result<Vec<Branch>> {
                 subject: text(fields[6]),
                 remote: refname.starts_with("refs/remotes/"),
                 current: fields[0] == b"*",
+                default: false,
             })
         })
         .collect::<Vec<_>>();
+    if let Some(default_branch) = default_branch {
+        for branch in &mut branches {
+            branch.default = !branch.remote && branch.name == default_branch;
+        }
+    }
     branches.sort_by(|left, right| {
         right
             .current
@@ -2134,6 +2176,27 @@ mod tests {
     }
 
     #[test]
+    fn protects_checked_out_conventional_and_default_branches() {
+        let branch = |name: &str, current: bool, default: bool| Branch {
+            name: name.to_owned(),
+            upstream: String::new(),
+            oid: String::new(),
+            date: String::new(),
+            subject: String::new(),
+            remote: false,
+            current,
+            default,
+        };
+
+        assert!(branch_delete_protection(&branch("topic", true, false)).is_some());
+        for name in ["main", "master", "dev"] {
+            assert!(branch_delete_protection(&branch(name, false, false)).is_some());
+        }
+        assert!(branch_delete_protection(&branch("stable", false, true)).is_some());
+        assert!(branch_delete_protection(&branch("topic", false, false)).is_none());
+    }
+
+    #[test]
     fn deletes_a_local_branch_and_its_remote_ref() {
         let directory = tempfile::tempdir().unwrap();
         let remote = tempfile::tempdir().unwrap();
@@ -2156,6 +2219,46 @@ mod tests {
             &["remote", "add", "origin", remote.path().to_str().unwrap()],
         );
         git(root, &["push", "origin", "cleanup"]);
+
+        git(root, &["branch", "dev"]);
+        assert!(delete_branch(root, "dev", None, true).is_err());
+        assert!(
+            run(root, &["show-ref", "--verify", "refs/heads/dev"])
+                .unwrap()
+                .status
+                .success()
+        );
+
+        git(root, &["branch", "stable"]);
+        git(
+            root,
+            &[
+                "update-ref",
+                "refs/remotes/origin/stable",
+                "refs/heads/stable",
+            ],
+        );
+        git(
+            root,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/stable",
+            ],
+        );
+        let stable = repository_branches(root)
+            .unwrap()
+            .into_iter()
+            .find(|branch| branch.name == "stable" && !branch.remote)
+            .unwrap();
+        assert!(stable.default);
+        assert!(delete_branch(root, "stable", None, true).is_err());
+        assert!(
+            run(root, &["show-ref", "--verify", "refs/heads/stable"])
+                .unwrap()
+                .status
+                .success()
+        );
 
         assert!(delete_branch(root, "cleanup", Some(("origin", "cleanup")), false).is_err());
         delete_branch(root, "cleanup", Some(("origin", "cleanup")), true).unwrap();

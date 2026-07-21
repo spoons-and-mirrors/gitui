@@ -50,7 +50,7 @@ hunkle opens exactly the current or requested directory. When that directory is 
 | `r` | Refresh |
 | `o` | Open Explorer |
 | `b` | Browse branches, pull requests, and issues |
-| `Delete` in Branches | Delete a local branch, optionally including its tracked remote branch or forcing deletion of unmerged work |
+| `Delete` in Branches | Delete a local branch, optionally including its tracked remote branch or forcing deletion of unmerged work; checked-out, default, `main`, `master`, and `dev` branches are protected |
 | `w` | Cycle the Herdr Workspaces and Agents rail through left, right, and off |
 | `s` | Open settings |
 | `x` | Open repository Actions |

@@ -340,7 +340,7 @@ fn draw_entry(
                 },
             ),
             Span::styled(" ".repeat(padding), base),
-            Span::styled(branch.unwrap_or_default(), base.fg(palette().faint)),
+            Span::styled(branch.unwrap_or_default(), base.fg(palette().accent)),
             Span::styled(" ", base),
             Span::styled(status_marker, base.fg(status_color(status))),
         ])),

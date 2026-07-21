@@ -1064,6 +1064,7 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
         }
     }));
     app.workspace_panel.workspaces[0].branch = Some("topic".to_owned());
+    app.mode = Mode::WorkspacePanel;
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
 
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -1101,6 +1102,16 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
     assert!(rendered.contains("topic"));
     assert!(rendered.contains("AGENTS"));
     assert!(rendered.contains("opencode / HUNKLE"));
+    let workspace_row = app
+        .regions
+        .hit_target_rect(HitTarget::WorkspacePanel(
+            WorkspacePanelHitTarget::Workspace(0),
+        ))
+        .unwrap();
+    let branch_cell = &terminal.backend().buffer()[(workspace_row.right() - 7, workspace_row.y)];
+    assert_eq!(branch_cell.symbol(), "t");
+    assert_eq!(branch_cell.fg, super::palette().accent);
+    assert_eq!(branch_cell.bg, super::palette().selected);
     let create_button = app
         .regions
         .hit_target_rect(HitTarget::WorkspacePanel(
@@ -1123,6 +1134,7 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
         terminal.backend().buffer()[(create_button.x + 1, create_button.y)].bg,
         super::palette().accent
     );
+    app.mode = Mode::Normal;
 
     let divider = app.regions.workspace_panel_splitter.unwrap();
     app.handle_mouse(mouse(

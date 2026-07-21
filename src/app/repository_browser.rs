@@ -11,7 +11,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
 use serde_json::Value;
 
-use crate::git::Branch;
+use crate::git::{Branch, branch_delete_protection};
 
 const REMOTE_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 
@@ -338,10 +338,8 @@ impl RepositoryBrowser {
                 "Select a local branch to delete".to_owned(),
             ));
         }
-        if branch.current {
-            return Some(RepositoryBrowserEffect::Notice(
-                "Cannot delete the checked-out branch".to_owned(),
-            ));
+        if let Some(reason) = branch_delete_protection(&branch) {
+            return Some(RepositoryBrowserEffect::Notice(reason));
         }
         let remote = branch
             .upstream
@@ -710,6 +708,7 @@ mod tests {
                 subject: "Add repository browser".to_owned(),
                 remote: false,
                 current: true,
+                default: false,
             }],
             false,
         );
@@ -732,22 +731,32 @@ mod tests {
     #[test]
     fn confirms_local_or_remote_branch_deletion_and_protects_head() {
         let directory = tempfile::tempdir().unwrap();
-        let branch = |name: &str, upstream: &str, remote: bool, current: bool| Branch {
-            name: name.to_owned(),
-            upstream: upstream.to_owned(),
-            oid: "abc1234".to_owned(),
-            date: "today".to_owned(),
-            subject: "Branch cleanup".to_owned(),
-            remote,
-            current,
-        };
+        let branch =
+            |name: &str, upstream: &str, remote: bool, current: bool, default: bool| Branch {
+                name: name.to_owned(),
+                upstream: upstream.to_owned(),
+                oid: "abc1234".to_owned(),
+                date: "today".to_owned(),
+                subject: "Branch cleanup".to_owned(),
+                remote,
+                current,
+                default,
+            };
         let mut browser = RepositoryBrowser::default();
         browser.open(
             directory.path(),
             &[
-                branch("main", "origin/main", false, true),
-                branch("feature/cleanup", "origin/feature/cleanup", false, false),
-                branch("origin/feature/cleanup", "", true, false),
+                branch("main", "origin/main", false, true, true),
+                branch(
+                    "feature/cleanup",
+                    "origin/feature/cleanup",
+                    false,
+                    false,
+                    false,
+                ),
+                branch("origin/feature/cleanup", "", true, false, false),
+                branch("dev", "origin/dev", false, false, false),
+                branch("stable", "origin/stable", false, false, true),
             ],
             false,
         );
@@ -799,6 +808,21 @@ mod tests {
             browser.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE)),
             Some(RepositoryBrowserEffect::Notice(
                 "Select a local branch to delete".to_owned()
+            ))
+        );
+
+        browser.select(3);
+        assert_eq!(
+            browser.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE)),
+            Some(RepositoryBrowserEffect::Notice(
+                "Cannot delete protected branch dev".to_owned()
+            ))
+        );
+        browser.select(4);
+        assert_eq!(
+            browser.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE)),
+            Some(RepositoryBrowserEffect::Notice(
+                "Cannot delete the repository's default branch stable".to_owned()
             ))
         );
     }
