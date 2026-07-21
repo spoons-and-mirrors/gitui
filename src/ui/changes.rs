@@ -364,18 +364,21 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     } else {
         0
     };
+    let metadata_bottom_margin = u16::from(metadata_height > 0);
     let diff_body = Rect::new(
         diff_header.x,
         diff_header
             .y
             .saturating_add(2)
-            .saturating_add(metadata_height),
+            .saturating_add(metadata_height)
+            .saturating_add(metadata_bottom_margin),
         diff_header.width,
         columns[1].bottom().saturating_sub(
             diff_header
                 .y
                 .saturating_add(3)
-                .saturating_add(metadata_height),
+                .saturating_add(metadata_height)
+                .saturating_add(metadata_bottom_margin),
         ),
     );
     let wrap_label = if app.changes.diff_wrap {
