@@ -1890,7 +1890,7 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
         help_line("Ctrl+S", "Format selected file"),
         help_line("Drag", "Move file / folder"),
         help_line("c", "Commit editor"),
-        help_line("← / →", "Commit cursor"),
+        help_line("Arrow keys", "Commit cursor"),
         help_line("C-A / C-⌫", "Select all / del word"),
         help_line("Ctrl+Enter", "Commit"),
         help_line("Esc", "Close / unfocus"),

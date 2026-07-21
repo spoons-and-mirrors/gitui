@@ -8,7 +8,7 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
-    app::{App, DiffHunkRegion, LeftPane, Mode, TextInput, View},
+    app::{App, DiffHunkRegion, HitTarget, LeftPane, Mode, TextInput, View},
     git::{Change, DiffSummary},
     tree::{ExplorerRow, WorktreeRow, WorktreeSection},
 };
@@ -59,6 +59,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let worktree_content = columns[0].inner(Margin::new(1, 0));
     let repo = app.session.data().expect("checked above");
     let local_workspace = repo.is_local();
+    let has_changes = !repo.changes.is_empty();
     let staged_count = repo.change_counts.0;
     let checkbox = if !repo.changes.is_empty() && staged_count == repo.changes.len() {
         "◉"
@@ -453,6 +454,9 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     );
     render_scrollable_content(frame, app, columns[1], diff_body, preview);
     draw_hunk_actions(frame, app, diff_body, visible_hunks);
+    if !local_workspace {
+        draw_commit_message_action(frame, actions_row, app, has_changes);
+    }
 
     let commit_active = app.mode == Mode::Commit;
     fill(frame, commit_area, palette().canvas);
@@ -602,6 +606,39 @@ fn draw_actions(frame: &mut Frame<'_>, area: Rect, mode: Mode) -> Rect {
         button,
     );
     button
+}
+
+fn draw_commit_message_action(frame: &mut Frame<'_>, area: Rect, app: &mut App, has_changes: bool) {
+    if app.commit_running() || !app.commit_message_available() || !has_changes || area.width < 3 {
+        return;
+    }
+
+    let button = Rect::new(area.x, area.y, 3, 1);
+    app.regions
+        .register_hit_target(HitTarget::CommitMessageGenerate, button);
+    let hovered = app.hovered_hit_target == Some(HitTarget::CommitMessageGenerate);
+    let running = app.commit_message_running();
+    let style = if hovered && !running {
+        Style::default()
+            .fg(palette().canvas)
+            .bg(palette().accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(if running {
+                palette().yellow
+            } else {
+                palette().accent
+            })
+            .bg(palette().raised)
+            .add_modifier(Modifier::BOLD)
+    };
+    frame.render_widget(
+        Paragraph::new(if running { " … " } else { " ✦ " })
+            .alignment(Alignment::Center)
+            .style(style),
+        button,
+    );
 }
 
 fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2]) {

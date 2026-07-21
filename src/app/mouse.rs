@@ -339,6 +339,10 @@ impl App {
             self.flush_commit_draft();
         }
         match self.regions.hit_target_at(point) {
+            Some(HitTarget::CommitMessageGenerate) => {
+                self.generate_commit_message();
+                return;
+            }
             Some(HitTarget::Graph(GraphHitTarget::AuthorHeader)) => {
                 self.open_author_filter();
                 return;
@@ -485,8 +489,19 @@ impl App {
         } else if self.select_history_row(point) {
         } else if self.select_graph_row(point) {
             self.open_selected_graph_commit();
-        } else if self.regions.commit.is_some_and(|rect| rect.contains(point)) {
+        } else if let Some(commit) = self.regions.commit.filter(|rect| rect.contains(point)) {
             self.focus_commit();
+            let width = usize::from(commit.width.saturating_sub(2)).max(1);
+            let visible_height = usize::from(commit.height).max(1);
+            let scroll = self
+                .commit_input
+                .visual_row(width)
+                .saturating_sub(visible_height.saturating_sub(1));
+            let row = scroll + usize::from(point.y.saturating_sub(commit.y));
+            let column = usize::from(point.x.saturating_sub(commit.x.saturating_add(1)))
+                .min(width.saturating_sub(1));
+            self.commit_input
+                .set_cursor_at_visual_position(width, row, column);
         }
     }
 
@@ -670,6 +685,7 @@ impl App {
                 )) => {}
                 Some(HitTarget::Graph(_)) => {}
                 Some(HitTarget::WorkspacePanel(_)) => {}
+                Some(HitTarget::CommitMessageGenerate) => {}
             },
             _ => {}
         }

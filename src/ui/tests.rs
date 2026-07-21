@@ -8,8 +8,9 @@ use ratatui::{
 };
 
 use crate::app::{
-    App, BrowserTab, GraphHitTarget, HitTarget, LeftPane, Mode, PullRequest, RemoteItems,
-    RepositoryBrowserHitTarget, Settings, View, WorkspacePanel, WorkspacePanelHitTarget,
+    App, BrowserTab, CommitMessageGenerator, GraphHitTarget, HitTarget, LeftPane, Mode,
+    PullRequest, RemoteItems, RepositoryBrowserHitTarget, Settings, View, WorkspacePanel,
+    WorkspacePanelHitTarget,
 };
 
 use super::draw;
@@ -56,6 +57,7 @@ fn renders_every_primary_surface() {
     fs::write(root.join("untracked.txt"), "new\n").unwrap();
 
     let mut app = App::new(root.to_path_buf());
+    app.commit_message_generator = CommitMessageGenerator::ready_for_test();
     assert_eq!(app.changes.history_state.selected(), None);
     let settings_path = root.join(".git/hunkle-test-config");
     app.settings_path = Some(settings_path.clone());
@@ -92,6 +94,26 @@ fn renders_every_primary_surface() {
         .collect();
     assert!(footer.contains("f Files"));
     assert!(footer.contains("b Branches"));
+
+    let generate = app
+        .regions
+        .hit_target_rect(HitTarget::CommitMessageGenerate)
+        .unwrap();
+    assert_eq!(generate.width, 3);
+    assert_eq!(generate.x, app.regions.commit.unwrap().x);
+    assert_eq!(generate.y, app.regions.commit.unwrap().bottom());
+    assert_eq!(
+        terminal.backend().buffer()[(generate.x + 1, generate.y)].bg,
+        super::palette().raised
+    );
+    app.handle_mouse(mouse(MouseEventKind::Moved, generate.x + 1, generate.y));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(
+        terminal.backend().buffer()[(generate.x + 1, generate.y)].bg,
+        super::palette().accent
+    );
+    app.handle_mouse(mouse(MouseEventKind::Moved, 0, 0));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     let left_pane_toggle = app.regions.left_pane_toggle.unwrap();
     click(&mut app, left_pane_toggle.x, left_pane_toggle.y);
@@ -647,6 +669,14 @@ fn renders_every_primary_surface() {
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(app.commit_input.text(), "Subject\n");
     app.commit_input.insert("Body");
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    click(&mut app, commit.x + 3, commit.y + 1);
+    app.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE));
+    assert_eq!(app.commit_input.text(), "Subject\nBoXdy");
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::NONE));
+    assert_eq!(app.commit_input.text(), "SubYject\nBoXdy");
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.mode, Mode::Normal);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -657,8 +687,8 @@ fn renders_every_primary_surface() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(unfocused_screen.contains("Subject"));
-    assert!(unfocused_screen.contains("Body"));
+    assert!(unfocused_screen.contains("SubYject"));
+    assert!(unfocused_screen.contains("BoXdy"));
 
     app.commit_input
         .set(format!("wrap-start {} wrap-end", "x".repeat(90)));

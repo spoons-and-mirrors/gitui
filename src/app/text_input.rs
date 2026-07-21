@@ -1,5 +1,7 @@
 use std::time::{Duration, Instant};
 
+use unicode_width::UnicodeWidthStr;
+
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
 pub(crate) struct TextInput {
@@ -169,6 +171,29 @@ impl TextInput {
         self.reset_blink();
     }
 
+    pub(crate) fn move_up(&mut self, width: usize) {
+        self.move_vertical(width, -1);
+    }
+
+    pub(crate) fn move_down(&mut self, width: usize) {
+        self.move_vertical(width, 1);
+    }
+
+    pub(crate) fn set_cursor_at_visual_position(
+        &mut self,
+        width: usize,
+        row: usize,
+        column: usize,
+    ) {
+        self.cursor = closest_visual_cursor(&self.text, width, row, column);
+        self.anchor = None;
+        self.reset_blink();
+    }
+
+    pub(crate) fn visual_row(&self, width: usize) -> usize {
+        visual_position(&self.text, self.cursor, width).0
+    }
+
     pub(crate) fn select_all(&mut self) {
         self.anchor = Some(0);
         self.cursor = self.text.len();
@@ -208,6 +233,54 @@ impl TextInput {
         self.cursor_visible = true;
         self.next_blink = Instant::now() + BLINK_INTERVAL;
     }
+
+    fn move_vertical(&mut self, width: usize, direction: isize) {
+        let (row, column) = visual_position(&self.text, self.cursor, width);
+        let target_row = if direction < 0 {
+            row.saturating_sub(1)
+        } else {
+            row.saturating_add(1)
+        };
+        if target_row == row {
+            return;
+        }
+        let cursor = closest_visual_cursor(&self.text, width, target_row, column);
+        if visual_position(&self.text, cursor, width).0 == target_row {
+            self.cursor = cursor;
+            self.anchor = None;
+            self.reset_blink();
+        }
+    }
+}
+
+fn closest_visual_cursor(text: &str, width: usize, row: usize, column: usize) -> usize {
+    text.char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(text.len()))
+        .min_by_key(|&index| {
+            let (candidate_row, candidate_column) = visual_position(text, index, width);
+            (
+                candidate_row.abs_diff(row),
+                candidate_column.abs_diff(column),
+            )
+        })
+        .unwrap_or(0)
+}
+
+fn visual_position(text: &str, cursor: usize, width: usize) -> (usize, usize) {
+    let width = width.max(1);
+    let mut row = 0;
+    let mut lines = text[..cursor].split('\n').peekable();
+    while let Some(line) = lines.next() {
+        let line_width = UnicodeWidthStr::width(line);
+        if lines.peek().is_some() {
+            row += line_width.saturating_sub(1) / width + 1;
+        } else {
+            row += line_width / width;
+            return (row, line_width % width);
+        }
+    }
+    (row, 0)
 }
 
 fn previous_boundary(text: &str, cursor: usize) -> usize {
@@ -254,6 +327,26 @@ mod tests {
         assert_eq!(input.text(), "subject with ");
         input.delete_word();
         assert_eq!(input.text(), "subject ");
+    }
+
+    #[test]
+    fn navigates_wrapped_visual_lines() {
+        let mut input = TextInput::default();
+        input.set("abcdef\nghij");
+
+        input.move_up(4);
+        assert_eq!(input.cursor(), 7);
+        input.move_up(4);
+        assert_eq!(input.cursor(), 4);
+        input.move_down(4);
+        assert_eq!(input.cursor(), 7);
+        input.move_down(4);
+        assert_eq!(input.cursor(), input.text().len());
+
+        input.set_cursor_at_visual_position(4, 0, 3);
+        assert_eq!(input.cursor(), 3);
+        input.set_cursor_at_visual_position(4, 1, 1);
+        assert_eq!(input.cursor(), 5);
     }
 
     #[test]

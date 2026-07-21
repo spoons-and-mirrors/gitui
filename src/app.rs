@@ -1,6 +1,7 @@
 mod actions;
 mod author_filter;
 mod changes;
+mod commit_message;
 mod commit_summary;
 mod explorer;
 mod file_search;
@@ -14,6 +15,7 @@ mod workspace_panel;
 pub(crate) use actions::{ACTION_ITEMS, ActionsState, CommandStatus};
 pub(crate) use author_filter::{AuthorFilter, AuthorFilterEffect};
 pub use changes::{ChangesState, LeftPane};
+pub(crate) use commit_message::CommitMessageGenerator;
 pub(crate) use commit_summary::CommitSummaryCache;
 pub use explorer::{Explorer, PickerAction, PickerEntry};
 pub(crate) use file_search::FileSearch;
@@ -114,6 +116,7 @@ pub struct DiffHunkRegion {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HitTarget {
+    CommitMessageGenerate,
     Graph(GraphHitTarget),
     RepositoryBrowser(RepositoryBrowserHitTarget),
     WorkspacePanel(WorkspacePanelHitTarget),
@@ -243,6 +246,7 @@ pub struct App {
     pub(crate) author_filter: AuthorFilter,
     pub(crate) commit_summaries: CommitSummaryCache,
     pub(crate) commit_input: TextInput,
+    pub(crate) commit_message_generator: CommitMessageGenerator,
     commit_draft_path: Option<PathBuf>,
     commit_draft_due: Option<Instant>,
     pub dragging_splitter: bool,
@@ -359,6 +363,7 @@ impl App {
             author_filter,
             commit_summaries: CommitSummaryCache::default(),
             commit_input: TextInput::default(),
+            commit_message_generator: CommitMessageGenerator::detect(),
             commit_draft_path: None,
             commit_draft_due: None,
             dragging_splitter: false,
@@ -481,6 +486,14 @@ impl App {
         self.session.commit_running()
     }
 
+    pub(crate) fn commit_message_available(&self) -> bool {
+        self.commit_message_generator.is_available()
+    }
+
+    pub(crate) fn commit_message_running(&self) -> bool {
+        self.commit_message_generator.is_running()
+    }
+
     pub(crate) fn fetch_running(&self) -> bool {
         self.session.fetch_running()
     }
@@ -584,6 +597,32 @@ impl App {
         self.prefetch_commit_summaries();
         changed |= self.commit_summaries.poll();
         changed |= self.commit_input.poll_blink(self.mode == Mode::Commit);
+        if let Some(completion) = self.commit_message_generator.poll() {
+            changed = true;
+            if !self
+                .repository()
+                .is_some_and(|repo| same_workspace_path(&repo.root, &completion.root))
+            {
+                self.notice = Some(
+                    "Generated commit message ignored because the workspace changed".to_owned(),
+                );
+            } else if self.commit_input.text() != completion.baseline {
+                self.notice = Some(
+                    "Generated commit message ignored because the message was edited".to_owned(),
+                );
+            } else {
+                match completion.result {
+                    Ok(message) => {
+                        self.commit_input.set(message);
+                        self.commit_input.focus();
+                        self.mode = Mode::Commit;
+                        self.schedule_commit_draft();
+                        self.notice = Some("Commit message generated with OpenCode".to_owned());
+                    }
+                    Err(error) => self.notice = Some(error),
+                }
+            }
+        }
         changed |= self.flush_commit_draft_if_due();
         if let Some(dialog) = &mut self.file_dialog {
             changed |= dialog.input.poll_blink(
@@ -1081,6 +1120,10 @@ impl App {
     fn handle_commit_input(&mut self, key: KeyEvent) {
         self.commit_input.focus();
         let previous = self.commit_input.text().to_owned();
+        let input_width = self
+            .regions
+            .commit
+            .map_or(1, |area| usize::from(area.width.saturating_sub(2)).max(1));
         match key.code {
             KeyCode::Esc => {
                 self.mode = Mode::Normal;
@@ -1104,6 +1147,8 @@ impl App {
             }
             KeyCode::Left => self.commit_input.move_left(),
             KeyCode::Right => self.commit_input.move_right(),
+            KeyCode::Up => self.commit_input.move_up(input_width),
+            KeyCode::Down => self.commit_input.move_down(input_width),
             KeyCode::Home => self.commit_input.move_home(),
             KeyCode::End => self.commit_input.move_end(),
             KeyCode::Delete => self.commit_input.delete(),
@@ -2090,6 +2135,27 @@ impl App {
         self.flush_commit_draft();
         if self.session.start_commit(message) {
             self.mode = Mode::Normal;
+        }
+    }
+
+    fn generate_commit_message(&mut self) {
+        let Some(repo) = self.git_repository() else {
+            self.notice = Some("Open a Git repository first".to_owned());
+            return;
+        };
+        if repo.changes.is_empty() {
+            self.notice = Some("No changes to describe".to_owned());
+            return;
+        }
+        let root = repo.root.clone();
+        let baseline = self.commit_input.text().to_owned();
+        match self.commit_message_generator.start(root, baseline) {
+            Ok(()) => {
+                self.mode = Mode::Commit;
+                self.commit_input.focus();
+                self.notice = Some("Generating commit message with OpenCode…".to_owned());
+            }
+            Err(error) => self.notice = Some(error),
         }
     }
 
