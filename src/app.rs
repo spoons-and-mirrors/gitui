@@ -938,9 +938,9 @@ impl App {
             return;
         }
         match key.code {
+            KeyCode::F(3) => self.open_file_search(),
             KeyCode::Char('s')
                 if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.view == View::Changes
                     && self.changes.pane == LeftPane::Files =>
             {
                 self.format_selected_file();
@@ -995,20 +995,19 @@ impl App {
                     .to_owned(),
                 );
             }
-            KeyCode::F(2) if self.view == View::Changes && self.changes.pane == LeftPane::Files => {
+            KeyCode::F(2) if self.changes.pane == LeftPane::Files => {
                 self.open_rename_dialog();
             }
             KeyCode::Delete
                 if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.view == View::Changes
                     && self.changes.pane == LeftPane::Files =>
             {
                 self.open_delete_dialog();
             }
-            KeyCode::Char('e') if self.view == View::Changes => self.open_selected_file(false),
-            KeyCode::Char('E') if self.view == View::Changes => self.open_selected_file(true),
+            KeyCode::Char('e') => self.open_selected_file(false),
+            KeyCode::Char('E') => self.open_selected_file(true),
             KeyCode::Char('f') if self.view == View::Changes => self.toggle_changes_files(),
-            KeyCode::Char('c') if self.view == View::Changes => {
+            KeyCode::Char('c') => {
                 self.set_left_pane(LeftPane::Worktree);
                 self.focus_commit();
             }
@@ -1494,7 +1493,7 @@ impl App {
     }
 
     fn selected_file_to_edit(&self) -> Option<(PathBuf, PathBuf)> {
-        if self.view != View::Changes || self.changes.history_focused {
+        if self.changes.history_focused {
             return None;
         }
         let repo = self.repository()?;
@@ -1610,12 +1609,19 @@ impl App {
 
     fn handle_workspace_panel(&mut self, key: KeyEvent) {
         let effect = self.workspace_panel.handle_key(key);
-        self.apply_workspace_panel_effect(effect);
+        if effect == WorkspacePanelEffect::Unhandled {
+            if is_workspace_passthrough_shortcut(key) {
+                self.mode = Mode::Normal;
+                self.handle_normal(key);
+            }
+        } else {
+            self.apply_workspace_panel_effect(effect);
+        }
     }
 
     pub(crate) fn apply_workspace_panel_effect(&mut self, effect: WorkspacePanelEffect) {
         match effect {
-            WorkspacePanelEffect::None => {}
+            WorkspacePanelEffect::None | WorkspacePanelEffect::Unhandled => {}
             WorkspacePanelEffect::Close => self.mode = Mode::Normal,
             WorkspacePanelEffect::Cycle => self.cycle_workspace_panel(),
             WorkspacePanelEffect::CreateWorkspace => {
@@ -2281,6 +2287,18 @@ fn first_error(stderr: &str, fallback: &str) -> String {
         .to_owned()
 }
 
+fn is_workspace_passthrough_shortcut(key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::F(2) | KeyCode::F(3) | KeyCode::Tab | KeyCode::PageUp | KeyCode::PageDown => true,
+        KeyCode::Delete => key.modifiers.contains(KeyModifiers::CONTROL),
+        KeyCode::Char('w') => key.modifiers.contains(KeyModifiers::ALT),
+        KeyCode::Char(
+            'q' | '1' | '2' | 'o' | 's' | 'b' | 'x' | '?' | 'e' | 'E' | 'f' | 'c' | 'a' | 'u' | ' ',
+        ) => true,
+        _ => false,
+    }
+}
+
 fn home_directory() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -2612,6 +2630,10 @@ mod tests {
         assert_eq!(app.view, View::Changes);
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         app.graph_commit_open = true;
+        app.changes.pane = LeftPane::Files;
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert_eq!(app.changes.pane, LeftPane::Worktree);
+        assert_eq!(app.view, View::Graph);
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
         assert_eq!(app.view, View::Changes);
         assert_eq!(app.changes.pane, LeftPane::Files);

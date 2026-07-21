@@ -463,6 +463,9 @@ impl App {
             if self.changes.selected_explorer_directory_path().is_some() {
                 let repo = self.session.data();
                 self.changes.toggle_selected_explorer_directory(repo);
+            } else {
+                self.view = View::Changes;
+                self.graph_commit_open = false;
             }
         } else if self.select_worktree_row(point) {
             if self
@@ -478,6 +481,9 @@ impl App {
                 .is_some_and(|rect| rect.contains(point))
             {
                 self.toggle_stage();
+            } else {
+                self.view = View::Changes;
+                self.graph_commit_open = false;
             }
         } else if self
             .regions
@@ -835,7 +841,7 @@ impl App {
     }
 
     fn select_explorer_row(&mut self, point: Position) -> bool {
-        if self.view != View::Changes || self.changes.pane != LeftPane::Files {
+        if self.changes.pane != LeftPane::Files {
             return false;
         }
         let Some(rect) = self

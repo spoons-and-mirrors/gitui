@@ -387,7 +387,7 @@ impl WorkspacePanel {
                 WorkspacePanelEffect::None
             }
             KeyCode::Delete if key.modifiers.is_empty() => self.begin_delete(),
-            _ => WorkspacePanelEffect::None,
+            _ => WorkspacePanelEffect::Unhandled,
         }
     }
 
@@ -972,6 +972,7 @@ impl WorkspacePanel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkspacePanelEffect {
     None,
+    Unhandled,
     Close,
     Cycle,
     CreateWorkspace,

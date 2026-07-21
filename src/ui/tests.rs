@@ -1690,6 +1690,77 @@ fn fuzzy_searches_and_opens_repository_files() {
 }
 
 #[test]
+fn left_pane_files_take_over_the_preview_from_graph() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    run_git(root, &["config", "user.name", "Graph Test"]);
+    run_git(root, &["config", "user.email", "graph@example.com"]);
+    fs::write(root.join("tracked.txt"), "first\n").unwrap();
+    run_git(root, &["add", "."]);
+    run_git(root, &["commit", "-m", "initial commit"]);
+    fs::write(root.join("tracked.txt"), "changed\n").unwrap();
+
+    let mut app = App::new(root.to_path_buf());
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    app.view = View::Graph;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let worktree = app.regions.worktree_list.unwrap();
+    let status = app.regions.worktree_status.unwrap();
+    let file_row = app
+        .changes
+        .worktree_rows(app.repository().unwrap())
+        .iter()
+        .position(|row| row.change_index.is_some())
+        .unwrap();
+    let file_y = worktree.y + (file_row - app.changes.worktree_scroll) as u16;
+    click(&mut app, status.x, file_y);
+    assert_eq!(app.view, View::Graph, "staging should not close Graph");
+
+    click(&mut app, worktree.x + 3, file_y);
+    assert_eq!(app.view, View::Changes);
+    assert!(!app.graph_commit_open);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+    assert_eq!(app.changes.pane, LeftPane::Files);
+    app.view = View::Graph;
+    app.graph_commit_open = true;
+    app.mode = Mode::WorkspacePanel;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let explorer = app.regions.explorer_list.unwrap();
+    let file_row = app
+        .changes
+        .explorer_rows()
+        .iter()
+        .position(|row| row.file_index.is_some())
+        .unwrap();
+    click(&mut app, explorer.x + 3, explorer.y + file_row as u16);
+    wait_for_preview(&mut app);
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.view, View::Changes);
+    assert!(!app.graph_commit_open);
+    assert_eq!(app.changes.diff, "changed\n");
+}
+
+#[test]
+fn workspace_focus_passes_through_application_shortcuts() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().to_path_buf());
+
+    app.mode = Mode::WorkspacePanel;
+    app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::WorkspacePanel);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::Settings);
+
+    app.mode = Mode::WorkspacePanel;
+    app.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::FileSearch);
+}
+
+#[test]
 fn selects_visible_text_and_suppresses_clicks_after_dragging() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
