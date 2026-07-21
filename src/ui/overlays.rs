@@ -11,7 +11,8 @@ use crate::app::{
     ACTION_ITEMS, ActionsState, BranchDeleteDialog, BrowserTab, CommandStatus, Explorer,
     FileDialog, FileDialogKind, FileNameAction, FileSearch, HitTarget, PickerAction, PickerEntry,
     PullRequest, RemoteItems, RepositoryBrowser, RepositoryBrowserHitTarget, Settings,
-    SnapshotLoadDialog, WorkspaceDeleteDialog, WorkspaceDeleteKind,
+    SnapshotLoadDialog, WorkspaceDeleteDialog, WorkspaceDeleteKind, WorkspacePanel,
+    WorkspacePanelHitTarget,
 };
 
 use super::{fill, palette, truncate_width};
@@ -472,7 +473,7 @@ pub(super) fn draw_snapshot_load_dialog(frame: &mut Frame<'_>, dialog: &Snapshot
     );
     let inner = area.inner(ratatui::layout::Margin::new(2, 1));
     frame.render_widget(
-        Paragraph::new("LOAD SNAPSHOT").style(
+        Paragraph::new("LOAD WORKSPACE PRESET").style(
             Style::default()
                 .fg(palette().accent)
                 .add_modifier(Modifier::BOLD),
@@ -481,7 +482,7 @@ pub(super) fn draw_snapshot_load_dialog(frame: &mut Frame<'_>, dialog: &Snapshot
     );
     frame.render_widget(
         Paragraph::new(truncate_width(
-            &format!("Load workspace snapshot {}?", dialog.name),
+            &format!("Load workspace preset {}?", dialog.name),
             usize::from(inner.width),
         ))
         .style(Style::default().fg(palette().ink)),
@@ -530,7 +531,7 @@ pub(super) fn draw_snapshot_load_dialog(frame: &mut Frame<'_>, dialog: &Snapshot
         1,
     );
     frame.render_widget(
-        Paragraph::new("Load snapshot")
+        Paragraph::new("Load preset")
             .alignment(Alignment::Center)
             .style(Style::default().fg(palette().accent).bg(palette().selected)),
         button,
@@ -541,6 +542,186 @@ pub(super) fn draw_snapshot_load_dialog(frame: &mut Frame<'_>, dialog: &Snapshot
             .style(Style::default().fg(palette().muted)),
         Rect::new(inner.x, area.bottom().saturating_sub(1), inner.width, 1),
     );
+}
+
+pub(super) fn draw_workspace_presets(
+    frame: &mut Frame<'_>,
+    panel: &WorkspacePanel,
+) -> (Rect, Vec<(HitTarget, Rect)>) {
+    let area = centered_min(frame.area(), 68, 68, 58, 18);
+    let mut targets = vec![(
+        HitTarget::WorkspacePanel(WorkspacePanelHitTarget::PresetOverlay),
+        area,
+    )];
+    frame.render_widget(Clear, area);
+    fill(frame, area, palette().panel);
+    fill(
+        frame,
+        Rect::new(area.x, area.y, area.width, 3),
+        palette().surface_alt,
+    );
+    fill(
+        frame,
+        Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
+        palette().surface_alt,
+    );
+    let inner = area.inner(ratatui::layout::Margin::new(2, 1));
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "WORKSPACE PRESETS",
+                Style::default()
+                    .fg(palette().ink)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  Recall an entire Hunkle setup",
+                Style::default().fg(palette().faint),
+            ),
+        ])),
+        Rect::new(inner.x, area.y.saturating_add(1), inner.width, 1),
+    );
+    let compact = area.height < 16;
+    if !compact {
+        frame.render_widget(
+            Paragraph::new(format!(
+                "Current setup  {} workspaces  ·  {} groups",
+                panel.workspaces.len(),
+                panel.groups.len()
+            ))
+            .style(Style::default().fg(palette().muted)),
+            Rect::new(inner.x, area.y.saturating_add(4), inner.width, 1),
+        );
+    }
+    let section_y = area.y.saturating_add(if compact { 3 } else { 6 });
+
+    if panel.snapshot_editing {
+        frame.render_widget(
+            Paragraph::new("PRESET NAME").style(
+                Style::default()
+                    .fg(palette().muted)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Rect::new(inner.x, section_y, inner.width, 1),
+        );
+        let mut input = panel.snapshot_input.text().to_owned();
+        if panel.snapshot_input.cursor_visible() {
+            input.insert(panel.snapshot_input.cursor(), '▌');
+        }
+        frame.render_widget(
+            Paragraph::new(format!("  {input}"))
+                .style(Style::default().fg(palette().ink).bg(palette().selected)),
+            Rect::new(inner.x, section_y.saturating_add(2), inner.width, 1),
+        );
+        if section_y.saturating_add(4) < area.bottom().saturating_sub(1) {
+            frame.render_widget(
+                Paragraph::new(panel.snapshot_error.as_deref().unwrap_or(
+                    "Using an existing name updates that preset with the current setup.",
+                ))
+                .style(Style::default().fg(if panel.snapshot_error.is_some() {
+                    palette().red
+                } else {
+                    palette().faint
+                })),
+                Rect::new(inner.x, section_y.saturating_add(4), inner.width, 1),
+            );
+        }
+        frame.render_widget(
+            Paragraph::new("Enter save   Esc back")
+                .alignment(Alignment::Right)
+                .style(Style::default().fg(palette().muted)),
+            Rect::new(inner.x, area.bottom().saturating_sub(1), inner.width, 1),
+        );
+        return (area, targets);
+    }
+
+    frame.render_widget(
+        Paragraph::new(format!("SAVED PRESETS  {}", panel.snapshots.len())).style(
+            Style::default()
+                .fg(palette().muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Rect::new(inner.x, section_y, inner.width, 1),
+    );
+    let list_y = section_y.saturating_add(2);
+    let list = Rect::new(
+        inner.x,
+        list_y,
+        inner.width,
+        area.bottom().saturating_sub(2).saturating_sub(list_y),
+    );
+    let item_count = panel.snapshots.len() + 1;
+    let visible = usize::from(list.height).min(item_count);
+    let start = panel
+        .snapshot_menu_choice
+        .saturating_add(1)
+        .saturating_sub(visible)
+        .min(item_count.saturating_sub(visible));
+    for index in start..start + visible {
+        let row = Rect::new(
+            list.x,
+            list.y + u16::try_from(index - start).unwrap_or(0),
+            list.width,
+            1,
+        );
+        let selected = panel.snapshot_menu_choice == index;
+        let (label, detail, color, target) = if index == 0 {
+            (
+                "+  Create preset from current setup".to_owned(),
+                String::new(),
+                palette().accent,
+                WorkspacePanelHitTarget::SaveSnapshot,
+            )
+        } else {
+            let preset = &panel.snapshots[index - 1];
+            (
+                format!("   {}", preset.name),
+                format!(
+                    "{} workspaces  ·  {} groups",
+                    preset.workspace_count(),
+                    preset.group_count()
+                ),
+                palette().ink,
+                WorkspacePanelHitTarget::Snapshot(index - 1),
+            )
+        };
+        let detail_width = UnicodeWidthStr::width(detail.as_str());
+        let label = truncate_width(
+            &label,
+            usize::from(row.width).saturating_sub(detail_width.saturating_add(2)),
+        );
+        let padding = usize::from(row.width)
+            .saturating_sub(UnicodeWidthStr::width(label.as_str()) + detail_width);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(label, Style::default().fg(color)),
+                Span::raw(" ".repeat(padding)),
+                Span::styled(detail, Style::default().fg(palette().faint)),
+            ]))
+            .style(Style::default().bg(if selected {
+                palette().selected
+            } else {
+                palette().panel
+            })),
+            row,
+        );
+        targets.push((HitTarget::WorkspacePanel(target), row));
+    }
+    let status = panel
+        .snapshot_error
+        .as_deref()
+        .unwrap_or("Enter load   n new   u update   Del delete   Esc close");
+    frame.render_widget(
+        Paragraph::new(status)
+            .alignment(Alignment::Right)
+            .style(Style::default().fg(if panel.snapshot_error.is_some() {
+                palette().accent
+            } else {
+                palette().muted
+            })),
+        Rect::new(inner.x, area.bottom().saturating_sub(1), inner.width, 1),
+    );
+    (area, targets)
 }
 
 fn remote_tab_label<T>(label: &str, items: &RemoteItems<T>) -> String {
@@ -1966,6 +2147,7 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
         help_line("o", "Explorer"),
         help_line("b", "Branches / PRs / issues"),
         help_line("w", "Cycle Herdr rail left/right/off"),
+        help_line("p", "Workspace presets"),
         help_line("s", "Settings"),
         help_line("x", "Git actions"),
         help_line("g", "Git command"),

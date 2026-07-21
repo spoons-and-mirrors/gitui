@@ -1146,7 +1146,7 @@ fn renders_every_primary_surface() {
     assert!(help_screen.contains("Explorer"));
     assert!(!help_screen.contains('┌'));
 
-    let mut narrow = Terminal::new(TestBackend::new(50, 12)).unwrap();
+    let mut narrow = Terminal::new(TestBackend::new(60, 16)).unwrap();
     narrow.draw(|frame| draw(frame, &mut app)).unwrap();
 }
 
@@ -1179,6 +1179,7 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
             }
         }
     }));
+    app.workspace_panel.workspaces[0].path = Some(directory.path().to_path_buf());
     app.workspace_panel.workspaces[0].branch = Some("topic".to_owned());
     app.workspace_panel.loading = true;
     app.mode = Mode::WorkspacePanel;
@@ -1257,7 +1258,8 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
         load_button.y,
     ));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert!(app.workspace_panel.snapshot_menu_open);
+    assert_eq!(app.mode, Mode::WorkspacePresets);
+    assert!(app.regions.workspace_presets_overlay.is_some());
     assert!(
         app.regions
             .hit_target_rect(HitTarget::WorkspacePanel(
@@ -1265,7 +1267,35 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
             ))
             .is_some()
     );
-    app.workspace_panel.close_snapshot_menu();
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(rendered.contains("WORKSPACE PRESETS"));
+    assert!(rendered.contains("Create preset from current setup"));
+    app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+    app.handle_paste("Daily setup");
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.workspace_panel.snapshots.len(), 1);
+    assert_eq!(app.notice.as_deref(), Some("Preset saved: Daily setup"));
+    app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+    assert_eq!(app.notice.as_deref(), Some("Preset updated: Daily setup"));
+    app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+    assert!(app.workspace_panel.snapshots.is_empty());
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::Normal);
+    app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::WorkspacePresets);
+    assert!(app.workspace_panel.snapshot_load_dialog.is_none());
+    let mut narrow = Terminal::new(TestBackend::new(60, 16)).unwrap();
+    narrow.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(app.mode, Mode::WorkspacePresets);
+    assert!(app.regions.workspace_presets_overlay.is_some());
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    app.mode = Mode::WorkspacePanel;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(
         terminal.backend().buffer()[(create_button.x + 1, create_button.y)].bg,

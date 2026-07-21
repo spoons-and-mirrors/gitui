@@ -73,6 +73,10 @@ impl App {
         {
             return;
         }
+        if self.mode == Mode::WorkspacePresets {
+            self.handle_workspace_presets_mouse(mouse);
+            return;
+        }
 
         if self.workspace_panel.is_dragging_workspace() {
             match mouse.kind {
@@ -332,6 +336,7 @@ impl App {
             Mode::Editor => {}
             Mode::Files => self.handle_file_dialog_click(point),
             Mode::WorkspacePanel => self.handle_workspace_panel_click(point),
+            Mode::WorkspacePresets => self.handle_workspace_presets_mouse(mouse),
             Mode::Normal | Mode::Commit => self.handle_primary_left_click(point),
         }
     }
@@ -632,9 +637,9 @@ impl App {
                 self.apply_workspace_panel_effect(effect);
             }
             WorkspacePanelHitTarget::SnapshotMenu => {
-                self.mode = Mode::WorkspacePanel;
-                self.workspace_panel.toggle_snapshot_menu();
+                self.open_workspace_presets();
             }
+            WorkspacePanelHitTarget::PresetOverlay => {}
             WorkspacePanelHitTarget::SaveSnapshot => {
                 let effect = self.workspace_panel.activate_snapshot_choice(0);
                 self.apply_workspace_panel_effect(effect);
@@ -651,6 +656,47 @@ impl App {
             WorkspacePanelHitTarget::Agent(index) => {
                 self.workspace_panel.click_agent(index);
             }
+        }
+    }
+
+    fn handle_workspace_presets_mouse(&mut self, mouse: MouseEvent) {
+        let point = Position::new(mouse.column, mouse.row);
+        let target = self.regions.hit_target_at(point);
+        match mouse.kind {
+            MouseEventKind::Moved => match target {
+                Some(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::SaveSnapshot)) => {
+                    self.workspace_panel.select_snapshot_choice(0);
+                }
+                Some(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Snapshot(index))) => {
+                    self.workspace_panel.select_snapshot_choice(index + 1);
+                }
+                _ => {}
+            },
+            MouseEventKind::ScrollUp => {
+                let effect = self
+                    .workspace_panel
+                    .handle_workspace_presets(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+                self.apply_workspace_panel_effect(effect);
+            }
+            MouseEventKind::ScrollDown => {
+                let effect = self
+                    .workspace_panel
+                    .handle_workspace_presets(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+                self.apply_workspace_panel_effect(effect);
+            }
+            MouseEventKind::Down(MouseButton::Left) => match target {
+                Some(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::SaveSnapshot)) => {
+                    let effect = self.workspace_panel.activate_snapshot_choice(0);
+                    self.apply_workspace_panel_effect(effect);
+                }
+                Some(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Snapshot(index))) => {
+                    let effect = self.workspace_panel.activate_snapshot_choice(index + 1);
+                    self.apply_workspace_panel_effect(effect);
+                }
+                Some(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::PresetOverlay)) => {}
+                _ => self.mode = Mode::Normal,
+            },
+            _ => {}
         }
     }
 

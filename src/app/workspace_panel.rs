@@ -84,11 +84,45 @@ pub(crate) struct WorkspaceSnapshot {
     pub(crate) name: String,
     entries: Vec<WorkspaceSnapshotEntry>,
     groups: Vec<WorkspaceSnapshotGroup>,
+    groups_captured: bool,
 }
 
 impl WorkspaceSnapshot {
     pub(crate) fn workspace_count(&self) -> usize {
         self.entries.len()
+    }
+
+    pub(crate) fn group_count(&self) -> usize {
+        self.groups.len()
+    }
+
+    fn capture_groups(&mut self, groups: &[WorkspaceGroup], workspaces: &[HerdrWorkspace]) {
+        self.groups = groups
+            .iter()
+            .map(|group| WorkspaceSnapshotGroup {
+                name: group.name.clone(),
+                expanded: group.expanded,
+            })
+            .collect();
+        for entry in &mut self.entries {
+            let Some(workspace) = workspaces.iter().find(|workspace| {
+                workspace
+                    .path
+                    .as_deref()
+                    .is_some_and(|path| same_path(path, &entry.path))
+            }) else {
+                continue;
+            };
+            let workspace_id = workspace
+                .parent_workspace_id
+                .as_deref()
+                .unwrap_or(&workspace.id);
+            entry.group = groups
+                .iter()
+                .find(|group| group.workspace_ids.iter().any(|id| id == workspace_id))
+                .map(|group| group.name.clone());
+        }
+        self.groups_captured = true;
     }
 }
 
@@ -522,7 +556,7 @@ impl WorkspacePanel {
                         self.snapshot_loading = false;
                         self.groups = result.groups;
                         action_error = Some(match self.persist_groups() {
-                            Ok(()) => format!("Snapshot loaded: {name}"),
+                            Ok(()) => format!("Preset loaded: {name}"),
                             Err(error) => error,
                         });
                         self.next_refresh = Instant::now();
@@ -690,13 +724,13 @@ impl WorkspacePanel {
                     .find(|entry| !entry.path.is_dir())
                 {
                     return WorkspacePanelEffect::Notice(format!(
-                        "Cannot load snapshot: '{}' is no longer a directory",
+                        "Cannot load preset: '{}' is no longer a directory",
                         entry.path.display()
                     ));
                 }
                 let name = dialog.snapshot.name.clone();
                 self.start_snapshot_recall(dialog.snapshot);
-                WorkspacePanelEffect::Notice(format!("Loading snapshot: {name}"))
+                WorkspacePanelEffect::Notice(format!("Loading preset: {name}"))
             }
             _ => WorkspacePanelEffect::None,
         }
@@ -753,6 +787,77 @@ impl WorkspacePanel {
         self.snapshot_error = None;
     }
 
+    pub(crate) fn open_workspace_presets(&mut self) {
+        self.close_create_menu();
+        self.close_snapshot_menu();
+        self.snapshot_editing = false;
+        self.snapshot_error = None;
+        self.snapshot_menu_choice = usize::from(!self.snapshots.is_empty());
+    }
+
+    pub(crate) fn handle_workspace_presets(&mut self, key: KeyEvent) -> WorkspacePanelEffect {
+        if self.snapshot_load_dialog.is_some() {
+            return self.handle_snapshot_load_dialog(key);
+        }
+        if self.snapshot_editing {
+            let effect = self.handle_snapshot_input(key);
+            if !self.snapshot_editing {
+                self.snapshot_menu_choice = self
+                    .snapshots
+                    .iter()
+                    .position(|snapshot| {
+                        snapshot
+                            .name
+                            .eq_ignore_ascii_case(self.snapshot_input.text().trim())
+                    })
+                    .map_or(0, |index| index + SNAPSHOT_SAVE_ITEM);
+            }
+            return effect;
+        }
+
+        let item_count = self.snapshots.len() + SNAPSHOT_SAVE_ITEM;
+        match key.code {
+            KeyCode::Esc => WorkspacePanelEffect::Close,
+            KeyCode::Char('q') if key.modifiers.is_empty() => WorkspacePanelEffect::Close,
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
+                self.snapshot_menu_choice = self
+                    .snapshot_menu_choice
+                    .checked_sub(1)
+                    .unwrap_or(item_count - 1);
+                WorkspacePanelEffect::None
+            }
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+                self.snapshot_menu_choice = (self.snapshot_menu_choice + 1) % item_count;
+                WorkspacePanelEffect::None
+            }
+            KeyCode::Char('n') if key.modifiers.is_empty() => self.activate_snapshot_choice(0),
+            KeyCode::Char('u') if key.modifiers.is_empty() && self.snapshot_menu_choice > 0 => {
+                let index = self.snapshot_menu_choice - SNAPSHOT_SAVE_ITEM;
+                let Some(name) = self
+                    .snapshots
+                    .get(index)
+                    .map(|snapshot| snapshot.name.clone())
+                else {
+                    return WorkspacePanelEffect::None;
+                };
+                self.snapshot_input.set(name);
+                self.save_snapshot()
+            }
+            KeyCode::Delete if self.snapshot_menu_choice > 0 => {
+                self.delete_snapshot_choice();
+                WorkspacePanelEffect::None
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                self.activate_snapshot_choice(self.snapshot_menu_choice)
+            }
+            _ => WorkspacePanelEffect::None,
+        }
+    }
+
+    pub(crate) fn select_snapshot_choice(&mut self, choice: usize) {
+        self.snapshot_menu_choice = choice.min(self.snapshots.len());
+    }
+
     pub(crate) fn close_snapshot_menu(&mut self) {
         self.snapshot_menu_open = false;
         self.snapshot_menu_choice = 0;
@@ -770,11 +875,19 @@ impl WorkspacePanel {
         }
         if self.snapshot_loading {
             self.close_snapshot_menu();
-            return WorkspacePanelEffect::Notice("A snapshot is already loading".to_owned());
+            return WorkspacePanelEffect::Notice("A preset is already loading".to_owned());
         }
-        let Some(snapshot) = self.snapshots.get(choice - SNAPSHOT_SAVE_ITEM).cloned() else {
+        let index = choice - SNAPSHOT_SAVE_ITEM;
+        let Some(mut snapshot) = self.snapshots.get(index).cloned() else {
             return WorkspacePanelEffect::None;
         };
+        if !snapshot.groups_captured {
+            snapshot.capture_groups(&self.groups, &self.workspaces);
+            self.snapshots[index] = snapshot.clone();
+            if let Err(error) = self.persist_snapshots() {
+                return WorkspacePanelEffect::Notice(error);
+            }
+        }
         self.close_snapshot_menu();
         let plan = snapshot_recall_plan(&snapshot, &self.workspaces);
         self.snapshot_load_dialog = Some(SnapshotLoadDialog {
@@ -846,16 +959,7 @@ impl WorkspacePanel {
                 self.snapshot_menu_choice = (self.snapshot_menu_choice + 1) % item_count;
             }
             KeyCode::Delete if self.snapshot_menu_choice > 0 => {
-                let index = self.snapshot_menu_choice - SNAPSHOT_SAVE_ITEM;
-                let removed = self.snapshots.remove(index);
-                let name = removed.name.clone();
-                self.snapshot_menu_choice = self.snapshot_menu_choice.min(self.snapshots.len());
-                self.snapshot_error = Some(if let Err(error) = self.persist_snapshots() {
-                    self.snapshots.insert(index, removed);
-                    error
-                } else {
-                    format!("Deleted {name}")
-                });
+                self.delete_snapshot_choice();
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
                 return self.activate_snapshot_choice(self.snapshot_menu_choice);
@@ -863,6 +967,19 @@ impl WorkspacePanel {
             _ => {}
         }
         WorkspacePanelEffect::None
+    }
+
+    fn delete_snapshot_choice(&mut self) {
+        let index = self.snapshot_menu_choice - SNAPSHOT_SAVE_ITEM;
+        let removed = self.snapshots.remove(index);
+        let name = removed.name.clone();
+        self.snapshot_menu_choice = self.snapshot_menu_choice.min(self.snapshots.len());
+        self.snapshot_error = Some(if let Err(error) = self.persist_snapshots() {
+            self.snapshots.insert(index, removed);
+            error
+        } else {
+            format!("Deleted preset: {name}")
+        });
     }
 
     fn handle_snapshot_input(&mut self, key: KeyEvent) -> WorkspacePanelEffect {
@@ -906,7 +1023,7 @@ impl WorkspacePanel {
     fn save_snapshot(&mut self) -> WorkspacePanelEffect {
         let name = self.snapshot_input.text().trim();
         if name.is_empty() {
-            self.snapshot_error = Some("Snapshot name is required".to_owned());
+            self.snapshot_error = Some("Preset name is required".to_owned());
             return WorkspacePanelEffect::None;
         }
         let existing = self
@@ -932,6 +1049,7 @@ impl WorkspacePanel {
                     expanded: group.expanded,
                 })
                 .collect(),
+            groups_captured: true,
         };
         let previous = if let Some(index) = existing {
             Some(std::mem::replace(&mut self.snapshots[index], snapshot))
@@ -959,12 +1077,12 @@ impl WorkspacePanel {
         } else {
             "saved"
         };
-        WorkspacePanelEffect::Notice(format!("Snapshot {action}: {name}"))
+        WorkspacePanelEffect::Notice(format!("Preset {action}: {name}"))
     }
 
     fn snapshot_entries(&self) -> Result<Vec<WorkspaceSnapshotEntry>, String> {
         if self.workspaces.is_empty() {
-            return Err("There are no workspaces to snapshot".to_owned());
+            return Err("There are no workspaces to save in a preset".to_owned());
         }
         self.workspaces
             .iter()
@@ -1703,6 +1821,7 @@ fn load_snapshots(path: &Path) -> Vec<WorkspaceSnapshot> {
                 name,
                 entries,
                 groups,
+                groups_captured: snapshot.get("groups").is_some(),
             })
         })
         .collect::<Vec<_>>();
@@ -1792,13 +1911,13 @@ fn recall_snapshot(
         ]);
         let response = run_herdr(&args).map_err(|error| {
             format!(
-                "Could not load snapshot '{}' completely: {error}",
+                "Could not load preset '{}' completely: {error}",
                 snapshot.name
             )
         })?;
         let id = workspace_id_in(&response).ok_or_else(|| {
             format!(
-                "Could not identify '{}' while loading snapshot '{}'",
+                "Could not identify '{}' while loading preset '{}'",
                 entry.label, snapshot.name
             )
         })?;
@@ -1836,6 +1955,11 @@ fn recall_snapshot(
         run_herdr(&workspace_close_args(&workspace.id))?;
     }
 
+    let groups = recalled_groups(snapshot, &target_ids);
+    Ok(SnapshotRecallResult { groups })
+}
+
+fn recalled_groups(snapshot: &WorkspaceSnapshot, target_ids: &[String]) -> Vec<WorkspaceGroup> {
     let mut groups = snapshot
         .groups
         .iter()
@@ -1853,10 +1977,10 @@ fn recall_snapshot(
             continue;
         };
         if let Some(group) = groups.iter_mut().find(|group| group.name == group_name) {
-            group.workspace_ids.push(workspace_id);
+            group.workspace_ids.push(workspace_id.clone());
         }
     }
-    Ok(SnapshotRecallResult { groups })
+    groups
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {
@@ -2648,7 +2772,7 @@ mod tests {
         panel.paste("Daily setup");
         assert_eq!(
             panel.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            WorkspacePanelEffect::Notice("Snapshot saved: Daily setup".to_owned())
+            WorkspacePanelEffect::Notice("Preset saved: Daily setup".to_owned())
         );
         assert_eq!(panel.snapshots.len(), 1);
         assert_eq!(panel.snapshots[0].workspace_count(), 2);
@@ -2662,7 +2786,7 @@ mod tests {
         panel.paste("Daily setup");
         assert_eq!(
             panel.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            WorkspacePanelEffect::Notice("Snapshot updated: Daily setup".to_owned())
+            WorkspacePanelEffect::Notice("Preset updated: Daily setup".to_owned())
         );
         assert_eq!(panel.snapshots.len(), 1);
 
@@ -2711,6 +2835,61 @@ mod tests {
                 .snapshots
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn migrates_legacy_snapshot_groups_by_path_before_workspace_ids_change() {
+        let mut panel = WorkspacePanel::ready_for_test(&snapshot());
+        panel.workspaces[1].path = Some(PathBuf::from("/home/spoon/docs"));
+        panel.groups = vec![
+            WorkspaceGroup {
+                name: "Code".to_owned(),
+                expanded: false,
+                workspace_ids: vec!["w1".to_owned()],
+            },
+            WorkspaceGroup {
+                name: "Notes".to_owned(),
+                expanded: true,
+                workspace_ids: vec!["w2".to_owned()],
+            },
+        ];
+        panel.snapshots = vec![WorkspaceSnapshot {
+            name: "legacy".to_owned(),
+            entries: vec![
+                WorkspaceSnapshotEntry {
+                    label: "HUNKLE".to_owned(),
+                    path: PathBuf::from("/home/spoon/code/gitui"),
+                    focused: true,
+                    linked_worktree: false,
+                    group: None,
+                },
+                WorkspaceSnapshotEntry {
+                    label: "docs".to_owned(),
+                    path: PathBuf::from("/home/spoon/docs"),
+                    focused: false,
+                    linked_worktree: false,
+                    group: None,
+                },
+            ],
+            groups: Vec::new(),
+            groups_captured: false,
+        }];
+
+        assert_eq!(
+            panel.activate_snapshot_choice(1),
+            WorkspacePanelEffect::None
+        );
+        let migrated = &panel.snapshot_load_dialog.as_ref().unwrap().snapshot;
+        assert!(migrated.groups_captured);
+        assert!(panel.snapshots[0].groups_captured);
+        assert_eq!(migrated.entries[0].group.as_deref(), Some("Code"));
+        assert_eq!(migrated.entries[1].group.as_deref(), Some("Notes"));
+
+        let groups = recalled_groups(migrated, &["new-code".to_owned(), "new-notes".to_owned()]);
+        assert_eq!(groups[0].workspace_ids, ["new-code"]);
+        assert_eq!(groups[1].workspace_ids, ["new-notes"]);
+        assert!(!groups[0].expanded);
+        assert!(groups[1].expanded);
     }
 
     #[test]

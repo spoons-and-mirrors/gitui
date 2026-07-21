@@ -258,6 +258,19 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 overlays::draw_workspace_delete_dialog(frame, dialog);
             }
         }
+        Mode::WorkspacePresets => {
+            dim(frame);
+            if let Some(dialog) = &app.workspace_panel.snapshot_load_dialog {
+                overlays::draw_snapshot_load_dialog(frame, dialog);
+            } else {
+                let (overlay, targets) =
+                    overlays::draw_workspace_presets(frame, &app.workspace_panel);
+                app.regions.workspace_presets_overlay = Some(overlay);
+                for (target, rect) in targets {
+                    app.regions.register_hit_target(target, rect);
+                }
+            }
+        }
         Mode::Normal | Mode::Commit => {}
     }
     finish_selection(frame, app);

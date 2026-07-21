@@ -78,6 +78,7 @@ pub enum Mode {
     Editor,
     Files,
     WorkspacePanel,
+    WorkspacePresets,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,6 +132,7 @@ pub(crate) enum WorkspacePanelHitTarget {
     CreateWorkspace,
     CreateWorktree,
     SnapshotMenu,
+    PresetOverlay,
     SaveSnapshot,
     Snapshot(usize),
     Group(usize),
@@ -173,6 +175,7 @@ pub struct Regions {
     pub workspace_panel: Option<Rect>,
     pub workspace_panel_splitter: Option<Rect>,
     pub workspace_panel_bounds: Option<Rect>,
+    pub workspace_presets_overlay: Option<Rect>,
     pub actions: Option<Rect>,
     pub worktree: Option<Rect>,
     pub worktree_tab: Option<Rect>,
@@ -549,6 +552,7 @@ impl App {
             Mode::Editor => self.handle_editor(key),
             Mode::Files => self.handle_file_dialog(key),
             Mode::WorkspacePanel => self.handle_workspace_panel(key),
+            Mode::WorkspacePresets => self.handle_workspace_presets(key),
             Mode::Help => {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
                     self.mode = Mode::Normal;
@@ -589,6 +593,7 @@ impl App {
             }
             Mode::RepositoryBrowser => self.repository_browser.paste(text),
             Mode::WorkspacePanel => self.workspace_panel.paste(text),
+            Mode::WorkspacePresets => self.workspace_panel.paste(text),
             _ => {}
         }
     }
@@ -620,6 +625,9 @@ impl App {
         self.prefetch_commit_summaries();
         changed |= self.commit_summaries.poll();
         changed |= self.commit_input.poll_blink(self.mode == Mode::Commit);
+        changed |= self.workspace_panel.snapshot_input.poll_blink(
+            self.mode == Mode::WorkspacePresets && self.workspace_panel.snapshot_editing,
+        );
         if let Some(completion) = self.commit_message_generator.poll() {
             changed = true;
             if !self
@@ -986,6 +994,11 @@ impl App {
                 if key.modifiers == KeyModifiers::NONE && self.workspace_panel.is_enabled() =>
             {
                 self.cycle_workspace_panel();
+            }
+            KeyCode::Char('p')
+                if key.modifiers == KeyModifiers::NONE && self.workspace_panel.is_enabled() =>
+            {
+                self.open_workspace_presets();
             }
             KeyCode::Char('1') => {
                 self.view = View::Changes;
@@ -1642,6 +1655,10 @@ impl App {
     }
 
     fn handle_workspace_panel(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Char('p') && key.modifiers.is_empty() {
+            self.open_workspace_presets();
+            return;
+        }
         let effect = self.workspace_panel.handle_key(key);
         if effect == WorkspacePanelEffect::Unhandled {
             if is_workspace_passthrough_shortcut(key) {
@@ -1651,6 +1668,19 @@ impl App {
         } else {
             self.apply_workspace_panel_effect(effect);
         }
+    }
+
+    fn open_workspace_presets(&mut self) {
+        if !self.workspace_panel.is_enabled() {
+            return;
+        }
+        self.workspace_panel.open_workspace_presets();
+        self.mode = Mode::WorkspacePresets;
+    }
+
+    fn handle_workspace_presets(&mut self, key: KeyEvent) {
+        let effect = self.workspace_panel.handle_workspace_presets(key);
+        self.apply_workspace_panel_effect(effect);
     }
 
     pub(crate) fn apply_workspace_panel_effect(&mut self, effect: WorkspacePanelEffect) {

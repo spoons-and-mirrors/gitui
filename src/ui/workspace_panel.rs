@@ -224,7 +224,7 @@ pub(super) fn draw(
     }
     if panel.snapshot_editing && panel.snapshot_error.is_none() {
         frame.render_widget(
-            Paragraph::new(format!("Snapshot: {}", panel.snapshot_input.text()))
+            Paragraph::new(format!("Preset: {}", panel.snapshot_input.text()))
                 .style(Style::default().fg(palette().accent)),
             footer,
         );
