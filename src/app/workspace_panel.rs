@@ -51,6 +51,7 @@ pub(crate) struct HerdrWorkspace {
     pub(crate) id: String,
     pub(crate) label: String,
     pub(crate) path: Option<PathBuf>,
+    pub(crate) branch: Option<String>,
     pub(crate) pane_count: usize,
     pub(crate) focused: bool,
     pub(crate) status: AgentStatus,
@@ -150,7 +151,11 @@ impl WorkspacePanel {
         Self {
             enabled,
             layout_available: false,
-            placement: WorkspacePanelPlacement::Off,
+            placement: if enabled {
+                WorkspacePanelPlacement::Left
+            } else {
+                WorkspacePanelPlacement::Off
+            },
             workspaces: Vec::new(),
             agents: Vec::new(),
             groups,
@@ -639,7 +644,11 @@ impl WorkspacePanel {
         let sender = self.sender.clone();
         thread::spawn(move || {
             let result = run_herdr(&["api".to_owned(), "snapshot".to_owned()])
-                .and_then(|value| parse_snapshot(&value));
+                .and_then(|value| parse_snapshot(&value))
+                .map(|(mut workspaces, agents)| {
+                    populate_workspace_branches(&mut workspaces);
+                    (workspaces, agents)
+                });
             let _ = sender.send(Completion::Snapshot(result));
         });
     }
@@ -815,6 +824,7 @@ fn parse_workspace(value: &Value, snapshot: &Value) -> Option<HerdrWorkspace> {
         id: value.get("workspace_id")?.as_str()?.to_owned(),
         label: value.get("label")?.as_str()?.to_owned(),
         path: workspace_path(value, snapshot),
+        branch: None,
         pane_count: value.get("pane_count").and_then(Value::as_u64).unwrap_or(0) as usize,
         focused: value
             .get("focused")
@@ -822,6 +832,46 @@ fn parse_workspace(value: &Value, snapshot: &Value) -> Option<HerdrWorkspace> {
             .unwrap_or(false),
         status: AgentStatus::parse(value.get("agent_status").and_then(Value::as_str)),
     })
+}
+
+fn populate_workspace_branches(workspaces: &mut [HerdrWorkspace]) {
+    for workspace in workspaces {
+        workspace.branch = workspace.path.as_deref().and_then(workspace_branch);
+    }
+}
+
+fn workspace_branch(path: &Path) -> Option<String> {
+    if !path.exists() {
+        return None;
+    }
+    let mut directory = if path.is_dir() { path } else { path.parent()? };
+    loop {
+        let dot_git = directory.join(".git");
+        if dot_git.is_dir() {
+            return branch_from_head(&dot_git.join("HEAD"));
+        }
+        if dot_git.is_file() {
+            let git_file = fs::read_to_string(&dot_git).ok()?;
+            let git_dir = git_file.trim().strip_prefix("gitdir:")?.trim();
+            let git_dir = Path::new(git_dir);
+            let git_dir = if git_dir.is_absolute() {
+                git_dir.to_path_buf()
+            } else {
+                directory.join(git_dir)
+            };
+            return branch_from_head(&git_dir.join("HEAD"));
+        }
+        directory = directory.parent()?;
+    }
+}
+
+fn branch_from_head(path: &Path) -> Option<String> {
+    fs::read_to_string(path)
+        .ok()?
+        .trim()
+        .strip_prefix("ref: refs/heads/")
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_owned)
 }
 
 fn workspace_path(workspace: &Value, snapshot: &Value) -> Option<PathBuf> {
@@ -986,17 +1036,43 @@ mod tests {
     }
 
     #[test]
+    fn reads_branches_from_repositories_and_linked_worktrees() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = directory.path().join("repository");
+        let nested = repository.join("src/nested");
+        fs::create_dir_all(repository.join(".git")).unwrap();
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(
+            repository.join(".git/HEAD"),
+            "ref: refs/heads/feature/panel\n",
+        )
+        .unwrap();
+        assert_eq!(workspace_branch(&nested).as_deref(), Some("feature/panel"));
+
+        let worktree = directory.path().join("worktree");
+        let git_dir = directory.path().join("git-data");
+        fs::create_dir_all(&worktree).unwrap();
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::write(worktree.join(".git"), "gitdir: ../git-data\n").unwrap();
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/topic/worktree\n").unwrap();
+        assert_eq!(
+            workspace_branch(&worktree).as_deref(),
+            Some("topic/worktree")
+        );
+    }
+
+    #[test]
     fn persists_groups_and_moves_workspaces_between_them() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("workspace-groups.json");
         let mut panel = WorkspacePanel::new(true, Some(path.clone()));
-        assert_eq!(panel.placement, WorkspacePanelPlacement::Off);
-        panel.cycle_placement();
         assert_eq!(panel.placement, WorkspacePanelPlacement::Left);
         panel.cycle_placement();
         assert_eq!(panel.placement, WorkspacePanelPlacement::Right);
         panel.cycle_placement();
         assert_eq!(panel.placement, WorkspacePanelPlacement::Off);
+        panel.cycle_placement();
+        assert_eq!(panel.placement, WorkspacePanelPlacement::Left);
         let (workspaces, agents) = parse_snapshot(&snapshot()).unwrap();
         panel.workspaces = workspaces;
         panel.agents = agents;

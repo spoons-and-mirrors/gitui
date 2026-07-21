@@ -12,6 +12,9 @@ use super::{
 impl App {
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
         let point = Position::new(mouse.column, mouse.row);
+        if mouse.kind == MouseEventKind::Moved {
+            self.hovered_hit_target = self.regions.hit_target_at(point);
+        }
         if self.dragging_splitter {
             match mouse.kind {
                 MouseEventKind::Drag(MouseButton::Left) => self.resize_worktree(mouse.column),

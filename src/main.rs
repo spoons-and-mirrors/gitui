@@ -79,6 +79,7 @@ fn main() -> Result<()> {
                         app.author_filter.state.selected(),
                         app.repository_browser.state.selected(),
                         app.workspace_panel.selected,
+                        app.hovered_hit_target,
                     );
                     app.handle_mouse(mouse);
                     let changed = !matches!(mouse.kind, event::MouseEventKind::Moved)
@@ -90,6 +91,7 @@ fn main() -> Result<()> {
                                 app.author_filter.state.selected(),
                                 app.repository_browser.state.selected(),
                                 app.workspace_panel.selected,
+                                app.hovered_hit_target,
                             );
                     (changed, false)
                 }

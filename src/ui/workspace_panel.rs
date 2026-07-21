@@ -19,6 +19,7 @@ pub(super) fn draw(
     panel: &mut WorkspacePanel,
     area: Rect,
     focused: bool,
+    create_hovered: bool,
 ) -> Vec<(HitTarget, Rect)> {
     fill(frame, area, palette().surface_alt);
     let mut targets = Vec::new();
@@ -50,7 +51,7 @@ pub(super) fn draw(
         let row_area = Rect::new(body.x, body.y + screen_row as u16, body.width, 1);
         match row {
             WorkspacePanelRow::Header => {
-                let create = draw_workspace_header(frame, row_area, panel.loading);
+                let create = draw_workspace_header(frame, row_area, panel.loading, create_hovered);
                 targets.push((
                     HitTarget::WorkspacePanel(WorkspacePanelHitTarget::CreateWorkspace),
                     create,
@@ -101,6 +102,7 @@ pub(super) fn draw(
                     frame,
                     row_area,
                     &label,
+                    workspace.branch.as_deref(),
                     workspace.status,
                     workspace.focused,
                     selected_row == Some(visual_row) || ungrouped_drop,
@@ -137,6 +139,7 @@ pub(super) fn draw(
                     frame,
                     row_area,
                     &label,
+                    None,
                     agent.status,
                     agent.focused,
                     selected_row == Some(visual_row),
@@ -240,34 +243,58 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, label: &str, count: usize, loa
     );
 }
 
-fn draw_workspace_header(frame: &mut Frame<'_>, area: Rect, loading: bool) -> Rect {
-    let suffix = if loading { "  ↻" } else { "" };
+fn draw_workspace_header(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    loading: bool,
+    create_hovered: bool,
+) -> Rect {
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                "WORKSPACE",
-                Style::default()
-                    .fg(palette().muted)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-            Span::styled(
-                "+",
-                Style::default()
-                    .fg(palette().accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(suffix, Style::default().fg(palette().faint)),
-        ])),
-        area,
+        Paragraph::new("WORKSPACES").style(
+            Style::default()
+                .fg(palette().muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Rect::new(area.x, area.y, 10.min(area.width), 1),
     );
-    Rect::new(area.x.saturating_add(10), area.y, 1, 1)
+    let button_x = area.x.saturating_add(11);
+    let button = Rect::new(
+        button_x,
+        area.y,
+        3.min(area.right().saturating_sub(button_x)),
+        1,
+    );
+    frame.render_widget(
+        Paragraph::new(" + ").style(
+            Style::default()
+                .fg(if create_hovered {
+                    palette().canvas
+                } else {
+                    palette().accent
+                })
+                .bg(if create_hovered {
+                    palette().accent
+                } else {
+                    palette().raised
+                })
+                .add_modifier(Modifier::BOLD),
+        ),
+        button,
+    );
+    if loading && button.right().saturating_add(1) < area.right() {
+        frame.render_widget(
+            Paragraph::new("↻").style(Style::default().fg(palette().faint)),
+            Rect::new(button.right().saturating_add(1), area.y, 1, 1),
+        );
+    }
+    button
 }
 
 fn draw_entry(
     frame: &mut Frame<'_>,
     area: Rect,
     label: &str,
+    branch: Option<&str>,
     status: AgentStatus,
     active: bool,
     selected: bool,
@@ -278,8 +305,19 @@ fn draw_entry(
         _ => "●",
     };
     let available = usize::from(area.width).saturating_sub(4);
-    let label = truncate_width(label, available);
-    let padding = available.saturating_sub(UnicodeWidthStr::width(label.as_str()));
+    let branch = branch
+        .filter(|branch| !branch.is_empty())
+        .map(|branch| truncate_width(branch, available.saturating_sub(5).min(available / 2)));
+    let branch_width = branch
+        .as_deref()
+        .map(UnicodeWidthStr::width)
+        .unwrap_or_default();
+    let label = truncate_width(
+        label,
+        available.saturating_sub(branch_width + usize::from(branch.is_some()) * 2),
+    );
+    let label_width = UnicodeWidthStr::width(label.as_str());
+    let padding = available.saturating_sub(label_width + branch_width);
     let background = selected.then_some(palette().selected);
     let base = background.map_or_else(Style::default, |color| Style::default().bg(color));
     frame.render_widget(Block::default().style(base), area);
@@ -301,7 +339,9 @@ fn draw_entry(
                     base.fg(palette().muted)
                 },
             ),
-            Span::styled(" ".repeat(padding + 1), base),
+            Span::styled(" ".repeat(padding), base),
+            Span::styled(branch.unwrap_or_default(), base.fg(palette().faint)),
+            Span::styled(" ", base),
             Span::styled(status_marker, base.fg(status_color(status))),
         ])),
         area,
