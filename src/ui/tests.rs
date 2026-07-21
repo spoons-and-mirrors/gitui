@@ -1813,11 +1813,13 @@ fn renders_markdown_files_and_toggles_back_to_source() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     run_git(root, &["init", "-b", "main"]);
-    fs::write(
-        root.join("README.md"),
-        "# Markdown Title\n\nA **strong** [link](https://example.com).\n",
-    )
-    .unwrap();
+    let mut markdown = "# Markdown Title\n\nA **strong** [link](https://example.com).\n".to_owned();
+    for section in 1..=40 {
+        markdown.push_str(&format!(
+            "\n## Section {section}\n\nParagraph {section} has enough content to remain visible.\n"
+        ));
+    }
+    fs::write(root.join("README.md"), markdown).unwrap();
 
     let mut app = App::new(root.to_path_buf());
     app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
@@ -1838,7 +1840,6 @@ fn renders_markdown_files_and_toggles_back_to_source() {
         .expect("Markdown files should show a Preview button");
     let source: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
     assert!(source.contains("# Markdown Title"));
-    assert!(source.contains("3 lines"));
 
     app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
     assert!(app.markdown_preview_rendered());
@@ -1854,10 +1855,24 @@ fn renders_markdown_files_and_toggles_back_to_source() {
     assert!(rendered.contains("Markdown Title"));
     assert!(!rendered.contains("# Markdown Title"));
     assert!(rendered.contains("https://"));
-    assert!(rendered.contains("3 lines"));
+    assert!(rendered.contains("    1  Markdown Title"));
 
+    app.changes.diff_scroll = 7;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(app.changes.diff_scroll, 7);
     click(&mut app, preview_button.0, preview_button.1);
     assert!(!app.markdown_preview_rendered());
+    assert_eq!(app.changes.diff_scroll, 0);
+    app.changes.diff_scroll = 40;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(app.changes.diff_scroll, 40);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+    assert!(app.markdown_preview_rendered());
+    assert_eq!(app.changes.diff_scroll, 7);
+    app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+    assert!(!app.markdown_preview_rendered());
+    assert_eq!(app.changes.diff_scroll, 40);
 
     terminal.backend_mut().resize(50, 10);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();

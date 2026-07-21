@@ -2122,10 +2122,7 @@ impl App {
         if !self.markdown_preview_available() {
             return;
         }
-        self.changes.markdown_rendered = !self.changes.markdown_rendered;
-        self.changes.diff_scroll = 0;
-        self.changes.hunk_selection = None;
-        self.changes.preview_presentation.clear();
+        self.changes.toggle_markdown_rendered();
     }
 
     fn set_left_pane(&mut self, pane: LeftPane) {

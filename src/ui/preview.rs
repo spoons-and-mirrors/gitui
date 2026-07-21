@@ -11,6 +11,8 @@ use super::text::{
 };
 
 const MAX_CACHED_PREVIEW_LINES: usize = 30_000;
+const MARKDOWN_LINE_GUTTER_WIDTH: usize = 7;
+const MIN_NUMBERED_MARKDOWN_WIDTH: usize = 12;
 
 pub(crate) struct PreviewInput<'a> {
     pub(crate) content: &'a str,
@@ -75,7 +77,11 @@ impl PreviewPresentation {
         });
         if !cache_matches {
             let (display_count, fully_styled, lines) = if input.markdown {
-                let lines = styled_markdown(input.content, input.width, input.wrapped);
+                let content_width = markdown_content_width(input.width);
+                let lines = numbered_markdown_lines(
+                    styled_markdown(input.content, content_width, input.wrapped),
+                    input.width,
+                );
                 (lines.len(), true, lines)
             } else {
                 let display_count = if input.is_diff {
@@ -319,6 +325,30 @@ fn wrapped_styled_line_starts(lines: &[Line<'static>], width: usize) -> Vec<usiz
     starts
 }
 
+fn markdown_content_width(width: usize) -> usize {
+    if width >= MIN_NUMBERED_MARKDOWN_WIDTH {
+        width.saturating_sub(MARKDOWN_LINE_GUTTER_WIDTH).max(1)
+    } else {
+        width.max(1)
+    }
+}
+
+fn numbered_markdown_lines(mut lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+    if width < MIN_NUMBERED_MARKDOWN_WIDTH {
+        return lines;
+    }
+    for (index, line) in lines.iter_mut().enumerate() {
+        line.spans.insert(
+            0,
+            Span::styled(
+                format!("{:>5}  ", index.saturating_add(1)),
+                Style::default().fg(super::palette().faint),
+            ),
+        );
+    }
+    lines
+}
+
 type StyledGrapheme = (String, Style, usize);
 type WrapToken = (bool, Vec<StyledGrapheme>);
 
@@ -502,24 +532,41 @@ struct WrapGutter {
 
 fn line_gutter(line: &Line<'_>, width: usize, is_diff: bool, markdown: bool) -> WrapGutter {
     if markdown {
-        let Some(prefix) = line
-            .spans
-            .first()
-            .filter(|span| span.style == markdown_prefix_style())
-        else {
-            return WrapGutter::default();
-        };
-        let gutter = UnicodeWidthStr::width(prefix.content.as_ref());
-        if width <= gutter {
-            return WrapGutter::default();
+        let mut gutter = 0;
+        let mut span_count = 0;
+        let mut continuation = Vec::new();
+        if let Some(number) = line.spans.first().filter(|span| {
+            span.content.strip_suffix("  ").is_some_and(|prefix| {
+                prefix.chars().count() >= 5 && prefix.trim().parse::<usize>().is_ok()
+            })
+        }) {
+            gutter = UnicodeWidthStr::width(number.content.as_ref());
+            span_count = 1;
+            continuation.push(Span::raw(" ".repeat(gutter)));
         }
-        return WrapGutter {
-            width: gutter,
-            span_count: 1,
-            continuation: vec![Span::styled(
-                markdown_continuation_prefix(prefix.content.as_ref()),
-                prefix.style,
-            )],
+        if let Some(prefix) = line
+            .spans
+            .get(span_count)
+            .filter(|span| span.style == markdown_prefix_style())
+        {
+            let prefix_width = UnicodeWidthStr::width(prefix.content.as_ref());
+            if width > gutter.saturating_add(prefix_width) {
+                gutter = gutter.saturating_add(prefix_width);
+                span_count += 1;
+                continuation.push(Span::styled(
+                    markdown_continuation_prefix(prefix.content.as_ref()),
+                    prefix.style,
+                ));
+            }
+        }
+        return if width > gutter && gutter > 0 {
+            WrapGutter {
+                width: gutter,
+                span_count,
+                continuation,
+            }
+        } else {
+            WrapGutter::default()
         };
     }
     if !is_diff {
@@ -700,6 +747,39 @@ mod tests {
     }
 
     #[test]
+    fn numbers_markdown_rows_and_leaves_wrapped_continuations_blank() {
+        let lines = numbered_markdown_lines(
+            styled_markdown(
+                "- This list item contains enough words to wrap across rows.\n",
+                markdown_content_width(24),
+                false,
+            ),
+            24,
+        );
+        let wrapped = hard_wrap_lines(lines, 24, 0, 20, false, true)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            wrapped
+                .first()
+                .is_some_and(|line| line.starts_with("    1  * "))
+        );
+        assert!(
+            wrapped[1..]
+                .iter()
+                .all(|line| line.starts_with("         ")),
+            "{wrapped:#?}"
+        );
+    }
+
+    #[test]
     fn wrapped_markdown_uses_hanging_list_and_quote_prefixes() {
         let lines = styled_markdown(
             "- This list item contains enough words to wrap.\n\n> This quote also contains enough words to wrap.\n",
@@ -765,6 +845,20 @@ mod tests {
         let wrapped = prepare(&mut presentation, true);
         assert!(contains_tail(&wrapped));
         assert!(wrapped.rendered_height > unwrapped.rendered_height);
+        assert!(wrapped.lines.iter().all(|line| {
+            line.spans
+                .iter()
+                .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+                .sum::<usize>()
+                <= 30
+        }));
+        assert!(
+            wrapped
+                .lines
+                .first()
+                .and_then(|line| line.spans.first())
+                .is_some_and(|span| span.content.starts_with("    1  "))
+        );
 
         let unwrapped_again = prepare(&mut presentation, false);
         assert!(!contains_tail(&unwrapped_again));

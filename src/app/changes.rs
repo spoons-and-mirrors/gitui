@@ -37,6 +37,7 @@ pub struct ChangesState {
     pub(crate) diff_scroll: usize,
     pub(crate) diff_wrap: bool,
     pub(crate) markdown_rendered: bool,
+    markdown_alternate_scroll: Option<usize>,
     pub(crate) hunk_selection: Option<usize>,
     hunk_pin_pending: bool,
     pending_hunk_selection: Option<PendingHunkSelection>,
@@ -111,6 +112,7 @@ impl ChangesState {
             diff_scroll: 0,
             diff_wrap: false,
             markdown_rendered: false,
+            markdown_alternate_scroll: None,
             hunk_selection: None,
             hunk_pin_pending: false,
             pending_hunk_selection: None,
@@ -619,8 +621,20 @@ impl ChangesState {
         self.diff_wrap
     }
 
+    pub(super) fn toggle_markdown_rendered(&mut self) {
+        let outgoing_scroll = self.diff_scroll;
+        self.diff_scroll = self
+            .markdown_alternate_scroll
+            .replace(outgoing_scroll)
+            .unwrap_or(outgoing_scroll);
+        self.markdown_rendered = !self.markdown_rendered;
+        self.hunk_selection = None;
+        self.preview_presentation.clear();
+    }
+
     pub(super) fn preview_commit(&mut self, repo: &RepositoryData, commit: &Commit) {
         self.diff_scroll = 0;
+        self.markdown_alternate_scroll = None;
         self.hunk_selection = None;
         self.hunk_pin_pending = false;
         self.pending_hunk_selection = None;
@@ -844,6 +858,7 @@ impl ChangesState {
     }
 
     pub(super) fn refresh_diff(&mut self, repo: Option<&RepositoryData>) {
+        self.markdown_alternate_scroll = None;
         let preserve_hunk = self.pending_hunk_selection.as_ref().is_some_and(|pending| {
             repo.and_then(|repo| {
                 self.selected_change_index(repo)
@@ -1233,5 +1248,27 @@ mod tests {
             ["src", "app", "main.rs", "README.md"]
         );
         assert_eq!(state.explorer_rows()[1].directory_expanded, Some(false));
+    }
+
+    #[test]
+    fn remembers_independent_markdown_source_and_preview_scrolls() {
+        let mut state = ChangesState::new(None);
+        state.diff_scroll = 80;
+
+        state.toggle_markdown_rendered();
+        assert!(state.markdown_rendered);
+        assert_eq!(state.diff_scroll, 80);
+
+        state.diff_scroll = 12;
+        state.toggle_markdown_rendered();
+        assert!(!state.markdown_rendered);
+        assert_eq!(state.diff_scroll, 80);
+        state.toggle_markdown_rendered();
+        assert_eq!(state.diff_scroll, 12);
+
+        state.refresh_diff(None);
+        state.diff_scroll = 5;
+        state.toggle_markdown_rendered();
+        assert_eq!(state.diff_scroll, 5);
     }
 }
