@@ -8,9 +8,9 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
-    ACTION_ITEMS, ActionsState, BrowserTab, CommandStatus, Explorer, FileDialog, FileDialogKind,
-    FileNameAction, FileSearch, HitTarget, PickerAction, PickerEntry, PullRequest, RemoteItems,
-    RepositoryBrowser, RepositoryBrowserHitTarget, Settings,
+    ACTION_ITEMS, ActionsState, BranchDeleteDialog, BrowserTab, CommandStatus, Explorer,
+    FileDialog, FileDialogKind, FileNameAction, FileSearch, HitTarget, PickerAction, PickerEntry,
+    PullRequest, RemoteItems, RepositoryBrowser, RepositoryBrowserHitTarget, Settings,
 };
 
 use super::{fill, palette, truncate_width};
@@ -288,7 +288,7 @@ pub(super) fn draw_repository_browser(
     }
 
     let footer = if browser.tab == BrowserTab::Branches {
-        "Enter open in Graph   ←→ / Tab switch   ↑↓ select   type to filter   Esc close"
+        "Enter open   Del delete   ←→ / Tab switch   ↑↓ select   type filter   Esc close"
     } else {
         "←→ / Tab switch   ↑↓ select   type to filter   Esc close"
     };
@@ -300,6 +300,87 @@ pub(super) fn draw_repository_browser(
     );
 
     hit_targets
+}
+
+pub(super) fn draw_branch_delete_dialog(frame: &mut Frame<'_>, dialog: &BranchDeleteDialog) {
+    let area = centered_min(frame.area(), 66, 0, 54, 13);
+    frame.render_widget(Clear, area);
+    fill(frame, area, palette().panel);
+    fill(
+        frame,
+        Rect::new(area.x, area.y, area.width, 3),
+        palette().surface_alt,
+    );
+    let inner = area.inner(ratatui::layout::Margin::new(2, 1));
+    frame.render_widget(
+        Paragraph::new("DELETE BRANCH").style(
+            Style::default()
+                .fg(palette().red)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Rect::new(inner.x, area.y.saturating_add(1), inner.width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new(format!("Delete local branch {}?", dialog.branch))
+            .style(Style::default().fg(palette().ink)),
+        Rect::new(inner.x, area.y.saturating_add(4), inner.width, 1),
+    );
+    let detail = dialog.remote.as_ref().map_or_else(
+        || "This branch has no tracked remote branch.".to_owned(),
+        |(remote, branch)| format!("Choose whether to keep or delete {remote}/{branch}."),
+    );
+    frame.render_widget(
+        Paragraph::new(detail).style(Style::default().fg(palette().muted)),
+        Rect::new(inner.x, area.y.saturating_add(6), inner.width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new("Force permanently discards unmerged work.")
+            .style(Style::default().fg(palette().red)),
+        Rect::new(inner.x, area.y.saturating_add(7), inner.width, 1),
+    );
+
+    let labels = dialog.remote.as_ref().map_or_else(
+        || vec!["Local only".to_owned(), "Force local".to_owned()],
+        |(remote, _)| {
+            vec![
+                "Local only".to_owned(),
+                format!("Local + {remote}"),
+                format!("Force + {remote}"),
+            ]
+        },
+    );
+    let gaps = labels.len().saturating_sub(1) as u16;
+    let button_width = 18_u16.min(inner.width.saturating_sub(gaps) / labels.len() as u16);
+    let total_width = button_width
+        .saturating_mul(labels.len() as u16)
+        .saturating_add(gaps);
+    let start_x = inner.right().saturating_sub(total_width);
+    for (index, label) in labels.into_iter().enumerate() {
+        let button = Rect::new(
+            start_x.saturating_add(index as u16 * button_width.saturating_add(1)),
+            area.y.saturating_add(9),
+            button_width,
+            1,
+        );
+        frame.render_widget(
+            Paragraph::new(label).alignment(Alignment::Center).style(
+                Style::default()
+                    .fg(palette().red)
+                    .bg(if dialog.choice == index {
+                        palette().selected
+                    } else {
+                        palette().raised
+                    }),
+            ),
+            button,
+        );
+    }
+    frame.render_widget(
+        Paragraph::new("←/→ choose   Enter confirm   Esc cancel")
+            .alignment(Alignment::Right)
+            .style(Style::default().fg(palette().muted)),
+        Rect::new(inner.x, area.bottom().saturating_sub(1), inner.width, 1),
+    );
 }
 
 fn remote_tab_label<T>(label: &str, items: &RemoteItems<T>) -> String {

@@ -50,6 +50,7 @@ hunkle opens exactly the current or requested directory. When that directory is 
 | `r` | Refresh |
 | `o` | Open Explorer |
 | `b` | Browse branches, pull requests, and issues |
+| `Delete` in Branches | Delete a local branch, optionally including its tracked remote branch or forcing deletion of unmerged work |
 | `w` | Cycle the Herdr Workspaces and Agents rail through left, right, and off |
 | `s` | Open settings |
 | `x` | Open repository Actions |
@@ -59,7 +60,7 @@ hunkle opens exactly the current or requested directory. When that directory is 
 
 In Explorer, start typing a folder name, press `p` to search from an empty field, or `/` to start an absolute path. Search accepts fuzzy directory names, relative paths, absolute paths, and `~/...`; `Tab` accepts the best completion and `Enter` opens a repository or navigates into a directory. hunkle indexes directories under your home folder and common workspace mounts in the background.
 
-When hunkle runs inside Herdr, it can show a Workspaces and Agents rail backed by Herdr's session snapshot. Use `j`/`k` and `Enter` to switch, or `Esc` to return to hunkle. The rail refreshes in the background and hides automatically on narrow terminals or outside Herdr.
+When hunkle runs inside Herdr, it can show a Workspaces and Agents rail backed by Herdr's session snapshot. Single-click a workspace to open its directory in hunkle; a repository that has not fetched successfully in the last five minutes is fetched in the background. Use `j`/`k` and `Enter` to switch the active Herdr workspace, or `Esc` to return to hunkle. The rail refreshes in the background and hides automatically on narrow terminals or outside Herdr.
 
 The rail starts hidden. Press `w` to cycle it through the left side, right side, and off. Inside the rail, press `g` to create a group. Click groups to fold or expand them, and drag workspaces onto a group or back into ungrouped space. A single workspace or agent click only selects it; press `Enter` or double-click to switch.
 

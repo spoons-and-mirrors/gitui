@@ -19,7 +19,8 @@ pub use explorer::{Explorer, PickerAction, PickerEntry};
 pub(crate) use file_search::FileSearch;
 pub(crate) use files::{FileDialog, FileDialogKind, FileDrag, FileNameAction};
 pub(crate) use repository_browser::{
-    BrowserTab, PullRequest, RemoteItems, RepositoryBrowser, RepositoryBrowserEffect,
+    BranchDeleteDialog, BrowserTab, PullRequest, RemoteItems, RepositoryBrowser,
+    RepositoryBrowserEffect,
 };
 pub(crate) use workspace_panel::{
     AgentStatus, WorkspaceDropTarget, WorkspacePanel, WorkspacePanelEffect,
@@ -27,10 +28,13 @@ pub(crate) use workspace_panel::{
 };
 
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
+
+const WORKSPACE_FETCH_FRESHNESS: Duration = Duration::from_secs(5 * 60);
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -257,6 +261,8 @@ pub struct App {
     pub(crate) file_dialog: Option<FileDialog>,
     file_drag: Option<FileDrag>,
     pending_file_selection: Option<String>,
+    recent_fetches: HashMap<PathBuf, Instant>,
+    workspace_fetch_pending: bool,
 }
 
 pub(crate) struct EditorRequest {
@@ -369,6 +375,8 @@ impl App {
             file_dialog: None,
             file_drag: None,
             pending_file_selection: None,
+            recent_fetches: HashMap::new(),
+            workspace_fetch_pending: false,
         };
         app.restore_commit_draft();
         app.show_graph_if_diff_empty();
@@ -566,6 +574,9 @@ impl App {
                 },
                 WorkerCompletion::Fetch(result) => match result {
                     Ok(output) if output.success => {
+                        if let Some(root) = self.session.data().map(|repo| repo.root.clone()) {
+                            self.recent_fetches.insert(root, Instant::now());
+                        }
                         self.reload(RefreshScope::HISTORY_AND_REFS);
                         self.notice = Some("Fetched remotes".to_owned());
                     }
@@ -624,6 +635,36 @@ impl App {
                     }
                     Err(error) => self.notice = Some(error),
                 },
+                WorkerCompletion::BranchDelete(done) => {
+                    self.reload(RefreshScope::HISTORY_AND_REFS);
+                    self.notice = Some(match done.result {
+                        Ok(()) => done.remote.map_or_else(
+                            || {
+                                format!(
+                                    "{} local branch {}",
+                                    if done.force {
+                                        "Force deleted"
+                                    } else {
+                                        "Deleted"
+                                    },
+                                    done.branch
+                                )
+                            },
+                            |(remote, remote_branch)| {
+                                format!(
+                                    "{} {} locally and {remote}/{remote_branch}",
+                                    if done.force {
+                                        "Force deleted"
+                                    } else {
+                                        "Deleted"
+                                    },
+                                    done.branch
+                                )
+                            },
+                        ),
+                        Err(error) => error,
+                    });
+                }
             }
         }
         while self.session.next_worktree_change() {
@@ -674,6 +715,7 @@ impl App {
                     self.prefetch_repository_browser();
                 }
                 (LoadKind::Open, Err(error)) => {
+                    self.workspace_fetch_pending = false;
                     let message = format!("Could not open workspace: {error}");
                     self.notice = Some(message.clone());
                     self.workspace_explorer.error = Some(message);
@@ -703,6 +745,9 @@ impl App {
                     if let Some(repo) = self.session.data() {
                         self.file_search
                             .reindex(&repo.files, Some(repo.files_fingerprint));
+                        if self.mode == Mode::RepositoryBrowser {
+                            self.repository_browser.sync_branches(&repo.branches);
+                        }
                     }
                     self.show_graph_if_diff_empty();
                     self.prefetch_repository_browser();
@@ -720,6 +765,7 @@ impl App {
                 }
             }
         }
+        self.maybe_start_workspace_fetch();
         changed |= self
             .changes
             .poll_preview(self.session.data().map(|repo| repo.root.as_path()));
@@ -1279,6 +1325,22 @@ impl App {
         match effect {
             RepositoryBrowserEffect::Close => self.mode = Mode::Normal,
             RepositoryBrowserEffect::OpenBranch(oid) => self.open_browser_branch(&oid),
+            RepositoryBrowserEffect::DeleteBranch {
+                branch,
+                remote,
+                force,
+            } => {
+                if self.session.start_branch_delete(branch, remote, force) {
+                    self.notice = Some(if force {
+                        "Force deleting branch…".to_owned()
+                    } else {
+                        "Deleting branch…".to_owned()
+                    });
+                } else {
+                    self.notice = Some("Another repository operation is running".to_owned());
+                }
+            }
+            RepositoryBrowserEffect::Notice(notice) => self.notice = Some(notice),
         }
     }
 
@@ -1453,10 +1515,18 @@ impl App {
     }
 
     fn handle_workspace_panel(&mut self, key: KeyEvent) {
-        match self.workspace_panel.handle_key(key) {
+        let effect = self.workspace_panel.handle_key(key);
+        self.apply_workspace_panel_effect(effect);
+    }
+
+    pub(crate) fn apply_workspace_panel_effect(&mut self, effect: WorkspacePanelEffect) {
+        match effect {
             WorkspacePanelEffect::None => {}
             WorkspacePanelEffect::Close => self.mode = Mode::Normal,
             WorkspacePanelEffect::Cycle => self.cycle_workspace_panel(),
+            WorkspacePanelEffect::OpenWorkspace(path) => {
+                self.open_repository_with_fetch(path);
+            }
             WorkspacePanelEffect::Notice(notice) => self.notice = Some(notice),
         }
     }
@@ -1531,11 +1601,28 @@ impl App {
     }
 
     fn open_repository(&mut self, path: PathBuf) {
+        self.start_repository_open(path, false);
+    }
+
+    fn open_repository_with_fetch(&mut self, path: PathBuf) {
+        if self
+            .repository()
+            .is_some_and(|repository| repository.root == path)
+        {
+            self.workspace_fetch_pending = true;
+            self.maybe_start_workspace_fetch();
+            return;
+        }
+        self.start_repository_open(path, true);
+    }
+
+    fn start_repository_open(&mut self, path: PathBuf, fetch_if_stale: bool) {
         self.flush_commit_draft();
         if self
             .session
             .start_open(path, fetch_interval(&self.settings))
         {
+            self.workspace_fetch_pending = fetch_if_stale;
             self.workspace_explorer.error = None;
             self.notice = Some("Opening workspace…".to_owned());
         } else if self.session.open_running() {
@@ -1543,6 +1630,27 @@ impl App {
         } else {
             self.workspace_explorer.error =
                 Some("Another workspace operation is running".to_owned());
+        }
+    }
+
+    fn maybe_start_workspace_fetch(&mut self) {
+        if !self.workspace_fetch_pending {
+            return;
+        }
+        let Some(repository) = self.session.data() else {
+            return;
+        };
+        if repository.is_local() {
+            self.workspace_fetch_pending = false;
+            return;
+        }
+        let root = repository.root.clone();
+        if fetch_is_fresh(self.recent_fetches.get(&root), Instant::now()) {
+            self.workspace_fetch_pending = false;
+            return;
+        }
+        if self.session.start_fetch(fetch_interval(&self.settings)) {
+            self.workspace_fetch_pending = false;
         }
     }
 
@@ -1893,6 +2001,12 @@ impl App {
 
 fn fetch_interval(settings: &Settings) -> Duration {
     Duration::from_secs(u64::from(settings.fetch_interval_minutes) * 60)
+}
+
+fn fetch_is_fresh(fetched_at: Option<&Instant>, now: Instant) -> bool {
+    fetched_at.is_some_and(|fetched_at| {
+        now.saturating_duration_since(*fetched_at) < WORKSPACE_FETCH_FRESHNESS
+    })
 }
 
 fn settings_path() -> Option<PathBuf> {
@@ -2373,6 +2487,20 @@ mod tests {
         }
         assert!(!app.fetch_running());
         assert_eq!(app.notice.as_deref(), Some("Fetched remotes"));
+    }
+
+    #[test]
+    fn workspace_fetches_expire_after_five_minutes() {
+        let now = Instant::now();
+        assert!(!fetch_is_fresh(None, now));
+        assert!(fetch_is_fresh(
+            Some(&(now - Duration::from_secs(5 * 60 - 1))),
+            now
+        ));
+        assert!(!fetch_is_fresh(
+            Some(&(now - Duration::from_secs(5 * 60))),
+            now
+        ));
     }
 
     #[test]

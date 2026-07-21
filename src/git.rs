@@ -218,6 +218,37 @@ pub fn discover(path: &Path) -> Result<PathBuf> {
     Ok(root)
 }
 
+pub(crate) fn delete_branch(
+    root: &Path,
+    branch: &str,
+    remote: Option<(&str, &str)>,
+    force: bool,
+) -> Result<()> {
+    let mut args = vec!["branch", "--delete"];
+    if force {
+        args.push("--force");
+    }
+    args.extend(["--", branch]);
+    run_ok(root, &args)?;
+    if let Some((remote, remote_branch)) = remote {
+        let refspec = format!(":refs/heads/{remote_branch}");
+        let output = base_command(root)
+            .arg("push")
+            .arg("--")
+            .arg(remote)
+            .arg(&refspec)
+            .output()
+            .with_context(|| format!("could not delete {remote}/{remote_branch}"))?;
+        if !output.status.success() {
+            bail!(
+                "Deleted local branch {branch}, but could not delete {remote}/{remote_branch}: {}",
+                clean_stderr(&output)
+            );
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 pub fn load(path: &Path) -> Result<RepositoryData> {
     load_git_root(discover(path)?)
@@ -2078,6 +2109,50 @@ mod tests {
             changes
                 .iter()
                 .any(|change| change.path == "split.txt" && !change.staged)
+        );
+    }
+
+    #[test]
+    fn deletes_a_local_branch_and_its_remote_ref() {
+        let directory = tempfile::tempdir().unwrap();
+        let remote = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "-b", "main"]);
+        git(root, &["config", "user.name", "Test Author"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        fs::write(root.join("tracked.txt"), "tracked\n").unwrap();
+        git(root, &["add", "tracked.txt"]);
+        git(root, &["commit", "-m", "initial"]);
+        git(root, &["branch", "cleanup"]);
+        git(root, &["switch", "cleanup"]);
+        fs::write(root.join("trash.txt"), "unmerged\n").unwrap();
+        git(root, &["add", "trash.txt"]);
+        git(root, &["commit", "-m", "unmerged cleanup work"]);
+        git(root, &["switch", "main"]);
+        git(remote.path(), &["init", "--bare"]);
+        git(
+            root,
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        git(root, &["push", "origin", "cleanup"]);
+
+        assert!(delete_branch(root, "cleanup", Some(("origin", "cleanup")), false).is_err());
+        delete_branch(root, "cleanup", Some(("origin", "cleanup")), true).unwrap();
+
+        assert!(
+            !run(root, &["show-ref", "--verify", "refs/heads/cleanup"])
+                .unwrap()
+                .status
+                .success()
+        );
+        assert!(
+            !run(
+                remote.path(),
+                &["show-ref", "--verify", "refs/heads/cleanup"]
+            )
+            .unwrap()
+            .status
+            .success()
         );
     }
 

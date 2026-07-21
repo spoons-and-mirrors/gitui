@@ -5,8 +5,7 @@ use crate::{git::RefreshScope, selection::SelectionOutcome};
 
 use super::{
     ACTION_ITEMS, App, GraphHitTarget, HitTarget, LeftPane, Mode, RepositoryBrowserEffect,
-    RepositoryBrowserHitTarget, View, WorkspaceDropTarget, WorkspacePanelEffect,
-    WorkspacePanelHitTarget, scroll_table,
+    RepositoryBrowserHitTarget, View, WorkspaceDropTarget, WorkspacePanelHitTarget, scroll_table,
 };
 
 impl App {
@@ -55,11 +54,8 @@ impl App {
                     self.workspace_panel.update_workspace_drag(target);
                 }
                 MouseEventKind::Up(MouseButton::Left) => {
-                    if let WorkspacePanelEffect::Notice(notice) =
-                        self.workspace_panel.finish_workspace_drag()
-                    {
-                        self.notice = Some(notice);
-                    }
+                    let effect = self.workspace_panel.finish_workspace_drag();
+                    self.apply_workspace_panel_effect(effect);
                 }
                 _ => {}
             }
@@ -467,7 +463,8 @@ impl App {
             }
             WorkspacePanelHitTarget::Group(index) => self.workspace_panel.toggle_group(index),
             WorkspacePanelHitTarget::Workspace(index) => {
-                self.workspace_panel.click_workspace(index);
+                let effect = self.workspace_panel.click_workspace(index);
+                self.apply_workspace_panel_effect(effect);
             }
             WorkspacePanelHitTarget::Agent(index) => {
                 self.workspace_panel.click_agent(index);
@@ -570,6 +567,9 @@ impl App {
     }
 
     fn handle_repository_browser_mouse(&mut self, mouse: MouseEvent) {
+        if self.repository_browser.branch_delete_open() {
+            return;
+        }
         let point = Position::new(mouse.column, mouse.row);
         match mouse.kind {
             MouseEventKind::ScrollDown => self.repository_browser.move_selection(1),

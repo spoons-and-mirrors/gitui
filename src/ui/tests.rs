@@ -897,6 +897,22 @@ fn renders_every_primary_surface() {
         terminal.backend().buffer()[(list.x + 4, list.y + 1)].bg,
         super::palette().selected
     );
+    app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+    assert!(app.repository_browser.branch_delete_open());
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let delete_screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(delete_screen.contains("DELETE BRANCH"));
+    assert!(delete_screen.contains("Delete local branch test/hover-target?"));
+    assert!(delete_screen.contains("Local only"));
+    assert!(delete_screen.contains("Force local"));
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(!app.repository_browser.branch_delete_open());
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(app.mode, Mode::Normal);
     assert_eq!(app.view, View::Graph);

@@ -25,6 +25,14 @@ pub(crate) enum WorkerCompletion {
     Mutation(Result<(), String>),
     FileOperation(FileOperationCompletion),
     Format(FormatCompletion),
+    BranchDelete(BranchDeleteCompletion),
+}
+
+pub(crate) struct BranchDeleteCompletion {
+    pub(crate) branch: String,
+    pub(crate) remote: Option<(String, String)>,
+    pub(crate) force: bool,
+    pub(crate) result: Result<(), String>,
 }
 
 pub(crate) enum Mutation {
@@ -104,6 +112,11 @@ enum WorkerKind {
     Format {
         path: String,
         formatter: &'static str,
+    },
+    BranchDelete {
+        branch: String,
+        remote: Option<(String, String)>,
+        force: bool,
     },
 }
 
@@ -467,6 +480,48 @@ impl RepositorySession {
         true
     }
 
+    pub(crate) fn start_branch_delete(
+        &mut self,
+        branch: String,
+        remote: Option<(String, String)>,
+        force: bool,
+    ) -> bool {
+        if !self.operations.can_start(Operation::Mutation) {
+            return false;
+        }
+        let Some(root) = self.git_root() else {
+            return false;
+        };
+
+        self.operations.start(Operation::Mutation);
+        let sender = self.worker_tx.clone();
+        let worker_branch = branch.clone();
+        let worker_remote = remote.clone();
+        thread::spawn(move || {
+            let remote_ref = worker_remote
+                .as_ref()
+                .map(|(remote, branch)| (remote.as_str(), branch.as_str()));
+            let result = git::delete_branch(&root, &worker_branch, remote_ref, force)
+                .map(|()| CommandOutput {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    success: true,
+                    exit_code: Some(0),
+                })
+                .map_err(|error| error.to_string());
+            let _ = sender.send(WorkerResult {
+                kind: WorkerKind::BranchDelete {
+                    branch,
+                    remote,
+                    force,
+                },
+                root,
+                result,
+            });
+        });
+        true
+    }
+
     pub(crate) fn start_format(&mut self, path: String, command: FormatCommand) -> bool {
         if !self.operations.can_start(Operation::Format) {
             return false;
@@ -490,14 +545,18 @@ impl RepositorySession {
     }
 
     pub(crate) fn maybe_start_fetch(&mut self, enabled: bool, fetch_interval: Duration) {
-        if !enabled
-            || !self.operations.can_start(Operation::Fetch)
-            || Instant::now() < self.next_fetch_at
-        {
+        if !enabled || Instant::now() < self.next_fetch_at {
             return;
         }
+        self.start_fetch(fetch_interval);
+    }
+
+    pub(crate) fn start_fetch(&mut self, fetch_interval: Duration) -> bool {
+        if !self.operations.can_start(Operation::Fetch) {
+            return false;
+        }
         let Some(root) = self.git_root() else {
-            return;
+            return false;
         };
 
         self.operations.start(Operation::Fetch);
@@ -511,6 +570,7 @@ impl RepositorySession {
                 result,
             });
         });
+        true
     }
 
     pub(crate) fn maybe_start_status_check(&mut self) {
@@ -592,6 +652,21 @@ impl RepositorySession {
                             path,
                             formatter,
                             result: done.result,
+                        }));
+                    }
+                }
+                WorkerKind::BranchDelete {
+                    branch,
+                    remote,
+                    force,
+                } => {
+                    self.operations.finish(Operation::Mutation);
+                    if active {
+                        return Some(WorkerCompletion::BranchDelete(BranchDeleteCompletion {
+                            branch,
+                            remote,
+                            force,
+                            result: done.result.map(|_| ()),
                         }));
                     }
                 }

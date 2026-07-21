@@ -167,6 +167,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             {
                 app.regions.register_hit_target(target, rect);
             }
+            if let Some(dialog) = &app.repository_browser.branch_delete {
+                dim(frame);
+                overlays::draw_branch_delete_dialog(frame, dialog);
+            }
         }
         Mode::AuthorFilter => {
             let anchor = app

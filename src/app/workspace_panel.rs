@@ -47,6 +47,7 @@ impl AgentStatus {
 pub(crate) struct HerdrWorkspace {
     pub(crate) id: String,
     pub(crate) label: String,
+    pub(crate) path: Option<PathBuf>,
     pub(crate) pane_count: usize,
     pub(crate) focused: bool,
     pub(crate) status: AgentStatus,
@@ -411,15 +412,21 @@ impl WorkspacePanel {
         true
     }
 
-    pub(crate) fn click_workspace(&mut self, index: usize) {
+    pub(crate) fn click_workspace(&mut self, index: usize) -> WorkspacePanelEffect {
         if !self.select_workspace(index) {
-            return;
+            return WorkspacePanelEffect::None;
         }
         let key = SelectionKey::Workspace(self.workspaces[index].id.clone());
         if self.is_double_click(&key) {
             self.focus_selected();
+            self.last_click = Some((key, Instant::now()));
+            return WorkspacePanelEffect::None;
         }
         self.last_click = Some((key, Instant::now()));
+        self.workspaces[index].path.clone().map_or_else(
+            || WorkspacePanelEffect::Notice("Workspace has no directory to open".to_owned()),
+            WorkspacePanelEffect::OpenWorkspace,
+        )
     }
 
     pub(crate) fn click_agent(&mut self, index: usize) {
@@ -487,8 +494,7 @@ impl WorkspacePanel {
             return WorkspacePanelEffect::None;
         };
         if !drag.active {
-            self.click_workspace(drag.workspace);
-            return WorkspacePanelEffect::None;
+            return self.click_workspace(drag.workspace);
         }
         let Some(target) = drag.target else {
             return WorkspacePanelEffect::None;
@@ -694,6 +700,7 @@ pub(crate) enum WorkspacePanelEffect {
     None,
     Close,
     Cycle,
+    OpenWorkspace(PathBuf),
     Notice(String),
 }
 
@@ -769,7 +776,7 @@ fn parse_snapshot(value: &Value) -> Result<(Vec<HerdrWorkspace>, Vec<HerdrAgent>
         .and_then(Value::as_array)
         .ok_or_else(|| "Herdr snapshot has no workspaces".to_owned())?
         .iter()
-        .filter_map(parse_workspace)
+        .filter_map(|workspace| parse_workspace(workspace, snapshot))
         .collect();
     let agents = snapshot
         .get("agents")
@@ -781,10 +788,11 @@ fn parse_snapshot(value: &Value) -> Result<(Vec<HerdrWorkspace>, Vec<HerdrAgent>
     Ok((workspaces, agents))
 }
 
-fn parse_workspace(value: &Value) -> Option<HerdrWorkspace> {
+fn parse_workspace(value: &Value, snapshot: &Value) -> Option<HerdrWorkspace> {
     Some(HerdrWorkspace {
         id: value.get("workspace_id")?.as_str()?.to_owned(),
         label: value.get("label")?.as_str()?.to_owned(),
+        path: workspace_path(value, snapshot),
         pane_count: value.get("pane_count").and_then(Value::as_u64).unwrap_or(0) as usize,
         focused: value
             .get("focused")
@@ -792,6 +800,52 @@ fn parse_workspace(value: &Value) -> Option<HerdrWorkspace> {
             .unwrap_or(false),
         status: AgentStatus::parse(value.get("agent_status").and_then(Value::as_str)),
     })
+}
+
+fn workspace_path(workspace: &Value, snapshot: &Value) -> Option<PathBuf> {
+    if let Some(path) = workspace
+        .get("worktree")
+        .and_then(|worktree| worktree.get("checkout_path"))
+        .and_then(Value::as_str)
+    {
+        return Some(PathBuf::from(path));
+    }
+
+    let workspace_id = workspace.get("workspace_id")?.as_str()?;
+    let active_tab_id = workspace.get("active_tab_id").and_then(Value::as_str);
+    let panes = snapshot.get("panes").and_then(Value::as_array)?;
+    let focused_pane_id = snapshot
+        .get("layouts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|layout| {
+            layout.get("workspace_id").and_then(Value::as_str) == Some(workspace_id)
+                && layout.get("tab_id").and_then(Value::as_str) == active_tab_id
+        })
+        .and_then(|layout| layout.get("focused_pane_id"))
+        .and_then(Value::as_str);
+    let workspace_panes = || {
+        panes
+            .iter()
+            .filter(|pane| pane.get("workspace_id").and_then(Value::as_str) == Some(workspace_id))
+    };
+    let pane = focused_pane_id
+        .and_then(|focused| {
+            workspace_panes()
+                .find(|pane| pane.get("pane_id").and_then(Value::as_str) == Some(focused))
+        })
+        .or_else(|| {
+            active_tab_id.and_then(|active_tab| {
+                workspace_panes()
+                    .find(|pane| pane.get("tab_id").and_then(Value::as_str) == Some(active_tab))
+            })
+        })
+        .or_else(|| workspace_panes().next())?;
+    pane.get("foreground_cwd")
+        .and_then(Value::as_str)
+        .or_else(|| pane.get("cwd").and_then(Value::as_str))
+        .map(PathBuf::from)
 }
 
 fn parse_agent(value: &Value) -> Option<HerdrAgent> {
@@ -820,6 +874,7 @@ mod tests {
                         {
                             "workspace_id": "w1",
                             "label": "HUNKLE",
+                            "active_tab_id": "w1:t1",
                             "number": 2,
                             "pane_count": 2,
                             "focused": true,
@@ -841,6 +896,18 @@ mod tests {
                         "pane_id": "w1:p1",
                         "tab_id": "w1:t1",
                         "workspace_id": "w1"
+                    }],
+                    "panes": [{
+                        "pane_id": "w1:p1",
+                        "tab_id": "w1:t1",
+                        "workspace_id": "w1",
+                        "cwd": "/home/spoon/code/gitui",
+                        "foreground_cwd": "/home/spoon/code/gitui"
+                    }],
+                    "layouts": [{
+                        "workspace_id": "w1",
+                        "tab_id": "w1:t1",
+                        "focused_pane_id": "w1:p1"
                     }]
                 }
             }
@@ -853,6 +920,18 @@ mod tests {
         assert_eq!(panel.workspaces.len(), 2);
         assert_eq!(panel.agents.len(), 1);
         assert_eq!(panel.workspaces[0].status, AgentStatus::Working);
+        assert_eq!(
+            panel.workspaces[0].path.as_deref(),
+            Some(Path::new("/home/spoon/code/gitui"))
+        );
+        let mut worktree_snapshot = snapshot();
+        worktree_snapshot["result"]["snapshot"]["workspaces"][0]["worktree"] =
+            serde_json::json!({ "checkout_path": "/tmp/hunkle-worktree" });
+        let (workspaces, _) = parse_snapshot(&worktree_snapshot).unwrap();
+        assert_eq!(
+            workspaces[0].path.as_deref(),
+            Some(Path::new("/tmp/hunkle-worktree"))
+        );
         assert_eq!(panel.agents[0].status, AgentStatus::Blocked);
         assert_eq!(panel.selected, Some(0));
         assert_eq!(panel.selected_visual_row(), Some(1));
@@ -862,6 +941,11 @@ mod tests {
         assert_eq!(panel.selected_visual_row(), Some(5));
         panel.move_selection(1);
         assert_eq!(panel.selected, Some(2));
+
+        assert_eq!(
+            panel.click_workspace(0),
+            WorkspacePanelEffect::OpenWorkspace(PathBuf::from("/home/spoon/code/gitui"))
+        );
     }
 
     #[test]

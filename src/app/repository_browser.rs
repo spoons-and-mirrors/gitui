@@ -26,6 +26,19 @@ pub(crate) enum BrowserTab {
 pub(crate) enum RepositoryBrowserEffect {
     Close,
     OpenBranch(String),
+    DeleteBranch {
+        branch: String,
+        remote: Option<(String, String)>,
+        force: bool,
+    },
+    Notice(String),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct BranchDeleteDialog {
+    pub(crate) branch: String,
+    pub(crate) remote: Option<(String, String)>,
+    pub(crate) choice: usize,
 }
 
 impl BrowserTab {
@@ -167,6 +180,7 @@ pub(crate) struct RepositoryBrowser {
     pub(crate) branches: Vec<Branch>,
     pub(crate) pull_requests: RemoteItems<PullRequest>,
     pub(crate) issues: RemoteItems<Issue>,
+    pub(crate) branch_delete: Option<BranchDeleteDialog>,
     root: Option<PathBuf>,
     cache: HashMap<PathBuf, RemoteCache>,
     generation: u64,
@@ -184,6 +198,7 @@ impl Default for RepositoryBrowser {
             branches: Vec::new(),
             pull_requests: RemoteItems::default(),
             issues: RemoteItems::default(),
+            branch_delete: None,
             root: None,
             cache: HashMap::new(),
             generation: 0,
@@ -198,6 +213,7 @@ impl RepositoryBrowser {
         self.tab = BrowserTab::Branches;
         self.query.clear();
         self.branches = branches.to_vec();
+        self.branch_delete = None;
         self.select_first();
         self.activate_root(root);
         if prefetch {
@@ -264,6 +280,9 @@ impl RepositoryBrowser {
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Option<RepositoryBrowserEffect> {
+        if self.branch_delete.is_some() {
+            return self.handle_branch_delete_key(key);
+        }
         match key.code {
             KeyCode::Esc => Some(RepositoryBrowserEffect::Close),
             KeyCode::Enter => self.activate_selected(),
@@ -295,6 +314,7 @@ impl RepositoryBrowser {
                 self.backspace();
                 None
             }
+            KeyCode::Delete if key.modifiers.is_empty() => self.begin_branch_delete(),
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.clear();
                 None
@@ -309,6 +329,80 @@ impl RepositoryBrowser {
             }
             _ => None,
         }
+    }
+
+    fn begin_branch_delete(&mut self) -> Option<RepositoryBrowserEffect> {
+        let branch = self.selected_branch().cloned()?;
+        if branch.remote {
+            return Some(RepositoryBrowserEffect::Notice(
+                "Select a local branch to delete".to_owned(),
+            ));
+        }
+        if branch.current {
+            return Some(RepositoryBrowserEffect::Notice(
+                "Cannot delete the checked-out branch".to_owned(),
+            ));
+        }
+        let remote = branch
+            .upstream
+            .split_once('/')
+            .map(|(remote, branch)| (remote.to_owned(), branch.to_owned()))
+            .or_else(|| {
+                let remote_name = format!("origin/{}", branch.name);
+                self.branches
+                    .iter()
+                    .any(|candidate| candidate.remote && candidate.name == remote_name)
+                    .then(|| ("origin".to_owned(), branch.name.clone()))
+            });
+        self.branch_delete = Some(BranchDeleteDialog {
+            branch: branch.name,
+            remote,
+            choice: 0,
+        });
+        None
+    }
+
+    fn handle_branch_delete_key(&mut self, key: KeyEvent) -> Option<RepositoryBrowserEffect> {
+        let dialog = self.branch_delete.as_mut()?;
+        match key.code {
+            KeyCode::Esc => {
+                self.branch_delete = None;
+                None
+            }
+            KeyCode::Left | KeyCode::Up | KeyCode::BackTab => {
+                dialog.choice = dialog.choice.saturating_sub(1);
+                None
+            }
+            KeyCode::Right | KeyCode::Down | KeyCode::Tab => {
+                let last_choice = if dialog.remote.is_some() { 2 } else { 1 };
+                dialog.choice = dialog.choice.saturating_add(1).min(last_choice);
+                None
+            }
+            KeyCode::Enter => {
+                let dialog = self.branch_delete.take()?;
+                let force = dialog.choice == if dialog.remote.is_some() { 2 } else { 1 };
+                Some(RepositoryBrowserEffect::DeleteBranch {
+                    branch: dialog.branch,
+                    remote: (dialog.remote.is_some() && dialog.choice > 0)
+                        .then_some(dialog.remote)
+                        .flatten(),
+                    force,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn sync_branches(&mut self, branches: &[Branch]) {
+        let selected = self.state.selected();
+        self.branches = branches.to_vec();
+        let count = self.result_count();
+        self.state
+            .select((count > 0).then(|| selected.unwrap_or(0).min(count - 1)));
+    }
+
+    pub(crate) fn branch_delete_open(&self) -> bool {
+        self.branch_delete.is_some()
     }
 
     pub(crate) fn move_tab(&mut self, delta: isize) {
@@ -632,6 +726,80 @@ mod tests {
         assert_eq!(
             browser.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             Some(RepositoryBrowserEffect::Close)
+        );
+    }
+
+    #[test]
+    fn confirms_local_or_remote_branch_deletion_and_protects_head() {
+        let directory = tempfile::tempdir().unwrap();
+        let branch = |name: &str, upstream: &str, remote: bool, current: bool| Branch {
+            name: name.to_owned(),
+            upstream: upstream.to_owned(),
+            oid: "abc1234".to_owned(),
+            date: "today".to_owned(),
+            subject: "Branch cleanup".to_owned(),
+            remote,
+            current,
+        };
+        let mut browser = RepositoryBrowser::default();
+        browser.open(
+            directory.path(),
+            &[
+                branch("main", "origin/main", false, true),
+                branch("feature/cleanup", "origin/feature/cleanup", false, false),
+                branch("origin/feature/cleanup", "", true, false),
+            ],
+            false,
+        );
+
+        assert_eq!(
+            browser.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE)),
+            Some(RepositoryBrowserEffect::Notice(
+                "Cannot delete the checked-out branch".to_owned()
+            ))
+        );
+        browser.select(1);
+        assert_eq!(
+            browser.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE)),
+            None
+        );
+        let dialog = browser.branch_delete.as_ref().unwrap();
+        assert_eq!(dialog.branch, "feature/cleanup");
+        assert_eq!(
+            dialog.remote,
+            Some(("origin".to_owned(), "feature/cleanup".to_owned()))
+        );
+
+        browser.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(
+            browser.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(RepositoryBrowserEffect::DeleteBranch {
+                branch: "feature/cleanup".to_owned(),
+                remote: Some(("origin".to_owned(), "feature/cleanup".to_owned())),
+                force: false,
+            })
+        );
+        assert!(browser.branch_delete.is_none());
+
+        browser.select(1);
+        browser.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        browser.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        browser.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(
+            browser.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(RepositoryBrowserEffect::DeleteBranch {
+                branch: "feature/cleanup".to_owned(),
+                remote: Some(("origin".to_owned(), "feature/cleanup".to_owned())),
+                force: true,
+            })
+        );
+
+        browser.select(2);
+        assert_eq!(
+            browser.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE)),
+            Some(RepositoryBrowserEffect::Notice(
+                "Select a local branch to delete".to_owned()
+            ))
         );
     }
 
