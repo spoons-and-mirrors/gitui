@@ -1,4 +1,5 @@
 mod app;
+mod diagnostics;
 mod filesystem;
 mod formatter;
 mod git;
@@ -32,6 +33,14 @@ fn main() -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or(std::env::current_dir()?);
 
+    if let Ok(log_path) = diagnostics::init() {
+        diagnostics::event(format!(
+            "startup pid={} path={} log={}",
+            std::process::id(),
+            path.display(),
+            log_path.display()
+        ));
+    }
     install_panic_hook();
     let mut terminal = start_terminal()?;
     let _guard = TerminalGuard;
@@ -39,15 +48,24 @@ fn main() -> Result<()> {
     let mut dirty = true;
 
     while !app.should_quit {
-        dirty |= app.poll_worker();
+        dirty |= {
+            let _activity = diagnostics::activity("poll-workers", app.diagnostic_context());
+            app.poll_worker()
+        };
         if dirty {
+            let _activity = diagnostics::activity("draw", app.diagnostic_context());
             terminal.draw(|frame| ui::draw(frame, &mut app))?;
             dirty = false;
         }
-        if !event::poll(Duration::from_millis(50))? {
+        let ready = {
+            let _activity = diagnostics::activity("terminal-poll", app.diagnostic_context());
+            event::poll(Duration::from_millis(50))?
+        };
+        if !ready {
             continue;
         }
         for _ in 0..64 {
+            let _activity = diagnostics::activity("input", app.diagnostic_context());
             let (changed, render_before_next_event) = match event::read()? {
                 Event::Key(key) if key.is_press() => {
                     app.handle_key(key);
@@ -107,6 +125,7 @@ fn main() -> Result<()> {
     }
 
     app.flush_commit_draft();
+    diagnostics::event("shutdown clean".to_owned());
 
     Ok(())
 }
@@ -169,6 +188,7 @@ fn restore_terminal() {
 fn install_panic_hook() {
     let original = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        diagnostics::panic(info.to_string());
         restore_terminal();
         original(info);
     }));

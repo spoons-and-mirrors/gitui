@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     thread,
-    time::UNIX_EPOCH,
+    time::{Instant, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -764,9 +764,12 @@ fn git_ignored_paths(root: &Path, paths: &[String]) -> Result<HashSet<String>> {
 }
 
 fn local_entries(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
+    let started = Instant::now();
+    crate::diagnostics::event(format!("local inventory started root={}", root.display()));
     let mut files = Vec::new();
     let mut directory_paths = Vec::new();
     let mut directories = vec![root.to_owned()];
+    let mut next_progress = 100_000;
     while let Some(directory) = directories.pop() {
         let entries = match fs::read_dir(&directory) {
             Ok(entries) => entries,
@@ -789,12 +792,30 @@ fn local_entries(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
             } else if let Ok(relative) = path.strip_prefix(root) {
                 files.push(relative.to_string_lossy().into_owned());
             }
+            let entries = files.len().saturating_add(directory_paths.len());
+            if entries >= next_progress {
+                crate::diagnostics::event(format!(
+                    "local inventory progress root={} entries={} pending_directories={} elapsed_ms={}",
+                    root.display(),
+                    entries,
+                    directories.len(),
+                    started.elapsed().as_millis()
+                ));
+                next_progress = next_progress.saturating_add(100_000);
+            }
         }
     }
     files.sort();
     files.dedup();
     directory_paths.sort();
     directory_paths.dedup();
+    crate::diagnostics::event(format!(
+        "local inventory finished root={} files={} directories={} elapsed_ms={}",
+        root.display(),
+        files.len(),
+        directory_paths.len(),
+        started.elapsed().as_millis()
+    ));
     Ok((files, directory_paths))
 }
 

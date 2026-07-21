@@ -8,11 +8,13 @@ use std::{
 use anyhow::Result;
 
 use crate::{
+    diagnostics,
     filesystem::{self, FileOperation},
     formatter::{self, FormatCommand},
     git::{
         self, Change, CommandOutput, RefreshScope, RepositoryData, RepositoryKind, RepositoryUpdate,
     },
+    tree::PreparedFileTree,
 };
 
 const MIN_STATUS_INTERVAL: Duration = Duration::from_millis(800);
@@ -52,6 +54,7 @@ pub(crate) enum LoadKind {
 pub(crate) struct LoadCompletion {
     pub(crate) kind: LoadKind,
     pub(crate) result: Result<(), String>,
+    pub(crate) prepared_file_tree: Option<PreparedFileTree>,
 }
 
 pub(crate) struct CommandCompletion {
@@ -89,7 +92,7 @@ struct LoadResult {
     generation: u64,
     kind: LoadKind,
     fetch_interval: Duration,
-    result: Result<(LoadPayload, Option<u64>), String>,
+    result: Result<(LoadPayload, Option<u64>, Option<PreparedFileTree>), String>,
 }
 
 enum LoadPayload {
@@ -347,24 +350,33 @@ impl RepositorySession {
                 continue;
             }
             self.operations.finish(Operation::Load(done.kind));
-            let result = done.result.map(|(payload, signature)| {
-                self.status_signature = signature;
-                self.reset_status_interval();
-                if done.kind == LoadKind::Open {
-                    self.next_fetch_at = Instant::now() + done.fetch_interval;
+            let (result, prepared_file_tree) = match done.result {
+                Ok((payload, signature, prepared_file_tree)) => {
+                    self.status_signature = signature;
+                    self.reset_status_interval();
+                    if done.kind == LoadKind::Open {
+                        self.next_fetch_at = Instant::now() + done.fetch_interval;
+                    }
+                    match payload {
+                        LoadPayload::Open(data) => {
+                            if let Some(previous) = self.data.replace(data) {
+                                diagnostics::drop_in_background("repository-data", previous);
+                            }
+                        }
+                        LoadPayload::Refresh(update) => self
+                            .data
+                            .as_mut()
+                            .expect("refresh completed without repository data")
+                            .apply(update),
+                    }
+                    (Ok(()), prepared_file_tree)
                 }
-                match payload {
-                    LoadPayload::Open(data) => self.data = Some(data),
-                    LoadPayload::Refresh(update) => self
-                        .data
-                        .as_mut()
-                        .expect("refresh completed without repository data")
-                        .apply(update),
-                }
-            });
+                Err(error) => (Err(error), None),
+            };
             return Some(LoadCompletion {
                 kind: done.kind,
                 result,
+                prepared_file_tree,
             });
         }
         None
@@ -728,12 +740,21 @@ impl RepositorySession {
         fetch_interval: Duration,
     ) -> bool {
         if !self.operations.start(Operation::Load(kind)) {
+            diagnostics::event(format!(
+                "load rejected kind={kind:?} path={}",
+                path.display()
+            ));
             return false;
         }
         self.load_generation = self.load_generation.wrapping_add(1);
         let generation = self.load_generation;
         let sender = self.load_tx.clone();
+        diagnostics::event(format!(
+            "load started generation={generation} kind={kind:?} path={}",
+            path.display()
+        ));
         thread::spawn(move || {
+            let started = Instant::now();
             let result = match repository_kind {
                 None => git::load_or_local(&path).map(LoadPayload::Open),
                 Some(repository_kind) => {
@@ -741,6 +762,12 @@ impl RepositorySession {
                 }
             }
             .map(|payload| {
+                let prepared_file_tree = match &payload {
+                    LoadPayload::Open(data) => {
+                        Some(PreparedFileTree::new(&data.files, &data.directories))
+                    }
+                    LoadPayload::Refresh(_) => None,
+                };
                 let is_git = match &payload {
                     LoadPayload::Open(data) => !data.is_local(),
                     LoadPayload::Refresh(_) => repository_kind != Some(RepositoryKind::Local),
@@ -748,9 +775,15 @@ impl RepositorySession {
                 let signature = is_git
                     .then(|| git::worktree_signature(&path).ok())
                     .flatten();
-                (payload, signature)
+                (payload, signature, prepared_file_tree)
             })
             .map_err(|error| error.to_string());
+            diagnostics::event(format!(
+                "load finished generation={generation} kind={kind:?} path={} elapsed_ms={} success={}",
+                path.display(),
+                started.elapsed().as_millis(),
+                result.is_ok()
+            ));
             let _ = sender.send(LoadResult {
                 generation,
                 kind,
@@ -833,7 +866,7 @@ mod tests {
                 generation: 1,
                 kind: LoadKind::Open,
                 fetch_interval: Duration::ZERO,
-                result: Ok((LoadPayload::Open(stale_data), Some(99))),
+                result: Ok((LoadPayload::Open(stale_data), Some(99), None)),
             })
             .unwrap();
 

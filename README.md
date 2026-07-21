@@ -92,6 +92,10 @@ Settings are saved to `$XDG_CONFIG_HOME/hunkle/config`, or `~/.config/hunkle/con
 
 hunkle uses the active OpenCode TUI theme when OpenCode is installed. It follows OpenCode's `tui.json`/`tui.jsonc` selection first, then `~/.local/state/opencode/kv.json`, and supports all bundled OpenCode themes plus user and project themes under `opencode/themes/*.json`. If no usable theme is found, hunkle uses Catppuccin Macchiato.
 
+## Diagnostics
+
+hunkle writes lifecycle, workspace loading, file indexing, slow main-loop phases, and watchdog stall reports to `$XDG_STATE_HOME/hunkle/hunkle.log`, or `~/.local/state/hunkle/hunkle.log` when `XDG_STATE_HOME` is unset. Set `HUNKLE_LOG` to use another file. The log rotates to `hunkle.log.old` at 4 MiB. During a slowdown, run `tail -f ~/.local/state/hunkle/hunkle.log`; a `stalled phase=...` line identifies the main-loop phase that has remained blocked for at least two seconds.
+
 ## Architecture
 
 The binary stays deliberately direct, with modules split by the behavior they own:
@@ -99,6 +103,7 @@ The binary stays deliberately direct, with modules split by the behavior they ow
 | Module | Responsibility |
 |---|---|
 | `main` | Terminal setup, cleanup, and event loop |
+| `diagnostics` | Rotating performance log, slow-phase timing, and main-loop watchdog |
 | `app` | Global input routing, workspace state, Git mutations, settings, and notices |
 | `app::actions` | Repository Actions, command input, and captured results |
 | `app::author_filter` | Repository-scoped Graph author filtering and selection |

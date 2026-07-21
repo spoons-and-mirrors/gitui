@@ -43,7 +43,7 @@ use ratatui::{
 };
 
 use crate::{
-    formatter,
+    diagnostics, formatter,
     git::{self, RefreshScope, RepositoryData},
     repository_session::{LoadKind, Mutation, RepositorySession, WorkerCompletion},
     selection::SelectionState,
@@ -387,6 +387,23 @@ impl App {
         self.session.data()
     }
 
+    pub(crate) fn diagnostic_context(&self) -> String {
+        self.repository().map_or_else(
+            || format!("mode={:?} workspace=none", self.mode),
+            |repository| {
+                format!(
+                    "mode={:?} workspace={} kind={:?} files={} directories={} changes={}",
+                    self.mode,
+                    repository.root.display(),
+                    repository.kind,
+                    repository.files.len(),
+                    repository.directories.len(),
+                    repository.changes.len()
+                )
+            },
+        )
+    }
+
     pub(crate) fn visible_graph_indices(&self) -> Vec<usize> {
         self.repository().map_or_else(Vec::new, |repo| {
             self.author_filter.visible_indices(&repo.commits)
@@ -677,8 +694,12 @@ impl App {
         }
         while let Some(done) = self.session.next_load_completion() {
             changed = true;
+            let prepared_file_tree = done.prepared_file_tree;
             match (done.kind, done.result) {
                 (LoadKind::Open, Ok(())) => {
+                    let _activity =
+                        diagnostics::activity("apply-workspace", self.diagnostic_context());
+                    diagnostics::event(format!("workspace opened {}", self.diagnostic_context()));
                     self.pending_reload = None;
                     self.pending_file_selection = None;
                     self.reload_queued = None;
@@ -697,13 +718,9 @@ impl App {
                     if let Some(repo) = self.session.data() {
                         self.author_filter.sync(&repo.root, &repo.commits);
                     }
-                    self.changes.reset_repository(self.session.data());
-                    self.file_search.reindex(
-                        self.session
-                            .data()
-                            .map_or(&[], |repo| repo.files.as_slice()),
-                        self.session.data().map(|repo| repo.files_fingerprint),
-                    );
+                    self.changes
+                        .reset_repository(self.session.data(), prepared_file_tree);
+                    self.file_search.invalidate();
                     self.graph_state.select(
                         self.session
                             .data()
@@ -715,6 +732,7 @@ impl App {
                     self.prefetch_repository_browser();
                 }
                 (LoadKind::Open, Err(error)) => {
+                    diagnostics::event(format!("workspace open failed error={error}"));
                     self.workspace_fetch_pending = false;
                     let message = format!("Could not open workspace: {error}");
                     self.notice = Some(message.clone());
@@ -743,8 +761,12 @@ impl App {
                         }
                     }
                     if let Some(repo) = self.session.data() {
-                        self.file_search
-                            .reindex(&repo.files, Some(repo.files_fingerprint));
+                        if self.mode == Mode::FileSearch {
+                            self.file_search
+                                .reindex(&repo.files, Some(repo.files_fingerprint));
+                        } else {
+                            self.file_search.invalidate();
+                        }
                         if self.mode == Mode::RepositoryBrowser {
                             self.repository_browser.sync_branches(&repo.branches);
                         }
@@ -1525,6 +1547,7 @@ impl App {
             WorkspacePanelEffect::Close => self.mode = Mode::Normal,
             WorkspacePanelEffect::Cycle => self.cycle_workspace_panel(),
             WorkspacePanelEffect::OpenWorkspace(path) => {
+                diagnostics::event(format!("workspace clicked path={}", path.display()));
                 self.open_repository_with_fetch(path);
             }
             WorkspacePanelEffect::Notice(notice) => self.notice = Some(notice),
@@ -1617,6 +1640,10 @@ impl App {
     }
 
     fn start_repository_open(&mut self, path: PathBuf, fetch_if_stale: bool) {
+        diagnostics::event(format!(
+            "workspace open requested path={} fetch_if_stale={fetch_if_stale}",
+            path.display()
+        ));
         self.flush_commit_draft();
         if self
             .session
@@ -1669,9 +1696,11 @@ impl App {
     }
 
     fn open_file_search(&mut self) {
-        if self.repository().is_none() {
+        let Some(repository) = self.session.data() else {
             return;
-        }
+        };
+        self.file_search
+            .reindex(&repository.files, Some(repository.files_fingerprint));
         self.file_search.open();
         self.mode = Mode::FileSearch;
     }

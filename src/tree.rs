@@ -44,8 +44,29 @@ pub(crate) struct FileTree {
     root: Node,
 }
 
+pub(crate) struct PreparedFileTree {
+    tree: FileTree,
+    collapsed: HashSet<String>,
+}
+
+impl PreparedFileTree {
+    pub(crate) fn new(files: &[String], directories: &[String]) -> Self {
+        let tree = FileTree::new(files, directories);
+        let collapsed = tree.default_collapsed_directories();
+        Self { tree, collapsed }
+    }
+
+    pub(crate) fn into_parts(self) -> (FileTree, HashSet<String>) {
+        (self.tree, self.collapsed)
+    }
+}
+
 impl FileTree {
     pub(crate) fn new(files: &[String], directories: &[String]) -> Self {
+        let _activity = crate::diagnostics::activity(
+            "build-file-tree",
+            format!("files={} directories={}", files.len(), directories.len()),
+        );
         let mut root = Node::default();
         for (index, path) in files.iter().enumerate() {
             insert_path(&mut root, path, index);
@@ -63,6 +84,7 @@ impl FileTree {
     }
 
     pub(crate) fn default_collapsed_directories(&self) -> HashSet<String> {
+        let _activity = crate::diagnostics::activity("collapse-file-tree", String::new());
         let mut directories = HashSet::new();
         collect_directory_paths(&self.root, "", &mut directories);
         directories

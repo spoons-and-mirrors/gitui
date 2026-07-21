@@ -9,7 +9,7 @@ use ratatui::widgets::ListState;
 
 use crate::{
     git::{self, Change, Commit, RepositoryData},
-    tree::{ExplorerRow, FileTree, WorktreeRow, WorktreeSection, WorktreeTree},
+    tree::{ExplorerRow, FileTree, PreparedFileTree, WorktreeRow, WorktreeSection, WorktreeTree},
     ui::preview::PreviewPresentation,
 };
 
@@ -135,7 +135,11 @@ impl ChangesState {
         state
     }
 
-    pub(super) fn reset_repository(&mut self, repo: Option<&RepositoryData>) {
+    pub(super) fn reset_repository(
+        &mut self,
+        repo: Option<&RepositoryData>,
+        prepared_file_tree: Option<PreparedFileTree>,
+    ) {
         self.pane = if repo.is_some_and(RepositoryData::is_local) {
             LeftPane::Files
         } else {
@@ -154,11 +158,23 @@ impl ChangesState {
         self.pending_hunk_selection = None;
         self.history_focused = false;
         self.collapsed_directories.clear();
-        self.sync_repository_caches(repo);
-        self.collapsed_explorer_directories = self
-            .file_tree
-            .as_ref()
-            .map_or_else(HashSet::new, FileTree::default_collapsed_directories);
+        if let Some(prepared) = prepared_file_tree {
+            let (tree, collapsed) = prepared.into_parts();
+            if let Some(previous) = self.file_tree.replace(tree) {
+                crate::diagnostics::drop_in_background("file-tree", previous);
+            }
+            self.file_tree_fingerprint = repo.map(|repo| repo.files_fingerprint);
+            let previous = std::mem::replace(&mut self.collapsed_explorer_directories, collapsed);
+            if previous.len() >= 10_000 {
+                crate::diagnostics::drop_in_background("collapsed-directories", previous);
+            }
+        } else {
+            self.sync_repository_caches(repo);
+            self.collapsed_explorer_directories = self
+                .file_tree
+                .as_ref()
+                .map_or_else(HashSet::new, FileTree::default_collapsed_directories);
+        }
         self.rebuild_worktree_rows(repo);
         self.rebuild_explorer_rows(repo);
         self.select_initial_rows(repo);
@@ -914,9 +930,13 @@ impl ChangesState {
 
     fn rebuild_explorer_rows(&mut self, repo: Option<&RepositoryData>) {
         self.sync_repository_caches(repo);
-        self.explorer_rows_cache = self.file_tree.as_ref().map_or_else(Vec::new, |tree| {
+        let rows = self.file_tree.as_ref().map_or_else(Vec::new, |tree| {
             tree.rows(&self.collapsed_explorer_directories)
         });
+        let previous = std::mem::replace(&mut self.explorer_rows_cache, rows);
+        if previous.len() >= 10_000 {
+            crate::diagnostics::drop_in_background("explorer-rows", previous);
+        }
     }
 
     fn rebuild_worktree_rows(&mut self, repo: Option<&RepositoryData>) {
@@ -930,7 +950,11 @@ impl ChangesState {
     fn sync_repository_caches(&mut self, repo: Option<&RepositoryData>) {
         let files_fingerprint = repo.map(|repo| repo.files_fingerprint);
         if self.file_tree_fingerprint != files_fingerprint {
-            self.file_tree = repo.map(|repo| FileTree::new(&repo.files, &repo.directories));
+            let tree = repo.map(|repo| FileTree::new(&repo.files, &repo.directories));
+            let previous = std::mem::replace(&mut self.file_tree, tree);
+            if let Some(previous) = previous {
+                crate::diagnostics::drop_in_background("file-tree", previous);
+            }
             self.file_tree_fingerprint = files_fingerprint;
         }
         let changes_fingerprint = repo.map(|repo| repo.changes_fingerprint);

@@ -39,7 +39,9 @@ impl FileSearch {
         if self.files_fingerprint == files_fingerprint {
             return;
         }
-        self.index = files
+        let _activity =
+            crate::diagnostics::activity("index-file-search", format!("files={}", files.len()));
+        let index = files
             .iter()
             .map(|path| {
                 let path_lower = path.to_lowercase();
@@ -54,8 +56,21 @@ impl FileSearch {
                 }
             })
             .collect();
+        let previous = std::mem::replace(&mut self.index, index);
+        if previous.len() >= 10_000 {
+            crate::diagnostics::drop_in_background("file-search-index", previous);
+        }
         self.files_fingerprint = files_fingerprint;
         self.refresh(files);
+    }
+
+    pub(crate) fn invalidate(&mut self) {
+        let previous = std::mem::take(&mut self.index);
+        if previous.len() >= 10_000 {
+            crate::diagnostics::drop_in_background("file-search-index", previous);
+        }
+        self.files_fingerprint = None;
+        self.open();
     }
 
     pub(crate) fn open(&mut self) {
