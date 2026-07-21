@@ -217,6 +217,7 @@ pub struct Commit {
     pub author: String,
     pub date: String,
     pub subject: String,
+    pub message: String,
     pub graph: Vec<GraphCell>,
 }
 
@@ -1434,7 +1435,7 @@ fn branch_history(root: &Path) -> Result<Vec<Commit>> {
 }
 
 fn read_log(root: &Path, revisions: &[&str]) -> Result<Vec<Commit>> {
-    let format = "--format=%H%x1f%P%x1f%D%x1f%an%x1f%ad%x1f%s%x1e";
+    let format = "--format=%H%x1f%P%x1f%D%x1f%an%x1f%ad%x1f%s%x1f%B%x1e";
     let mut args = vec![
         "log",
         format,
@@ -1467,7 +1468,7 @@ fn parse_log(bytes: &[u8]) -> Vec<Commit> {
                 return None;
             }
             let fields: Vec<&[u8]> = record.split(|byte| *byte == 0x1f).collect();
-            if fields.len() != 6 {
+            if fields.len() != 7 {
                 return None;
             }
             let text = |field: &[u8]| String::from_utf8_lossy(field).into_owned();
@@ -1486,6 +1487,7 @@ fn parse_log(bytes: &[u8]) -> Vec<Commit> {
                 author: text(fields[3]),
                 date: text(fields[4]),
                 subject: text(fields[5]),
+                message: text(fields[6]),
                 graph: Vec::new(),
             })
         })
@@ -1896,6 +1898,17 @@ mod tests {
         assert!(!is_github_remote_url("https://gitlab.com/owner/repo.git"));
     }
 
+    #[test]
+    fn parses_complete_multiline_commit_messages() {
+        let commits = parse_log(
+            b"abc\x1fparent\x1fHEAD -> main\x1fAda\x1f2026-01-01\x1fSubject\x1fSubject\n\nBody line\n\nFinal note\x1e",
+        );
+
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].subject, "Subject");
+        assert_eq!(commits[0].message, "Subject\n\nBody line\n\nFinal note");
+    }
+
     fn commit(oid: &str, parents: &[&str]) -> Commit {
         Commit {
             oid: oid.to_owned(),
@@ -1904,6 +1917,7 @@ mod tests {
             author: "A".to_owned(),
             date: "2026-01-01".to_owned(),
             subject: oid.to_owned(),
+            message: oid.to_owned(),
             graph: Vec::new(),
         }
     }

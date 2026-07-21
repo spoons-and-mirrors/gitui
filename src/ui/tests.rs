@@ -39,7 +39,18 @@ fn renders_every_primary_surface() {
         .unwrap();
     }
     run_git(root, &["add", "."]);
-    run_git(root, &["commit", "-m", "initial commit"]);
+    run_git(
+        root,
+        &[
+            "commit",
+            "-m",
+            "initial commit",
+            "-m",
+            "Detailed body line.",
+            "-m",
+            "Final note.",
+        ],
+    );
     fs::write(root.join("second.txt"), "second\n").unwrap();
     run_git(root, &["add", "."]);
     run_git(
@@ -427,10 +438,10 @@ fn renders_every_primary_surface() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let diff = app.regions.diff.unwrap();
     let summary_row: String = (diff.x..diff.right())
-        .map(|column| terminal.backend().buffer()[(column, diff.y + 3)].symbol())
+        .map(|column| terminal.backend().buffer()[(column, diff.y + 4)].symbol())
         .collect();
     let files_row: String = (diff.x..diff.right())
-        .map(|column| terminal.backend().buffer()[(column, diff.y + 4)].symbol())
+        .map(|column| terminal.backend().buffer()[(column, diff.y + 5)].symbol())
         .collect();
     assert!(summary_row.contains("CHANGES"));
     assert!(summary_row.contains("+1"));
@@ -781,6 +792,7 @@ fn renders_every_primary_surface() {
     )));
     assert!(screen.contains("HEAD"));
     assert!(screen.contains("Render Test"));
+    assert!(!screen.contains("Detailed body line."));
     assert!(screen.contains("CHANGES"));
     assert!(screen.contains("o Explorer"));
     assert!(!screen.contains("scrollbar line"));
@@ -862,6 +874,8 @@ fn renders_every_primary_surface() {
         .collect();
     assert!(commit_diff_screen.contains("DIFF"));
     assert!(commit_diff_screen.contains("initial commit"));
+    assert!(commit_diff_screen.contains("Detailed body line."));
+    assert!(commit_diff_screen.contains("Final note."));
     assert!(commit_diff_screen.contains("CHANGES"));
     assert!(commit_diff_screen.contains("FILES"));
     assert!(
@@ -869,20 +883,39 @@ fn renders_every_primary_surface() {
         "the first file heading should be visible"
     );
     let commit_diff = app.regions.diff.unwrap();
-    let unwrapped_file_summary: String = (commit_diff.x..commit_diff.right())
-        .map(|column| terminal.backend().buffer()[(column, commit_diff.y + 3)].symbol())
-        .collect();
-    assert!(!unwrapped_file_summary.contains("fixtures/file-05.txt"));
+    let files_row = (commit_diff.y..commit_diff.bottom())
+        .find(|row| {
+            (commit_diff.x..commit_diff.right())
+                .map(|column| terminal.backend().buffer()[(column, *row)].symbol())
+                .collect::<String>()
+                .contains("FILES")
+        })
+        .unwrap();
+    let mut automatic_file_summary = String::new();
+    for row in files_row..files_row.saturating_add(6).min(commit_diff.bottom()) {
+        for column in commit_diff.x..commit_diff.right() {
+            automatic_file_summary.push_str(terminal.backend().buffer()[(column, row)].symbol());
+        }
+    }
+    assert!(
+        automatic_file_summary.contains("fixtures/file-05.txt"),
+        "{automatic_file_summary:?}"
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(commit_diff.x + 1, files_row)].bg,
+        super::palette().surface_alt
+    );
     assert!(app.regions.graph_table.is_none());
     app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let mut wrapped_file_summary = String::new();
-    for row in commit_diff.y + 3..commit_diff.y + 9 {
+    let mut wrapped_patch_file_summary = String::new();
+    for row in files_row..files_row.saturating_add(6).min(commit_diff.bottom()) {
         for column in commit_diff.x..commit_diff.right() {
-            wrapped_file_summary.push_str(terminal.backend().buffer()[(column, row)].symbol());
+            wrapped_patch_file_summary
+                .push_str(terminal.backend().buffer()[(column, row)].symbol());
         }
     }
-    assert!(wrapped_file_summary.contains("fixtures/file-05.txt"));
+    assert!(wrapped_patch_file_summary.contains("fixtures/file-05.txt"));
     app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT));
 
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));

@@ -146,7 +146,7 @@ pub(super) fn wrapped_preview_line_starts(
     starts
 }
 
-fn word_wrapped_height(content: &str, width: usize) -> usize {
+pub(super) fn word_wrapped_height(content: &str, width: usize) -> usize {
     let width = width.max(1);
     let mut tokens: Vec<(bool, Vec<usize>)> = Vec::new();
     for grapheme in content.graphemes(true) {

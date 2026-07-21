@@ -5,7 +5,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, List, ListItem, Paragraph, Wrap},
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::{App, DiffHunkRegion, HitTarget, LeftPane, Mode, TextInput, View},
@@ -16,6 +16,7 @@ use crate::{
 use super::{
     fill, history, palette,
     preview::{PreparedPreview, PreviewInput},
+    text::word_wrapped_height,
     truncate_width,
 };
 
@@ -307,7 +308,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .map_or("No file selected", |change| change.path.as_str())
                 .to_owned()
         },
-        |commit| commit.subject.clone(),
+        |commit| commit.oid.chars().take(7).collect(),
     );
     let syntax_path = selected_change.map_or_else(String::new, |change| change.path.clone());
     let diff_header = Rect::new(
@@ -329,6 +330,14 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     );
     let inspecting_commit = selected_commit.is_some();
     let show_summary = inspecting_commit || selected_change.is_some();
+    let metadata_width = diff_header.width.saturating_sub(2);
+    let message_height = selected_commit.map_or(0, |commit| {
+        commit_message_height(
+            &commit.message,
+            metadata_width,
+            columns[1].height.saturating_sub(12),
+        )
+    });
     let live_summary = selected_change.map(|change| DiffSummary {
         files: vec![change.path.clone()],
         additions: change.additions,
@@ -341,16 +350,17 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         selected_commit.is_some_and(|commit| app.commit_summaries.failed(&commit.oid));
     let maximum_summary_height = columns[1]
         .height
-        .saturating_sub(7)
-        .clamp(3, 8)
+        .saturating_sub(8_u16.saturating_add(message_height))
         .min(columns[1].height);
     let summary_height = if show_summary {
-        diff_summary_height(
-            summary,
-            diff_header.width,
-            app.changes.diff_wrap,
-            maximum_summary_height,
-        )
+        diff_summary_height(summary, metadata_width, true, maximum_summary_height)
+    } else {
+        0
+    };
+    let metadata_height = if message_height > 0 || summary_height > 0 {
+        message_height
+            .saturating_add(summary_height)
+            .saturating_add(1)
     } else {
         0
     };
@@ -359,13 +369,13 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         diff_header
             .y
             .saturating_add(2)
-            .saturating_add(summary_height),
+            .saturating_add(metadata_height),
         diff_header.width,
         columns[1].bottom().saturating_sub(
             diff_header
                 .y
                 .saturating_add(3)
-                .saturating_add(summary_height),
+                .saturating_add(metadata_height),
         ),
     );
     let wrap_label = if app.changes.diff_wrap {
@@ -411,18 +421,47 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         ])),
         diff_header,
     );
+    let metadata_card = Rect::new(
+        diff_header.x,
+        diff_header.y.saturating_add(2),
+        diff_header.width,
+        metadata_height,
+    );
+    if !metadata_card.is_empty() {
+        fill(frame, metadata_card, palette().surface_alt);
+    }
+    let metadata_content = Rect::new(
+        metadata_card.x.saturating_add(1),
+        metadata_card.y.saturating_add(1),
+        metadata_card.width.saturating_sub(2),
+        metadata_card.height.saturating_sub(1),
+    );
+    if let Some(commit) = selected_commit
+        && message_height > 0
+    {
+        draw_commit_message(
+            frame,
+            Rect::new(
+                metadata_content.x,
+                metadata_content.y,
+                metadata_content.width,
+                message_height.saturating_sub(1),
+            ),
+            &commit.message,
+        );
+    }
     if show_summary {
         draw_diff_summary(
             frame,
             Rect::new(
-                diff_header.x,
-                diff_header.y.saturating_add(2),
-                diff_header.width,
+                metadata_content.x,
+                metadata_content.y.saturating_add(message_height),
+                metadata_content.width,
                 summary_height.saturating_sub(1),
             ),
             summary,
             summary_unavailable,
-            app.changes.diff_wrap,
+            true,
         );
     }
     let show_hunk_actions =
@@ -966,6 +1005,65 @@ fn render_scrollable_content(
     }
 }
 
+fn commit_message_text(message: &str) -> Text<'static> {
+    Text::from(
+        message
+            .lines()
+            .enumerate()
+            .map(|(index, line)| {
+                Line::styled(
+                    line.to_owned(),
+                    Style::default()
+                        .fg(palette().ink)
+                        .add_modifier(if index == 0 {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                )
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn commit_message_height(message: &str, width: u16, maximum: u16) -> u16 {
+    if maximum == 0 {
+        return 0;
+    }
+    let content_height = message
+        .lines()
+        .map(|line| word_wrapped_height(line, usize::from(width.max(1))))
+        .sum::<usize>()
+        .max(1)
+        .min(usize::from(u16::MAX)) as u16;
+    content_height.saturating_add(2).min(maximum)
+}
+
+fn draw_commit_message(frame: &mut Frame<'_>, area: Rect, message: &str) {
+    if area.is_empty() {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new("MESSAGE").style(
+            Style::default()
+                .fg(palette().muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    if area.height > 1 {
+        frame.render_widget(
+            Paragraph::new(commit_message_text(message)).wrap(Wrap { trim: false }),
+            Rect::new(
+                area.x,
+                area.y.saturating_add(1),
+                area.width,
+                area.height.saturating_sub(1),
+            ),
+        );
+    }
+}
+
 fn draw_diff_summary(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1039,11 +1137,7 @@ fn draw_diff_summary(
     let label = "FILES  ";
     let available = usize::from(area.width).saturating_sub(label.len());
     let file_lines = if wrapped {
-        wrapped_file_summary(
-            &summary.files.join("  "),
-            available,
-            usize::from(files_area.height),
-        )
+        wrapped_file_summary(&summary.files, available, usize::from(files_area.height))
     } else {
         vec![truncate_width(&summary.files.join("  "), available)]
     };
@@ -1076,37 +1170,66 @@ fn diff_summary_height(
     }
     let file_width = usize::from(width).saturating_sub("FILES  ".len());
     let rows = summary.map_or(1, |summary| {
-        wrapped_file_summary(&summary.files.join("  "), file_width, usize::MAX)
+        wrapped_file_summary(&summary.files, file_width, usize::MAX)
             .len()
             .max(1)
     });
     (rows as u16).saturating_add(2).min(maximum)
 }
 
-fn wrapped_file_summary(text: &str, width: usize, maximum_lines: usize) -> Vec<String> {
+fn wrapped_file_summary(files: &[String], width: usize, maximum_lines: usize) -> Vec<String> {
     if width == 0 || maximum_lines == 0 {
         return Vec::new();
     }
     let mut lines = Vec::new();
     let mut line = String::new();
     let mut line_width = 0usize;
-    let mut truncated = false;
-    for character in text.chars() {
-        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
-        if line_width > 0 && line_width.saturating_add(character_width) > width {
-            if lines.len().saturating_add(1) >= maximum_lines {
-                truncated = true;
+    for file in files {
+        let file_width = UnicodeWidthStr::width(file.as_str());
+        if file_width <= width {
+            let separator_width = usize::from(!line.is_empty()) * 2;
+            if line_width
+                .saturating_add(separator_width)
+                .saturating_add(file_width)
+                <= width
+            {
+                if separator_width > 0 {
+                    line.push_str("  ");
+                }
+                line.push_str(file);
+                line_width = line_width
+                    .saturating_add(separator_width)
+                    .saturating_add(file_width);
+                continue;
+            }
+        }
+        if !line.is_empty() {
+            lines.push(std::mem::take(&mut line));
+        }
+        let mut remaining = file.as_str();
+        while UnicodeWidthStr::width(remaining) > width {
+            let split = remaining
+                .char_indices()
+                .take_while(|(index, character)| {
+                    UnicodeWidthStr::width(&remaining[..index + character.len_utf8()]) <= width
+                })
+                .map(|(index, character)| index + character.len_utf8())
+                .last()
+                .unwrap_or_else(|| remaining.chars().next().map_or(0, char::len_utf8));
+            if split == 0 {
                 break;
             }
-            lines.push(std::mem::take(&mut line));
-            line_width = 0;
+            lines.push(remaining[..split].to_owned());
+            remaining = &remaining[split..];
         }
-        line.push(character);
-        line_width = line_width.saturating_add(character_width);
+        line.push_str(remaining);
+        line_width = UnicodeWidthStr::width(remaining);
     }
-    if !line.is_empty() && lines.len() < maximum_lines {
+    if !line.is_empty() {
         lines.push(line);
     }
+    let truncated = lines.len() > maximum_lines;
+    lines.truncate(maximum_lines);
     if truncated && let Some(last) = lines.last_mut() {
         *last = format!("{}…", truncate_width(last, width.saturating_sub(1)));
     }
@@ -1398,8 +1521,8 @@ mod summary_tests {
 
     #[test]
     fn wraps_file_summaries_with_a_bounded_height() {
-        let text = "src/one.rs  src/two.rs  src/three.rs  src/four.rs";
-        let lines = wrapped_file_summary(text, 12, 3);
+        let files = ["src/one.rs", "src/two.rs", "src/three.rs", "src/four.rs"].map(str::to_owned);
+        let lines = wrapped_file_summary(&files, 12, 3);
         assert_eq!(lines.len(), 3);
         assert!(lines.last().unwrap().ends_with('…'));
         assert!(
@@ -1409,7 +1532,7 @@ mod summary_tests {
         );
 
         let summary = DiffSummary {
-            files: vec![text.to_owned()],
+            files: files.to_vec(),
             additions: 1,
             deletions: 1,
         };

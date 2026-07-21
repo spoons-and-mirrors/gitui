@@ -186,6 +186,7 @@ mod tests {
             author: author.to_owned(),
             date: String::new(),
             subject: String::new(),
+            message: String::new(),
             graph: Vec::new(),
         }
     }
