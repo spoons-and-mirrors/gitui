@@ -395,6 +395,14 @@ impl App {
         }
         if self
             .regions
+            .left_pane_toggle
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.toggle_changes_files();
+            return;
+        }
+        if self
+            .regions
             .stage_all
             .is_some_and(|rect| rect.contains(point))
         {

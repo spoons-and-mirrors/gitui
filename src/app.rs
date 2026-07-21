@@ -157,6 +157,7 @@ pub struct Regions {
     pub screen: Option<Rect>,
     pub changes: Option<Rect>,
     pub graph: Option<Rect>,
+    pub left_pane_toggle: Option<Rect>,
     pub refresh: Option<Rect>,
     pub explorer: Option<Rect>,
     pub repository_browser: Option<Rect>,
@@ -874,10 +875,7 @@ impl App {
             return;
         }
         if key.code == KeyCode::Char('f') && self.view == View::Graph {
-            self.view = View::Changes;
-            self.graph_commit_open = false;
-            self.set_left_pane(LeftPane::Files);
-            self.show_graph_if_diff_empty();
+            self.toggle_changes_files();
             return;
         }
         if let Some(index) = self.changes.hunk_selection {
@@ -964,7 +962,7 @@ impl App {
             }
             KeyCode::Char('e') if self.view == View::Changes => self.open_selected_file(false),
             KeyCode::Char('E') if self.view == View::Changes => self.open_selected_file(true),
-            KeyCode::Char('f') if self.view == View::Changes => self.toggle_left_pane(),
+            KeyCode::Char('f') if self.view == View::Changes => self.toggle_changes_files(),
             KeyCode::Char('c') if self.view == View::Changes => {
                 self.set_left_pane(LeftPane::Worktree);
                 self.focus_commit();
@@ -2044,6 +2042,17 @@ impl App {
             LeftPane::Files => LeftPane::Worktree,
         });
         self.show_graph_if_diff_empty();
+    }
+
+    fn toggle_changes_files(&mut self) {
+        if self.view == View::Graph {
+            self.view = View::Changes;
+            self.graph_commit_open = false;
+            self.set_left_pane(LeftPane::Files);
+            self.show_graph_if_diff_empty();
+        } else {
+            self.toggle_left_pane();
+        }
     }
 
     fn show_graph_if_diff_empty(&mut self) {

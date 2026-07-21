@@ -16,7 +16,7 @@ A directory opened without Git behavior. It supports file browsing, search, prev
 
 ## Worktree
 
-The tracked and untracked changes shown in the left WORKTREE pane. Staging actions operate on this view even while Graph is visible.
+The tracked and untracked changes shown in the left CHANGES pane. Staging actions operate on this view even while Graph is visible.
 
 ## Files
 

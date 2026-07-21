@@ -32,7 +32,7 @@ hunkle opens exactly the current or requested directory. When that directory is 
 | `PageUp`, `PageDown` | Scroll the selected file's diff |
 | `Alt+w` | Toggle patch and changed-file wrapping in the Diff panel |
 | `e`, `E` | Open the selected file in your editor, or configure the editor |
-| `f` | Switch the left pane between Worktree and Files |
+| `f` | Switch the left pane between Changes and Files |
 | `F3` | Fuzzy-search repository files from anywhere |
 | `F2` | Rename the selected file or folder in Files |
 | `Ctrl+Delete` | Delete the selected file or folder after confirmation |
@@ -68,27 +68,27 @@ The rail starts on the left. Press `w` to cycle it through the right side, off, 
 ## Mouse
 
 - Click header controls to switch views, refresh, open Explorer, or open help.
-- Drag the divider between Worktree and Diff to resize either panel.
+- Drag the divider between Changes and Diff to resize either panel.
 - Drag the Workspaces rail divider to resize it on either side of the window.
 - Drag the History section header vertically to resize the current-branch commit shelf.
 - Click `x ACTIONS` above History to push, fetch, pull with rebase, or run a custom Git command.
-- Click or scroll History to inspect a commit's patch; click a Worktree file to return to its current diff.
+- Click or scroll History to inspect a commit's patch; click a Changes file to return to its current diff.
 - Click a directory to expand or collapse it. Click a file's right-aligned checkbox or right-click its row to stage or unstage it.
-- Click `WORKTREE` or `FILES` in the left header to switch modes; clicking a repository file previews its contents.
+- Click `CHANGES` or `FILES` in the left header to switch modes; clicking a repository file previews its contents.
 - Click `+` in the Files header to create a file or folder. Drag a Files entry onto a folder or the Files header to move it.
-- The wheel pans Worktree and Files as viewports without changing the selected file; click a visible row to select it.
+- The wheel pans Changes and Files as viewports without changing the selected file; click a visible row to select it.
 - Right-click interactions are delivered to hunkle while terminal mouse capture is enabled; Herdr does not consume them first.
 - Use the wheel over Diff or Graph to scroll that surface.
 - Click the Graph `AUTHOR` header to include or exclude commits by author.
 - Drag the one-column Diff scrollbar or click its track to move quickly through large patches.
-- Click the Worktree `Stage all` checkbox to stage everything; click it again when checked to unstage everything.
-- Click the commit editor inside Worktree, type a message, and press `Ctrl+Enter` to commit.
+- Click the Changes `Stage all` checkbox to stage everything; click it again when checked to unstage everything.
+- Click the commit editor inside Changes, type a message, and press `Ctrl+Enter` to commit.
 - Click the Explorer path field to type, or click a directory/repository entry to navigate or open it.
 - Drag across visible text to select it and automatically copy it to the clipboard. In Files, hold `Shift` while dragging to select text instead of moving an entry. Selection stays within the panel where the drag starts.
 
 ## Settings
 
-Settings are saved to `$XDG_CONFIG_HOME/hunkle/config`, or `~/.config/hunkle/config` when `XDG_CONFIG_HOME` is unset. On Windows, hunkle uses `%APPDATA%\hunkle\config`. Existing settings are loaded from the old `gitui` location when no hunkle config exists. The first `e` press asks for an editor command such as `nvim`, `micro`, or `code --wait`; hunkle saves it, suspends the TUI, and runs the editor interactively. Press `E` to change it later. Auto-fetch can periodically run `git fetch --all --prune` for the active repository without blocking the interface; its interval is configurable from 1 to 1440 minutes. The last manually selected Worktree width and History height are stored as exact terminal-cell counts.
+Settings are saved to `$XDG_CONFIG_HOME/hunkle/config`, or `~/.config/hunkle/config` when `XDG_CONFIG_HOME` is unset. On Windows, hunkle uses `%APPDATA%\hunkle\config`. Existing settings are loaded from the old `gitui` location when no hunkle config exists. The first `e` press asks for an editor command such as `nvim`, `micro`, or `code --wait`; hunkle saves it, suspends the TUI, and runs the editor interactively. Press `E` to change it later. Auto-fetch can periodically run `git fetch --all --prune` for the active repository without blocking the interface; its interval is configurable from 1 to 1440 minutes. The last manually selected Changes width and History height are stored as exact terminal-cell counts.
 
 ## Theme
 
@@ -120,7 +120,7 @@ The binary stays deliberately direct, with modules split by the behavior they ow
 | `selection` | Screen-cell selection, text extraction, and clipboard fallback |
 | `tree` | Pure worktree and file-tree projection |
 | `ui` | Rendering shell, header, and view dispatch |
-| `ui::changes` | Worktree, Files, Diff, and commit workspace |
+| `ui::changes` | Changes, Files, Diff, and commit workspace |
 | `ui::history` | Current-branch history and all-refs graph |
 | `ui::overlays` | Explorer, repository browser, settings, and help overlays |
 | `ui::workspace_panel` | Herdr Workspaces and Agents rail |

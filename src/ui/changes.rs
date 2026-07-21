@@ -21,7 +21,7 @@ use super::{
 
 pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if app.repository().is_none() {
-        super::draw_empty(frame, area, "Open a repository to inspect its worktree");
+        super::draw_empty(frame, area, "Open a repository to inspect its changes");
         return;
     }
 
@@ -202,9 +202,9 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         "All".to_owned()
     };
     let worktree_title = if worktree_header.width >= 36 {
-        format!("WORKTREE  {}", repo.changes.len())
+        format!("CHANGES  {}", repo.changes.len())
     } else {
-        "WORKTREE".to_owned()
+        "CHANGES".to_owned()
     };
     let files_title = "FILES";
     let worktree_title_width = UnicodeWidthStr::width(worktree_title.as_str());
@@ -643,7 +643,7 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
     let drop_target = app.file_drop_target().map(str::to_owned);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("WORKTREE", Style::default().fg(palette().faint)),
+            Span::styled("CHANGES", Style::default().fg(palette().faint)),
             Span::raw("  "),
             Span::styled(
                 files_title.clone(),
@@ -666,14 +666,14 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
             root_target,
         );
         frame.render_widget(
-            Paragraph::new(format!("WORKTREE  {files_title}"))
+            Paragraph::new(format!("CHANGES  {files_title}"))
                 .style(Style::default().fg(palette().ink)),
             root_target,
         );
     }
-    app.regions.worktree_tab = Some(Rect::new(header.x, header.y, 8, 1));
+    app.regions.worktree_tab = Some(Rect::new(header.x, header.y, 7, 1));
     app.regions.files_tab = Some(Rect::new(
-        header.x.saturating_add(10),
+        header.x.saturating_add(9),
         header.y,
         UnicodeWidthStr::width(files_title.as_str()) as u16,
         1,

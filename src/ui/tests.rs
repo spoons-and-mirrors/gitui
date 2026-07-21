@@ -90,7 +90,22 @@ fn renders_every_primary_surface() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
+    assert!(footer.contains("f Files"));
     assert!(footer.contains("b Branches"));
+
+    let left_pane_toggle = app.regions.left_pane_toggle.unwrap();
+    click(&mut app, left_pane_toggle.x, left_pane_toggle.y);
+    assert_eq!(app.changes.pane, LeftPane::Files);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let footer: String = terminal.backend().buffer().content[35 * 120..]
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(footer.contains("f Changes"));
+    let left_pane_toggle = app.regions.left_pane_toggle.unwrap();
+    click(&mut app, left_pane_toggle.x, left_pane_toggle.y);
+    assert_eq!(app.changes.pane, LeftPane::Worktree);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     let files_tab = app.regions.files_tab.unwrap();
     click(&mut app, files_tab.x, files_tab.y);
@@ -698,7 +713,7 @@ fn renders_every_primary_surface() {
     )));
     assert!(screen.contains("HEAD"));
     assert!(screen.contains("Render Test"));
-    assert!(screen.contains("WORKTREE"));
+    assert!(screen.contains("CHANGES"));
     assert!(screen.contains("o Explorer"));
     assert!(!screen.contains("scrollbar line"));
     let worktree = app.regions.worktree.unwrap();
@@ -1499,7 +1514,7 @@ fn opens_plain_directories_as_file_workspaces() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(screen.contains("WORKTREE"));
+    assert!(screen.contains("CHANGES"));
     assert!(screen.contains("FILES"));
     assert!(screen.contains("README.md"));
     assert!(screen.contains("local workspace"));
