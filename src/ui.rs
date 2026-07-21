@@ -348,16 +348,12 @@ fn draw_header(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 }
 
 fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let (staged, unstaged) = app.change_counts();
-    let commits = app.repository().map_or(0, |repo| repo.commits.len());
-
     frame.render_widget(
         Block::default().style(Style::default().bg(palette().surface_alt)),
         area,
     );
 
-    let changes_label = format!(" 1 Changes {}/{} ", staged, unstaged);
-    let graph_label = format!(" 2 Graph {commits} ");
+    let graph_label = " Tab Git Graph ";
     let compact = area.width < 88;
     let left_pane_label = if compact {
         " f "
@@ -372,11 +368,7 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let settings_label = if compact { " s " } else { " s Settings " };
     let help_label = if compact { " ? " } else { " ? Help " };
     let workspace_label = if compact { " w " } else { " w Workspaces " };
-    let mut labels = vec![
-        changes_label.as_str(),
-        graph_label.as_str(),
-        left_pane_label,
-    ];
+    let mut labels = vec![graph_label, left_pane_label];
     if app.workspace_panel.is_available() {
         labels.push(workspace_label);
     }
@@ -396,8 +388,7 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let mut x = start_x;
     let mut rects = Vec::new();
     for (index, label) in labels.iter().enumerate() {
-        let active =
-            (index == 0 && app.view == View::Changes) || (index == 1 && app.view == View::Graph);
+        let active = index == 0 && app.view == View::Graph;
         spans.push(Span::styled(
             *label,
             if active {
@@ -414,23 +405,23 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         x = x.saturating_add(width);
     }
 
-    app.regions.changes = rects.first().copied();
-    app.regions.graph = rects.get(1).copied();
-    app.regions.left_pane_toggle = rects.get(2).copied();
+    app.regions.changes = None;
+    app.regions.graph = rects.first().copied();
+    app.regions.left_pane_toggle = rects.get(1).copied();
     let offset = usize::from(app.workspace_panel.is_available());
     if app.workspace_panel.is_available()
-        && let Some(rect) = rects.get(3).copied()
+        && let Some(rect) = rects.get(2).copied()
     {
         app.regions.register_hit_target(
             HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Focus),
             rect,
         );
     }
-    app.regions.refresh = rects.get(3 + offset).copied();
-    app.regions.explorer = rects.get(4 + offset).copied();
-    app.regions.repository_browser = rects.get(5 + offset).copied();
-    app.regions.settings = rects.get(6 + offset).copied();
-    app.regions.help = rects.get(7 + offset).copied();
+    app.regions.refresh = rects.get(2 + offset).copied();
+    app.regions.explorer = rects.get(3 + offset).copied();
+    app.regions.repository_browser = rects.get(4 + offset).copied();
+    app.regions.settings = rects.get(5 + offset).copied();
+    app.regions.help = rects.get(6 + offset).copied();
 
     frame.render_widget(
         Paragraph::new(Line::from(spans)),

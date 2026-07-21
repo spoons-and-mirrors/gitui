@@ -431,8 +431,12 @@ impl App {
             self.graph_commit_open = false;
             self.show_graph_if_diff_empty();
         } else if self.regions.graph.is_some_and(|rect| rect.contains(point)) {
-            self.view = View::Graph;
+            self.view = match self.view {
+                View::Changes => View::Graph,
+                View::Graph => View::Changes,
+            };
             self.graph_commit_open = false;
+            self.show_graph_if_diff_empty();
         } else if self
             .regions
             .refresh

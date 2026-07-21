@@ -66,9 +66,10 @@ fn renders_every_primary_surface() {
     assert_eq!(app.regions.worktree.unwrap().x, 0);
     assert_eq!(app.regions.worktree.unwrap().y, 1);
     assert_eq!(app.regions.diff.unwrap().right(), 120);
-    assert_eq!(app.regions.changes.unwrap().y, 35);
+    assert!(app.regions.changes.is_none());
+    assert_eq!(app.regions.graph.unwrap().y, 35);
     assert_eq!(app.regions.help.unwrap().y, 35);
-    assert!(app.regions.changes.unwrap().x > 0);
+    assert!(app.regions.graph.unwrap().x > 0);
     assert_eq!(app.regions.help.unwrap().right(), 120);
     assert!(app.regions.repository_browser.is_some());
     let buffer = terminal.backend().buffer();
@@ -94,6 +95,15 @@ fn renders_every_primary_surface() {
         .collect();
     assert!(footer.contains("f Files"));
     assert!(footer.contains("b Branches"));
+    assert!(footer.contains("Tab Git Graph"));
+    assert!(!footer.contains("1 Changes"));
+    assert!(!footer.contains("2 Graph"));
+
+    let graph_toggle = app.regions.graph.unwrap();
+    click(&mut app, graph_toggle.x, graph_toggle.y);
+    assert_eq!(app.view, View::Graph);
+    click(&mut app, graph_toggle.x, graph_toggle.y);
+    assert_eq!(app.view, View::Changes);
 
     let generate = app
         .regions

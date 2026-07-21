@@ -907,10 +907,6 @@ impl App {
                 .is_some_and(|area| self.selection.needs_capture(area))
     }
 
-    pub fn change_counts(&self) -> (usize, usize) {
-        self.repository().map_or((0, 0), |repo| repo.change_counts)
-    }
-
     fn handle_normal(&mut self, key: KeyEvent) {
         if matches!(key.code, KeyCode::Esc | KeyCode::Tab)
             && self.view == View::Graph
@@ -2355,7 +2351,7 @@ mod tests {
         assert_eq!(repo.root, fs::canonicalize(&nested).unwrap());
         assert_eq!(repo.branch, "local");
         assert_eq!(repo.files, ["settings.toml"]);
-        assert_eq!(app.change_counts(), (0, 0));
+        assert_eq!(repo.change_counts, (0, 0));
         assert_eq!(app.mode, Mode::Normal);
         assert_eq!(app.changes.pane, LeftPane::Files);
     }
