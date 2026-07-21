@@ -652,8 +652,8 @@ impl WorkspacePanel {
             self.group_for_workspace(index).is_some(),
             workspace.linked_worktree,
         ) {
-            (true, true) => "    ",
-            (true, false) | (false, true) => "  ",
+            (true, true) => "  ",
+            (true, false) | (false, true) => " ",
             (false, false) => "",
         }
     }
@@ -1484,7 +1484,7 @@ mod tests {
                 WorkspacePanelRow::Workspace(1),
             ]
         );
-        assert_eq!(panel.workspace_indent(2), "  ");
+        assert_eq!(panel.workspace_indent(2), " ");
         assert!(!panel.begin_workspace_drag(2));
 
         panel.groups = vec![
@@ -1502,7 +1502,7 @@ mod tests {
         assert!(panel.reconcile_group_workspace_ids());
         assert!(panel.groups[1].workspace_ids.is_empty());
         assert_eq!(panel.group_for_workspace(2), Some(0));
-        assert_eq!(panel.workspace_indent(2), "    ");
+        assert_eq!(panel.workspace_indent(2), "  ");
         assert_eq!(
             &panel.rows()[..5],
             &[
