@@ -96,11 +96,7 @@ pub(super) fn draw(
             }
             WorkspacePanelRow::Workspace(index) => {
                 let workspace = &panel.workspaces[index];
-                let indent = if panel.group_for_workspace(index).is_some() {
-                    "  "
-                } else {
-                    ""
-                };
+                let indent = panel.workspace_indent(index);
                 let label = format!("{indent}{}", workspace.label);
                 let ungrouped_drop = panel.workspace_drag_target()
                     == Some(WorkspaceDropTarget::Ungrouped)

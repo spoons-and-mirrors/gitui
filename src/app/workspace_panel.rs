@@ -52,9 +52,13 @@ pub(crate) struct HerdrWorkspace {
     pub(crate) label: String,
     pub(crate) path: Option<PathBuf>,
     pub(crate) branch: Option<String>,
+    pub(crate) parent_workspace_id: Option<String>,
     pub(crate) pane_count: usize,
     pub(crate) focused: bool,
     pub(crate) status: AgentStatus,
+    repo_key: Option<String>,
+    repo_root: Option<PathBuf>,
+    linked_worktree: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,20 +224,37 @@ impl WorkspacePanel {
         for (group_index, group) in self.groups.iter().enumerate() {
             rows.push(WorkspacePanelRow::Group(group_index));
             if group.expanded {
-                rows.extend(
-                    self.workspaces
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, workspace)| group.workspace_ids.contains(&workspace.id))
-                        .map(|(index, _)| WorkspacePanelRow::Workspace(index)),
-                );
+                for (index, workspace) in
+                    self.workspaces.iter().enumerate().filter(|(_, workspace)| {
+                        !workspace.linked_worktree && group.workspace_ids.contains(&workspace.id)
+                    })
+                {
+                    rows.push(WorkspacePanelRow::Workspace(index));
+                    rows.extend(
+                        self.child_workspace_indices(&workspace.id)
+                            .into_iter()
+                            .map(WorkspacePanelRow::Workspace),
+                    );
+                }
             }
+        }
+        for (index, workspace) in self.workspaces.iter().enumerate().filter(|(_, workspace)| {
+            !workspace.linked_worktree && self.group_for_workspace_id(&workspace.id).is_none()
+        }) {
+            rows.push(WorkspacePanelRow::Workspace(index));
+            rows.extend(
+                self.child_workspace_indices(&workspace.id)
+                    .into_iter()
+                    .map(WorkspacePanelRow::Workspace),
+            );
         }
         rows.extend(
             self.workspaces
                 .iter()
                 .enumerate()
-                .filter(|(_, workspace)| self.group_for_workspace_id(&workspace.id).is_none())
+                .filter(|(_, workspace)| {
+                    workspace.linked_worktree && workspace.parent_workspace_id.is_none()
+                })
                 .map(|(index, _)| WorkspacePanelRow::Workspace(index)),
         );
         rows.push(WorkspacePanelRow::Spacer);
@@ -264,6 +285,11 @@ impl WorkspacePanel {
                             self.workspaces = workspaces;
                             self.agents = agents;
                             self.error = None;
+                            if self.remove_worktrees_from_groups()
+                                && let Err(error) = self.persist_groups()
+                            {
+                                action_error = Some(error);
+                            }
                             self.restore_selection(previous);
                         }
                         Err(error) => self.error = Some(error),
@@ -533,9 +559,26 @@ impl WorkspacePanel {
     }
 
     pub(crate) fn group_for_workspace(&self, index: usize) -> Option<usize> {
-        self.workspaces
-            .get(index)
-            .and_then(|workspace| self.group_for_workspace_id(&workspace.id))
+        let workspace = self.workspaces.get(index)?;
+        let workspace_id = workspace
+            .parent_workspace_id
+            .as_deref()
+            .unwrap_or(&workspace.id);
+        self.group_for_workspace_id(workspace_id)
+    }
+
+    pub(crate) fn workspace_indent(&self, index: usize) -> &'static str {
+        let Some(workspace) = self.workspaces.get(index) else {
+            return "";
+        };
+        match (
+            self.group_for_workspace(index).is_some(),
+            workspace.linked_worktree,
+        ) {
+            (true, true) => "    ",
+            (true, false) | (false, true) => "  ",
+            (false, false) => "",
+        }
     }
 
     fn group_for_workspace_id(&self, id: &str) -> Option<usize> {
@@ -548,7 +591,11 @@ impl WorkspacePanel {
     }
 
     pub(crate) fn begin_workspace_drag(&mut self, workspace: usize) -> bool {
-        if workspace >= self.workspaces.len() {
+        if self
+            .workspaces
+            .get(workspace)
+            .is_none_or(|workspace| workspace.linked_worktree)
+        {
             return false;
         }
         self.workspace_drag = Some(WorkspaceDrag {
@@ -579,6 +626,7 @@ impl WorkspacePanel {
         let Some(workspace_id) = self
             .workspaces
             .get(drag.workspace)
+            .filter(|workspace| !workspace.linked_worktree)
             .map(|workspace| workspace.id.clone())
         else {
             return WorkspacePanelEffect::None;
@@ -606,6 +654,33 @@ impl WorkspacePanel {
 
     pub(crate) fn is_dragging_workspace(&self) -> bool {
         self.workspace_drag.is_some()
+    }
+
+    fn child_workspace_indices(&self, parent_id: &str) -> Vec<usize> {
+        self.workspaces
+            .iter()
+            .enumerate()
+            .filter(|(_, workspace)| workspace.parent_workspace_id.as_deref() == Some(parent_id))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn remove_worktrees_from_groups(&mut self) -> bool {
+        let worktree_ids = self
+            .workspaces
+            .iter()
+            .filter(|workspace| workspace.linked_worktree)
+            .map(|workspace| workspace.id.as_str())
+            .collect::<Vec<_>>();
+        let mut changed = false;
+        for group in &mut self.groups {
+            let previous_len = group.workspace_ids.len();
+            group
+                .workspace_ids
+                .retain(|id| !worktree_ids.contains(&id.as_str()));
+            changed |= group.workspace_ids.len() != previous_len;
+        }
+        changed
     }
 
     fn persist_groups(&self) -> Result<(), String> {
@@ -880,13 +955,14 @@ fn parse_snapshot(value: &Value) -> Result<(Vec<HerdrWorkspace>, Vec<HerdrAgent>
         .get("result")
         .and_then(|result| result.get("snapshot"))
         .ok_or_else(|| "Herdr returned an invalid session snapshot".to_owned())?;
-    let workspaces = snapshot
+    let mut workspaces: Vec<HerdrWorkspace> = snapshot
         .get("workspaces")
         .and_then(Value::as_array)
         .ok_or_else(|| "Herdr snapshot has no workspaces".to_owned())?
         .iter()
         .filter_map(|workspace| parse_workspace(workspace, snapshot))
         .collect();
+    assign_worktree_parents(&mut workspaces);
     let agents = snapshot
         .get("agents")
         .and_then(Value::as_array)
@@ -898,18 +974,59 @@ fn parse_snapshot(value: &Value) -> Result<(Vec<HerdrWorkspace>, Vec<HerdrAgent>
 }
 
 fn parse_workspace(value: &Value, snapshot: &Value) -> Option<HerdrWorkspace> {
+    let worktree = value.get("worktree").filter(|value| value.is_object());
     Some(HerdrWorkspace {
         id: value.get("workspace_id")?.as_str()?.to_owned(),
         label: value.get("label")?.as_str()?.to_owned(),
         path: workspace_path(value, snapshot),
         branch: None,
+        parent_workspace_id: None,
         pane_count: value.get("pane_count").and_then(Value::as_u64).unwrap_or(0) as usize,
         focused: value
             .get("focused")
             .and_then(Value::as_bool)
             .unwrap_or(false),
         status: AgentStatus::parse(value.get("agent_status").and_then(Value::as_str)),
+        repo_key: worktree
+            .and_then(|worktree| worktree.get("repo_key"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        repo_root: worktree
+            .and_then(|worktree| worktree.get("repo_root"))
+            .and_then(Value::as_str)
+            .map(PathBuf::from),
+        linked_worktree: worktree
+            .and_then(|worktree| worktree.get("is_linked_worktree"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     })
+}
+
+fn assign_worktree_parents(workspaces: &mut [HerdrWorkspace]) {
+    let parent_ids = workspaces
+        .iter()
+        .map(|worktree| {
+            if !worktree.linked_worktree {
+                return None;
+            }
+            let repo_key = worktree.repo_key.as_deref()?;
+            let exact_root = workspaces.iter().find(|candidate| {
+                !candidate.linked_worktree
+                    && candidate.path.as_deref() == worktree.repo_root.as_deref()
+            });
+            exact_root
+                .or_else(|| {
+                    workspaces.iter().find(|candidate| {
+                        !candidate.linked_worktree
+                            && candidate.repo_key.as_deref() == Some(repo_key)
+                    })
+                })
+                .map(|parent| parent.id.clone())
+        })
+        .collect::<Vec<_>>();
+    for (workspace, parent_id) in workspaces.iter_mut().zip(parent_ids) {
+        workspace.parent_workspace_id = parent_id;
+    }
 }
 
 fn populate_workspace_branches(workspaces: &mut [HerdrWorkspace]) {
@@ -1169,6 +1286,71 @@ mod tests {
         assert_eq!(
             workspace_branch(&worktree).as_deref(),
             Some("topic/worktree")
+        );
+    }
+
+    #[test]
+    fn nests_linked_worktrees_under_their_parent_and_prevents_dragging_them() {
+        let mut value = snapshot();
+        let workspaces = value["result"]["snapshot"]["workspaces"]
+            .as_array_mut()
+            .unwrap();
+        workspaces.push(serde_json::json!({
+            "workspace_id": "w3",
+            "label": "feature-worktree",
+            "pane_count": 1,
+            "focused": false,
+            "agent_status": "idle",
+            "worktree": {
+                "checkout_path": "/tmp/worktrees/feature",
+                "is_linked_worktree": true,
+                "repo_key": "/home/spoon/code/gitui/.git",
+                "repo_root": "/home/spoon/code/gitui"
+            }
+        }));
+        let mut panel = WorkspacePanel::ready_for_test(&value);
+
+        assert_eq!(
+            panel.workspaces[2].parent_workspace_id.as_deref(),
+            Some("w1")
+        );
+        assert_eq!(
+            &panel.rows()[..4],
+            &[
+                WorkspacePanelRow::Header,
+                WorkspacePanelRow::Workspace(0),
+                WorkspacePanelRow::Workspace(2),
+                WorkspacePanelRow::Workspace(1),
+            ]
+        );
+        assert_eq!(panel.workspace_indent(2), "  ");
+        assert!(!panel.begin_workspace_drag(2));
+
+        panel.groups = vec![
+            WorkspaceGroup {
+                name: "Project".to_owned(),
+                expanded: true,
+                workspace_ids: vec!["w1".to_owned()],
+            },
+            WorkspaceGroup {
+                name: "Old worktree group".to_owned(),
+                expanded: true,
+                workspace_ids: vec!["w3".to_owned()],
+            },
+        ];
+        assert!(panel.remove_worktrees_from_groups());
+        assert!(panel.groups[1].workspace_ids.is_empty());
+        assert_eq!(panel.group_for_workspace(2), Some(0));
+        assert_eq!(panel.workspace_indent(2), "    ");
+        assert_eq!(
+            &panel.rows()[..5],
+            &[
+                WorkspacePanelRow::Header,
+                WorkspacePanelRow::Group(0),
+                WorkspacePanelRow::Workspace(0),
+                WorkspacePanelRow::Workspace(2),
+                WorkspacePanelRow::Group(1),
+            ]
         );
     }
 
