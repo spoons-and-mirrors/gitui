@@ -55,7 +55,6 @@ pub(super) fn draw(
                 let create = draw_workspace_header(
                     frame,
                     row_area,
-                    panel.loading,
                     panel.create_menu_open || hovered == Some(WorkspacePanelHitTarget::CreateMenu),
                 );
                 create_button = Some(create);
@@ -117,7 +116,7 @@ pub(super) fn draw(
             }
             WorkspacePanelRow::Spacer => {}
             WorkspacePanelRow::AgentHeader => {
-                draw_header(frame, row_area, "AGENTS", panel.agents.len(), false);
+                draw_header(frame, row_area, "AGENTS", panel.agents.len());
             }
             WorkspacePanelRow::EmptyAgents => {
                 frame.render_widget(
@@ -305,8 +304,7 @@ fn draw_group(
     );
 }
 
-fn draw_header(frame: &mut Frame<'_>, area: Rect, label: &str, count: usize, loading: bool) {
-    let suffix = if loading { "  ↻" } else { "" };
+fn draw_header(frame: &mut Frame<'_>, area: Rect, label: &str, count: usize) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
@@ -315,21 +313,13 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, label: &str, count: usize, loa
                     .fg(palette().muted)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                format!("  {count}{suffix}"),
-                Style::default().fg(palette().faint),
-            ),
+            Span::styled(format!("  {count}"), Style::default().fg(palette().faint)),
         ])),
         area,
     );
 }
 
-fn draw_workspace_header(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    loading: bool,
-    create_hovered: bool,
-) -> Rect {
+fn draw_workspace_header(frame: &mut Frame<'_>, area: Rect, create_hovered: bool) -> Rect {
     frame.render_widget(
         Paragraph::new("WORKSPACES").style(
             Style::default()
@@ -362,12 +352,6 @@ fn draw_workspace_header(
         ),
         button,
     );
-    if loading && button.right().saturating_add(1) < area.right() {
-        frame.render_widget(
-            Paragraph::new("↻").style(Style::default().fg(palette().faint)),
-            Rect::new(button.right().saturating_add(1), area.y, 1, 1),
-        );
-    }
     button
 }
 

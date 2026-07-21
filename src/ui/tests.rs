@@ -1064,6 +1064,7 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
         }
     }));
     app.workspace_panel.workspaces[0].branch = Some("topic".to_owned());
+    app.workspace_panel.loading = true;
     app.mode = Mode::WorkspacePanel;
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
 
@@ -1102,6 +1103,7 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
     assert!(rendered.contains("topic"));
     assert!(rendered.contains("AGENTS"));
     assert!(rendered.contains("opencode / HUNKLE"));
+    assert!(!rendered.contains('↻'));
     let workspace_row = app
         .regions
         .hit_target_rect(HitTarget::WorkspacePanel(
