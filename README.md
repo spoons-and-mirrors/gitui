@@ -30,7 +30,7 @@ hunkle opens exactly the current or requested directory. When that directory is 
 | `j`, `k` | Move selection; scroll oversized hunks by 10 rows |
 | `Home`, `G` | First or last row |
 | `PageUp`, `PageDown` | Scroll the selected file's diff |
-| `w` | Toggle patch and changed-file wrapping in the Diff panel |
+| `Alt+w` | Toggle patch and changed-file wrapping in the Diff panel |
 | `e`, `E` | Open the selected file in your editor, or configure the editor |
 | `f` | Switch the left pane between Worktree and Files |
 | `F3` | Fuzzy-search repository files from anywhere |
@@ -50,6 +50,7 @@ hunkle opens exactly the current or requested directory. When that directory is 
 | `r` | Refresh |
 | `o` | Open Explorer |
 | `b` | Browse branches, pull requests, and issues |
+| `w` | Cycle the Herdr Workspaces and Agents rail through left, right, and off |
 | `s` | Open settings |
 | `x` | Open repository Actions |
 | `g` | Open Git command |
@@ -57,6 +58,10 @@ hunkle opens exactly the current or requested directory. When that directory is 
 | `q` | Quit |
 
 In Explorer, start typing a folder name, press `p` to search from an empty field, or `/` to start an absolute path. Search accepts fuzzy directory names, relative paths, absolute paths, and `~/...`; `Tab` accepts the best completion and `Enter` opens a repository or navigates into a directory. hunkle indexes directories under your home folder and common workspace mounts in the background.
+
+When hunkle runs inside Herdr, it can show a Workspaces and Agents rail backed by Herdr's session snapshot. Use `j`/`k` and `Enter` to switch, or `Esc` to return to hunkle. The rail refreshes in the background and hides automatically on narrow terminals or outside Herdr.
+
+The rail starts hidden. Press `w` to cycle it through the left side, right side, and off. Inside the rail, press `g` to create a group. Click groups to fold or expand them, and drag workspaces onto a group or back into ungrouped space. A single workspace or agent click only selects it; press `Enter` or double-click to switch.
 
 ## Mouse
 
@@ -69,6 +74,7 @@ In Explorer, start typing a folder name, press `p` to search from an empty field
 - Click `WORKTREE` or `FILES` in the left header to switch modes; clicking a repository file previews its contents.
 - Click `+` in the Files header to create a file or folder. Drag a Files entry onto a folder or the Files header to move it.
 - The wheel pans Worktree and Files as viewports without changing the selected file; click a visible row to select it.
+- Right-click interactions are delivered to hunkle while terminal mouse capture is enabled; Herdr does not consume them first.
 - Use the wheel over Diff or Graph to scroll that surface.
 - Click the Graph `AUTHOR` header to include or exclude commits by author.
 - Drag the one-column Diff scrollbar or click its track to move quickly through large patches.
@@ -99,6 +105,7 @@ The binary stays deliberately direct, with modules split by the behavior they ow
 | `app::commit_summary` | Lazy, repository-scoped cache of commit file and line-change summaries |
 | `app::explorer` | Workspace discovery, navigation, and fuzzy search |
 | `app::repository_browser` | Branch, pull-request, and issue interaction plus cached remote data |
+| `app::workspace_panel` | Herdr workspace and agent snapshots, navigation, and background refresh |
 | `repository_session` | Active workspace lifecycle, background operations, and scoped refreshes |
 | `git` | Installed-Git commands, parsing, refreshable repository facets, and local workspaces |
 | `ui::preview` | Stateful preview styling, wrapping, viewport windows, and hunk geometry |
@@ -108,6 +115,7 @@ The binary stays deliberately direct, with modules split by the behavior they ow
 | `ui::changes` | Worktree, Files, Diff, and commit workspace |
 | `ui::history` | Current-branch history and all-refs graph |
 | `ui::overlays` | Explorer, repository browser, settings, and help overlays |
+| `ui::workspace_panel` | Herdr Workspaces and Agents rail |
 | `ui::text` | Deterministic source and diff presentation |
 | `theme` | Theme discovery, resolution, and palette data |
 

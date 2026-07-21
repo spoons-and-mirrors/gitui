@@ -3,6 +3,7 @@ mod history;
 mod overlays;
 pub(crate) mod preview;
 mod text;
+mod workspace_panel;
 
 #[cfg(test)]
 mod tests;
@@ -17,7 +18,10 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
-    app::{App, FileDialogKind, GraphHitTarget, HitTarget, Mode, Regions, View},
+    app::{
+        App, FileDialogKind, GraphHitTarget, HitTarget, Mode, Regions, View,
+        WorkspacePanelHitTarget, WorkspacePanelPlacement,
+    },
     theme::{Palette, load_theme},
 };
 
@@ -54,9 +58,54 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     app.regions.screen = Some(frame.area());
     draw_header(frame, app, layout[0]);
     let content = layout[1];
-    changes::draw(frame, app, content);
+    let panel_available =
+        app.workspace_panel.is_enabled() && content.width >= workspace_panel::MINIMUM_TOTAL_WIDTH;
+    app.workspace_panel.set_layout_available(panel_available);
+    if !panel_available && app.mode == Mode::WorkspacePanel {
+        app.mode = Mode::Normal;
+    }
+    let main_content = if app.workspace_panel.is_visible() && panel_available {
+        let main_width = content
+            .width
+            .saturating_sub(workspace_panel::WIDTH)
+            .saturating_sub(1);
+        let (panel_area, divider, main) = match app.workspace_panel.placement {
+            WorkspacePanelPlacement::Left => {
+                let panel = Rect::new(content.x, content.y, workspace_panel::WIDTH, content.height);
+                let divider = Rect::new(panel.right(), content.y, 1, content.height);
+                let main = Rect::new(divider.right(), content.y, main_width, content.height);
+                (panel, divider, main)
+            }
+            WorkspacePanelPlacement::Right => {
+                let main = Rect::new(content.x, content.y, main_width, content.height);
+                let divider = Rect::new(main.right(), content.y, 1, content.height);
+                let panel = Rect::new(
+                    divider.right(),
+                    content.y,
+                    workspace_panel::WIDTH,
+                    content.height,
+                );
+                (panel, divider, main)
+            }
+            WorkspacePanelPlacement::Off => unreachable!(),
+        };
+        app.regions.workspace_panel = Some(panel_area);
+        for (target, rect) in workspace_panel::draw(
+            frame,
+            &mut app.workspace_panel,
+            panel_area,
+            app.mode == Mode::WorkspacePanel,
+        ) {
+            app.regions.register_hit_target(target, rect);
+        }
+        fill(frame, divider, palette().canvas);
+        main
+    } else {
+        content
+    };
+    changes::draw(frame, app, main_content);
     if app.view == View::Graph && !app.graph_commit_open {
-        let graph_area = app.regions.diff.unwrap_or(content);
+        let graph_area = app.regions.diff.unwrap_or(main_content);
         frame.render_widget(Clear, graph_area);
         app.regions.diff = None;
         app.regions.diff_scrollbar = None;
@@ -123,7 +172,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             let anchor = app
                 .regions
                 .hit_target_rect(HitTarget::Graph(GraphHitTarget::AuthorHeader))
-                .unwrap_or(Rect::new(content.x, content.y, 1, 1));
+                .unwrap_or(Rect::new(main_content.x, main_content.y, 1, 1));
             for (target, rect) in history::draw_author_filter(frame, anchor, &mut app.author_filter)
             {
                 app.regions.register_hit_target(target, rect);
@@ -131,8 +180,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         Mode::ActionMenu => {
             let anchor = app.regions.actions.unwrap_or(Rect::new(
-                content.x.saturating_add(1),
-                content.y,
+                main_content.x.saturating_add(1),
+                main_content.y,
                 1,
                 1,
             ));
@@ -178,7 +227,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             dim(frame);
             overlays::draw_help(frame);
         }
-        _ => {}
+        Mode::WorkspacePanel | Mode::Normal | Mode::Commit => {}
     }
     finish_selection(frame, app);
 }
@@ -287,15 +336,18 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let browser_label = if compact { " b " } else { " b Branches " };
     let settings_label = if compact { " s " } else { " s Settings " };
     let help_label = if compact { " ? " } else { " ? Help " };
-    let labels = [
-        changes_label.as_str(),
-        graph_label.as_str(),
+    let workspace_label = if compact { " w " } else { " w Workspaces " };
+    let mut labels = vec![changes_label.as_str(), graph_label.as_str()];
+    if app.workspace_panel.is_available() {
+        labels.push(workspace_label);
+    }
+    labels.extend([
         refresh_label,
         explorer_label,
         browser_label,
         settings_label,
         help_label,
-    ];
+    ]);
 
     let total_width = labels.iter().fold(0_u16, |width, label| {
         width.saturating_add(UnicodeWidthStr::width(*label) as u16)
@@ -325,11 +377,20 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     app.regions.changes = rects.first().copied();
     app.regions.graph = rects.get(1).copied();
-    app.regions.refresh = rects.get(2).copied();
-    app.regions.explorer = rects.get(3).copied();
-    app.regions.repository_browser = rects.get(4).copied();
-    app.regions.settings = rects.get(5).copied();
-    app.regions.help = rects.get(6).copied();
+    let offset = usize::from(app.workspace_panel.is_available());
+    if app.workspace_panel.is_available()
+        && let Some(rect) = rects.get(2).copied()
+    {
+        app.regions.register_hit_target(
+            HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Focus),
+            rect,
+        );
+    }
+    app.regions.refresh = rects.get(2 + offset).copied();
+    app.regions.explorer = rects.get(3 + offset).copied();
+    app.regions.repository_browser = rects.get(4 + offset).copied();
+    app.regions.settings = rects.get(5 + offset).copied();
+    app.regions.help = rects.get(6 + offset).copied();
 
     frame.render_widget(
         Paragraph::new(Line::from(spans)),

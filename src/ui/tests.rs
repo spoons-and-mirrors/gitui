@@ -9,7 +9,7 @@ use ratatui::{
 
 use crate::app::{
     App, BrowserTab, GraphHitTarget, HitTarget, LeftPane, Mode, PullRequest, RemoteItems,
-    RepositoryBrowserHitTarget, Settings, View,
+    RepositoryBrowserHitTarget, Settings, View, WorkspacePanel, WorkspacePanelHitTarget,
 };
 
 use super::draw;
@@ -791,7 +791,7 @@ fn renders_every_primary_surface() {
         .collect();
     assert!(!unwrapped_file_summary.contains("fixtures/file-05.txt"));
     assert!(app.regions.graph_table.is_none());
-    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let mut wrapped_file_summary = String::new();
     for row in commit_diff.y + 3..commit_diff.y + 9 {
@@ -800,7 +800,7 @@ fn renders_every_primary_surface() {
         }
     }
     assert!(wrapped_file_summary.contains("fixtures/file-05.txt"));
-    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT));
 
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     assert_eq!(app.view, View::Graph);
@@ -1016,6 +1016,111 @@ fn renders_every_primary_surface() {
 
     let mut narrow = Terminal::new(TestBackend::new(50, 12)).unwrap();
     narrow.draw(|frame| draw(frame, &mut app)).unwrap();
+}
+
+#[test]
+fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut app = App::new(directory.path().to_path_buf());
+    app.workspace_panel = WorkspacePanel::ready_for_test(&serde_json::json!({
+        "result": {
+            "snapshot": {
+                "workspaces": [{
+                    "workspace_id": "w1",
+                    "label": "HUNKLE",
+                    "number": 4,
+                    "pane_count": 2,
+                    "focused": true,
+                    "agent_status": "working"
+                }],
+                "agents": [{
+                    "agent": "opencode",
+                    "agent_status": "working",
+                    "focused": true,
+                    "pane_id": "w1:p1",
+                    "tab_id": "w1:t1",
+                    "workspace_id": "w1"
+                }]
+            }
+        }
+    }));
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    assert_eq!(app.regions.workspace_panel.unwrap().width, 26);
+    assert_eq!(app.regions.worktree.unwrap().x, 27);
+    assert_eq!(
+        app.regions
+            .hit_target_rect(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Collapse,))
+            .unwrap()
+            .y,
+        app.regions.worktree.unwrap().y + 1
+    );
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::WorkspacePanel(
+                WorkspacePanelHitTarget::Workspace(0)
+            ))
+            .is_some()
+    );
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(0)))
+            .is_some()
+    );
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(rendered.contains("WORKSPACES"));
+    assert!(rendered.contains("HUNKLE"));
+    assert!(rendered.contains("AGENTS"));
+    assert!(rendered.contains("opencode / HUNKLE"));
+
+    app.workspace_panel.begin_group();
+    app.workspace_panel.paste("Current work");
+    app.workspace_panel
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Group(0)))
+            .is_some()
+    );
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(rendered.contains("Current work"));
+
+    app.workspace_panel.cycle_placement();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(app.regions.workspace_panel.unwrap().x, 94);
+    assert_eq!(app.regions.worktree.unwrap().x, 0);
+
+    app.workspace_panel.cycle_placement();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.workspace_panel.is_none());
+    assert_eq!(app.regions.worktree.unwrap().x, 0);
+
+    app.workspace_panel.show_left();
+
+    let mut narrow = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    narrow.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.workspace_panel.is_none());
+    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("Workspaces need a wider terminal")
+    );
 }
 
 #[test]

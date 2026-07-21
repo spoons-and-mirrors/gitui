@@ -60,6 +60,7 @@ fn main() -> Result<()> {
                         app.graph_state.selected(),
                         app.author_filter.state.selected(),
                         app.repository_browser.state.selected(),
+                        app.workspace_panel.selected,
                     );
                     app.handle_mouse(mouse);
                     let changed = !matches!(mouse.kind, event::MouseEventKind::Moved)
@@ -70,6 +71,7 @@ fn main() -> Result<()> {
                                 app.graph_state.selected(),
                                 app.author_filter.state.selected(),
                                 app.repository_browser.state.selected(),
+                                app.workspace_panel.selected,
                             );
                     (changed, false)
                 }

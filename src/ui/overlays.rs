@@ -1705,13 +1705,14 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
         help_line("r", "Refresh"),
         help_line("o", "Explorer"),
         help_line("b", "Branches / PRs / issues"),
+        help_line("w", "Cycle Herdr rail left/right/off"),
         help_line("s", "Settings"),
         help_line("x", "Git actions"),
         help_line("g", "Git command"),
         help_line("e / E", "Edit / configure editor"),
         help_line("f", "Worktree / files"),
         help_line("F3", "Find repository file"),
-        help_line("w", "Wrap diff"),
+        help_line("Alt+w", "Wrap diff"),
     ];
     let worktree = vec![
         Line::styled(

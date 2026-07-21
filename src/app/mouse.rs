@@ -1,11 +1,12 @@
-use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 
 use crate::{git::RefreshScope, selection::SelectionOutcome};
 
 use super::{
     ACTION_ITEMS, App, GraphHitTarget, HitTarget, LeftPane, Mode, RepositoryBrowserEffect,
-    RepositoryBrowserHitTarget, View, scroll_table,
+    RepositoryBrowserHitTarget, View, WorkspaceDropTarget, WorkspacePanelEffect,
+    WorkspacePanelHitTarget, scroll_table,
 };
 
 impl App {
@@ -44,6 +45,32 @@ impl App {
                 }
                 _ => {}
             }
+            return;
+        }
+
+        if self.workspace_panel.is_dragging_workspace() {
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    let target = self.workspace_drop_target(point);
+                    self.workspace_panel.update_workspace_drag(target);
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    if let WorkspacePanelEffect::Notice(notice) =
+                        self.workspace_panel.finish_workspace_drag()
+                    {
+                        self.notice = Some(notice);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && let Some(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Workspace(index))) =
+                self.regions.hit_target_at(point)
+            && self.workspace_panel.begin_workspace_drag(index)
+        {
+            self.mode = Mode::WorkspacePanel;
             return;
         }
 
@@ -125,6 +152,9 @@ impl App {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                 self.mode = Mode::Normal;
             }
+            return;
+        }
+        if self.mode == Mode::WorkspacePanel && mouse.kind == MouseEventKind::Moved {
             return;
         }
 
@@ -229,6 +259,7 @@ impl App {
                 RepositoryBrowserHitTarget::Overlay,
             )),
             self.regions.diff,
+            self.regions.workspace_panel,
             self.regions.worktree,
             self.regions.graph_table,
         ]
@@ -258,6 +289,7 @@ impl App {
             Mode::Help => self.mode = Mode::Normal,
             Mode::Editor => {}
             Mode::Files => self.handle_file_dialog_click(point),
+            Mode::WorkspacePanel => self.handle_workspace_panel_click(point),
             Mode::Normal | Mode::Commit => self.handle_primary_left_click(point),
         }
     }
@@ -269,10 +301,16 @@ impl App {
             self.mode = Mode::Normal;
             self.flush_commit_draft();
         }
-        if self.regions.hit_target_at(point) == Some(HitTarget::Graph(GraphHitTarget::AuthorHeader))
-        {
-            self.open_author_filter();
-            return;
+        match self.regions.hit_target_at(point) {
+            Some(HitTarget::Graph(GraphHitTarget::AuthorHeader)) => {
+                self.open_author_filter();
+                return;
+            }
+            Some(HitTarget::WorkspacePanel(target)) => {
+                self.activate_workspace_panel_target(target);
+                return;
+            }
+            _ => {}
         }
         if let Some(hunk) = self
             .regions
@@ -407,6 +445,57 @@ impl App {
         }
     }
 
+    fn handle_workspace_panel_click(&mut self, point: Position) {
+        if let Some(HitTarget::WorkspacePanel(target)) = self.regions.hit_target_at(point) {
+            self.activate_workspace_panel_target(target);
+        } else if !self
+            .regions
+            .workspace_panel
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.mode = Mode::Normal;
+            self.handle_primary_left_click(point);
+        }
+    }
+
+    fn activate_workspace_panel_target(&mut self, target: WorkspacePanelHitTarget) {
+        match target {
+            WorkspacePanelHitTarget::Focus => self.open_workspace_panel(),
+            WorkspacePanelHitTarget::Collapse => {
+                self.workspace_panel.hide();
+                self.mode = Mode::Normal;
+            }
+            WorkspacePanelHitTarget::Group(index) => self.workspace_panel.toggle_group(index),
+            WorkspacePanelHitTarget::Workspace(index) => {
+                self.workspace_panel.click_workspace(index);
+            }
+            WorkspacePanelHitTarget::Agent(index) => {
+                self.workspace_panel.click_agent(index);
+            }
+        }
+    }
+
+    fn workspace_drop_target(&self, point: Position) -> Option<WorkspaceDropTarget> {
+        match self.regions.hit_target_at(point) {
+            Some(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Group(index))) => {
+                Some(WorkspaceDropTarget::Group(index))
+            }
+            Some(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Workspace(index))) => self
+                .workspace_panel
+                .group_for_workspace(index)
+                .map(WorkspaceDropTarget::Group)
+                .or(Some(WorkspaceDropTarget::Ungrouped)),
+            _ if self
+                .regions
+                .workspace_panel
+                .is_some_and(|rect| rect.contains(point)) =>
+            {
+                Some(WorkspaceDropTarget::Ungrouped)
+            }
+            _ => None,
+        }
+    }
+
     fn handle_action_mouse(&mut self, mouse: MouseEvent) {
         let point = Position::new(mouse.column, mouse.row);
         match mouse.kind {
@@ -505,6 +594,7 @@ impl App {
                     RepositoryBrowserHitTarget::Overlay | RepositoryBrowserHitTarget::List,
                 )) => {}
                 Some(HitTarget::Graph(_)) => {}
+                Some(HitTarget::WorkspacePanel(_)) => {}
             },
             _ => {}
         }
@@ -711,7 +801,20 @@ impl App {
     }
 
     fn scroll_at(&mut self, point: Position, delta: isize) {
-        if self.regions.diff.is_some_and(|rect| rect.contains(point)) {
+        if self
+            .regions
+            .workspace_panel
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.workspace_panel.handle_key(KeyEvent::new(
+                if delta > 0 {
+                    KeyCode::Down
+                } else {
+                    KeyCode::Up
+                },
+                KeyModifiers::NONE,
+            ));
+        } else if self.regions.diff.is_some_and(|rect| rect.contains(point)) {
             self.changes
                 .scroll_diff_by(self.regions.diff_scroll_max, delta.saturating_mul(3));
         } else if self

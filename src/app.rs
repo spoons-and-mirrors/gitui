@@ -9,6 +9,7 @@ mod fuzzy;
 mod mouse;
 mod repository_browser;
 mod text_input;
+mod workspace_panel;
 
 pub(crate) use actions::{ACTION_ITEMS, ActionsState, CommandStatus};
 pub(crate) use author_filter::{AuthorFilter, AuthorFilterEffect};
@@ -19,6 +20,10 @@ pub(crate) use file_search::FileSearch;
 pub(crate) use files::{FileDialog, FileDialogKind, FileDrag, FileNameAction};
 pub(crate) use repository_browser::{
     BrowserTab, PullRequest, RemoteItems, RepositoryBrowser, RepositoryBrowserEffect,
+};
+pub(crate) use workspace_panel::{
+    AgentStatus, WorkspaceDropTarget, WorkspacePanel, WorkspacePanelEffect,
+    WorkspacePanelPlacement, WorkspacePanelRow,
 };
 
 use std::{
@@ -64,6 +69,7 @@ pub enum Mode {
     Command,
     Editor,
     Files,
+    WorkspacePanel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,6 +108,16 @@ pub struct DiffHunkRegion {
 pub(crate) enum HitTarget {
     Graph(GraphHitTarget),
     RepositoryBrowser(RepositoryBrowserHitTarget),
+    WorkspacePanel(WorkspacePanelHitTarget),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkspacePanelHitTarget {
+    Focus,
+    Collapse,
+    Group(usize),
+    Workspace(usize),
+    Agent(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +151,7 @@ pub struct Regions {
     pub repository_browser: Option<Rect>,
     pub settings: Option<Rect>,
     pub help: Option<Rect>,
+    pub workspace_panel: Option<Rect>,
     pub actions: Option<Rect>,
     pub worktree: Option<Rect>,
     pub worktree_tab: Option<Rect>,
@@ -222,6 +239,7 @@ pub struct App {
     pub(crate) file_search: FileSearch,
     pub(crate) actions: ActionsState,
     pub(crate) repository_browser: RepositoryBrowser,
+    pub(crate) workspace_panel: WorkspacePanel,
     pub settings: Settings,
     pub settings_selection: usize,
     pub notice: Option<String>,
@@ -272,6 +290,10 @@ impl App {
                 }
             })
             .unwrap_or_default();
+        let workspace_groups_path = settings_path
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map(|path| path.join("workspace-groups.json"));
         let interval = fetch_interval(&settings);
         let session = if open_in_background {
             RepositorySession::opening(path.clone(), interval)
@@ -329,6 +351,7 @@ impl App {
             file_search,
             actions: ActionsState::default(),
             repository_browser,
+            workspace_panel: WorkspacePanel::detect(workspace_groups_path),
             settings,
             settings_selection: 0,
             notice: open_in_background.then(|| "Opening workspace…".to_owned()),
@@ -455,6 +478,7 @@ impl App {
             Mode::Command => self.handle_command(key),
             Mode::Editor => self.handle_editor(key),
             Mode::Files => self.handle_file_dialog(key),
+            Mode::WorkspacePanel => self.handle_workspace_panel(key),
             Mode::Help => {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
                     self.mode = Mode::Normal;
@@ -494,6 +518,7 @@ impl App {
                 }
             }
             Mode::RepositoryBrowser => self.repository_browser.paste(text),
+            Mode::WorkspacePanel => self.workspace_panel.paste(text),
             _ => {}
         }
     }
@@ -504,6 +529,11 @@ impl App {
 
     pub fn poll_worker(&mut self) -> bool {
         let mut changed = self.mode == Mode::Explorer && self.workspace_explorer.poll_index();
+        let (panel_changed, panel_error) = self.workspace_panel.poll();
+        changed |= panel_changed;
+        if let Some(error) = panel_error {
+            self.notice = Some(error);
+        }
         changed |= self.repository_browser.poll();
         self.prefetch_commit_summaries();
         changed |= self.commit_summaries.poll();
@@ -789,6 +819,11 @@ impl App {
                 self.notice = Some("A Git operation is still running".to_owned())
             }
             KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('w')
+                if key.modifiers == KeyModifiers::NONE && self.workspace_panel.is_enabled() =>
+            {
+                self.cycle_workspace_panel();
+            }
             KeyCode::Char('1') => {
                 self.view = View::Changes;
                 self.graph_commit_open = false;
@@ -813,7 +848,10 @@ impl App {
             KeyCode::Char('x') => self.open_actions(),
             KeyCode::Char('g') => self.open_git_command(),
             KeyCode::Char('?') => self.mode = Mode::Help,
-            KeyCode::Char('w') if self.view == View::Changes || self.graph_commit_open => {
+            KeyCode::Char('w')
+                if key.modifiers == KeyModifiers::ALT
+                    && (self.view == View::Changes || self.graph_commit_open) =>
+            {
                 let wrapped = self.changes.toggle_wrap();
                 self.notice = Some(
                     if wrapped {
@@ -1386,6 +1424,41 @@ impl App {
     fn handle_repository_browser(&mut self, key: KeyEvent) {
         let effect = self.repository_browser.handle_key(key);
         self.apply_repository_browser_effect_option(effect);
+    }
+
+    fn open_workspace_panel(&mut self) {
+        if !self.workspace_panel.is_available() {
+            if self.workspace_panel.is_enabled() {
+                self.notice = Some("Workspaces need a wider terminal".to_owned());
+            }
+            return;
+        }
+        if !self.workspace_panel.is_visible() {
+            self.workspace_panel.show_left();
+        }
+        self.mode = Mode::WorkspacePanel;
+    }
+
+    fn cycle_workspace_panel(&mut self) {
+        if !self.workspace_panel.is_available() {
+            self.open_workspace_panel();
+        } else {
+            self.workspace_panel.cycle_placement();
+            self.mode = if self.workspace_panel.is_visible() {
+                Mode::WorkspacePanel
+            } else {
+                Mode::Normal
+            };
+        }
+    }
+
+    fn handle_workspace_panel(&mut self, key: KeyEvent) {
+        match self.workspace_panel.handle_key(key) {
+            WorkspacePanelEffect::None => {}
+            WorkspacePanelEffect::Close => self.mode = Mode::Normal,
+            WorkspacePanelEffect::Cycle => self.cycle_workspace_panel(),
+            WorkspacePanelEffect::Notice(notice) => self.notice = Some(notice),
+        }
     }
 
     fn open_author_filter(&mut self) {
@@ -2249,10 +2322,10 @@ mod tests {
 
         app.mode = Mode::Normal;
         app.changes.diff_scroll = 37;
-        app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT));
         assert!(app.changes.diff_wrap);
         assert_eq!(app.changes.diff_scroll, 37);
-        app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT));
         assert!(!app.changes.diff_wrap);
         assert_eq!(app.changes.diff_scroll, 37);
     }

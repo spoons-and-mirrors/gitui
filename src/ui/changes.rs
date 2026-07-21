@@ -368,9 +368,9 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         ),
     );
     let wrap_label = if app.changes.diff_wrap {
-        "  w:on"
+        "  alt+w:on"
     } else {
-        "  w:off"
+        "  alt+w:off"
     };
     let display_path = truncate_width(
         &selected_label,
@@ -743,9 +743,9 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
             .saturating_sub(preview_header.y.saturating_add(3)),
     );
     let wrap_label = if app.changes.diff_wrap {
-        "  w:on"
+        "  alt+w:on"
     } else {
-        "  w:off"
+        "  alt+w:off"
     };
     let display_path = truncate_width(
         &selected_path,
