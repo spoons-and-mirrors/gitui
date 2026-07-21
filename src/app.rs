@@ -705,6 +705,13 @@ impl App {
                     }
                     Err(error) => self.notice = Some(error),
                 },
+                WorkerCompletion::DiscardUnstaged(done) => {
+                    self.reload(RefreshScope::WORKTREE_AND_INVENTORY);
+                    self.notice = Some(match done.result {
+                        Ok(()) => format!("Discarded unstaged changes to {}", done.path),
+                        Err(error) => error,
+                    });
+                }
                 WorkerCompletion::Format(done) => match done.result {
                     Ok(output) if output.success => {
                         self.reload(RefreshScope::WORKTREE);
@@ -920,6 +927,13 @@ impl App {
         }
         if key.code == KeyCode::Char('f') && self.view == View::Graph {
             self.toggle_changes_files();
+            return;
+        }
+        if key.code == KeyCode::Delete
+            && key.modifiers.is_empty()
+            && self.changes.pane == LeftPane::Worktree
+        {
+            self.open_discard_unstaged_dialog();
             return;
         }
         if let Some(index) = self.changes.hunk_selection {
@@ -2559,6 +2573,89 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::CONTROL));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         wait_for_state(&mut app, |_| !root.join("created/ renamed.txt ").exists());
+    }
+
+    #[test]
+    fn confirms_and_discards_only_the_selected_unstaged_change() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        initialize_repository(root);
+        fs::write(root.join("tracked.txt"), "staged\n").unwrap();
+        run_git(root, &["add", "tracked.txt"]);
+        fs::write(root.join("tracked.txt"), "unstaged\n").unwrap();
+        fs::write(root.join("other.txt"), "other unstaged\n").unwrap();
+        let mut app = App::new(root.to_path_buf());
+        let change_index = app
+            .repository()
+            .unwrap()
+            .changes
+            .iter()
+            .position(|change| change.path == "tracked.txt" && !change.staged)
+            .unwrap();
+        let row = app
+            .changes
+            .worktree_rows(app.repository().unwrap())
+            .iter()
+            .position(|row| row.change_index == Some(change_index))
+            .unwrap();
+        let repo = app.repository().unwrap().clone();
+        assert!(app.changes.select_worktree_row(&repo, row));
+
+        app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert!(matches!(
+            app.file_dialog.as_ref().map(|dialog| &dialog.kind),
+            Some(FileDialogKind::DiscardUnstaged { change })
+                if change.path == "tracked.txt" && !change.staged
+        ));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(
+            fs::read_to_string(root.join("tracked.txt")).unwrap(),
+            "unstaged\n"
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        wait_for_state(&mut app, |app| {
+            app.repository().is_some_and(|repo| {
+                repo.changes
+                    .iter()
+                    .filter(|change| change.path == "tracked.txt")
+                    .all(|change| change.staged)
+                    && repo
+                        .changes
+                        .iter()
+                        .filter(|change| change.path == "tracked.txt")
+                        .count()
+                        == 1
+            })
+        });
+
+        assert_eq!(
+            fs::read_to_string(root.join("tracked.txt")).unwrap(),
+            "staged\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("other.txt")).unwrap(),
+            "other unstaged\n"
+        );
+        assert_eq!(app.changes.pane, LeftPane::Worktree);
+        assert_eq!(
+            app.repository()
+                .and_then(|repo| app.changes.selected_change_index(repo))
+                .and_then(|index| app.repository()?.changes.get(index))
+                .map(|change| (change.path.as_str(), change.staged)),
+            Some(("tracked.txt", true))
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert!(app.file_dialog.is_none());
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("Select an unstaged change to discard")
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("tracked.txt")).unwrap(),
+            "staged\n"
+        );
     }
 
     #[test]

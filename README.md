@@ -36,11 +36,12 @@ hunkle opens exactly the current or requested directory. When that directory is 
 | `m` | Toggle rendered Markdown and source for Markdown files in Files |
 | `F3` | Fuzzy-search repository files from anywhere |
 | `F2` | Rename the selected file or folder in Files |
-| `Ctrl+Delete` | Delete the selected file or folder after confirmation |
+| `Ctrl+Delete` | Permanently delete the selected file or folder from Files after confirmation |
 | `Ctrl+S` | Format the selected file using an available file-type formatter |
 | `h`, `l`, `Left`, `Right` | Navigate the tree; Right enters/stages in hunk mode and Left exits it |
 | `Enter` | Toggle the selected directory |
 | `Space` | Stage or unstage the selected entry, or stage the selected hunk |
+| `Delete` in Changes | Discard the selected file's unstaged changes after confirmation; staged changes are preserved |
 | `Right`, `l` in hunk mode | Stage the selected hunk |
 | `a`, `u` | Stage all or unstage all |
 | `c` | Focus the commit message editor |

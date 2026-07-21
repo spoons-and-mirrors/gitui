@@ -17,6 +17,7 @@ Use these policies:
 
 - Staging mutations and editor completion refresh WORKTREE.
 - File operations refresh WORKTREE and FILES inventory.
+- Discarding unstaged file changes refreshes WORKTREE and FILES inventory because it can restore, rename, or remove paths.
 - Fetch refreshes history, Graph, and refs.
 - Commit refreshes WORKTREE, history, Graph, and refs.
 - Manual refreshes, arbitrary Git commands, and externally detected changes refresh everything because their effects are not known locally.

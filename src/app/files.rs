@@ -3,7 +3,10 @@ use std::path::Path;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Position;
 
-use crate::filesystem::{FileOperation, validate_name};
+use crate::{
+    filesystem::{FileOperation, validate_name},
+    git::Change,
+};
 
 use super::{App, LeftPane, Mode, TextInput, View};
 
@@ -20,6 +23,9 @@ pub(crate) enum FileDialogKind {
     Delete {
         path: String,
         is_directory: bool,
+    },
+    DiscardUnstaged {
+        change: Change,
     },
 }
 
@@ -118,6 +124,11 @@ impl App {
                 KeyCode::Enter | KeyCode::Char('y') => self.confirm_delete(),
                 _ => {}
             },
+            FileDialogKind::DiscardUnstaged { .. } => match key.code {
+                KeyCode::Esc | KeyCode::Char('n') => self.close_file_dialog(),
+                KeyCode::Enter | KeyCode::Char('y') => self.confirm_discard_unstaged(),
+                _ => {}
+            },
         }
     }
 
@@ -181,6 +192,36 @@ impl App {
                 path: entry.path,
                 is_directory: entry.is_directory,
             },
+            input: TextInput::default(),
+            choice: 0,
+            error: None,
+        });
+        self.mode = Mode::Files;
+    }
+
+    pub(super) fn open_discard_unstaged_dialog(&mut self) {
+        if self.changes.pane != LeftPane::Worktree || self.changes.history_focused {
+            return;
+        }
+        let Some(change) = self
+            .session
+            .data()
+            .and_then(|repo| {
+                self.changes
+                    .selected_change_index(repo)
+                    .map(|index| (repo, index))
+            })
+            .and_then(|(repo, index)| repo.changes.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        if change.staged {
+            self.notice = Some("Select an unstaged change to discard".to_owned());
+            return;
+        }
+        self.file_dialog = Some(FileDialog {
+            kind: FileDialogKind::DiscardUnstaged { change },
             input: TextInput::default(),
             choice: 0,
             error: None,
@@ -253,6 +294,18 @@ impl App {
         self.start_file_operation(FileOperation::Delete { path });
     }
 
+    fn confirm_discard_unstaged(&mut self) {
+        let Some(FileDialogKind::DiscardUnstaged { change }) =
+            self.file_dialog.as_ref().map(|dialog| dialog.kind.clone())
+        else {
+            return;
+        };
+        self.close_file_dialog();
+        if !self.session.start_discard_unstaged(change) {
+            self.notice = Some("Another repository operation is running".to_owned());
+        }
+    }
+
     fn close_file_dialog(&mut self) {
         self.file_dialog = None;
         self.mode = Mode::Normal;
@@ -276,6 +329,7 @@ impl App {
                 }
                 Some(FileDialogKind::Name { .. }) => self.submit_file_name(),
                 Some(FileDialogKind::Delete { .. }) => self.confirm_delete(),
+                Some(FileDialogKind::DiscardUnstaged { .. }) => self.confirm_discard_unstaged(),
                 None => {}
             }
         } else if self

@@ -173,6 +173,42 @@ pub struct Change {
     pub deletions: u64,
 }
 
+pub(crate) fn discard_unstaged(root: &Path, change: &Change) -> Result<()> {
+    if change.staged {
+        bail!("Cannot discard a staged change");
+    }
+    for path in std::iter::once(change.path.as_str()).chain(change.original_path.as_deref()) {
+        let unmerged = run(root, &["ls-files", "--unmerged", "--", path])?;
+        if !unmerged.status.success() {
+            bail!("{}", clean_stderr(&unmerged));
+        }
+        if !unmerged.stdout.is_empty() {
+            bail!("Cannot discard unresolved changes to {}", change.path);
+        }
+    }
+
+    match change.code {
+        '?' | 'C' => clean_untracked_path(root, &change.path),
+        'R' => {
+            let original_path = change
+                .original_path
+                .as_deref()
+                .ok_or_else(|| anyhow!("Cannot restore rename without its original path"))?;
+            run_ok(root, &["restore", "--worktree", "--", original_path])?;
+            clean_untracked_path(root, &change.path)
+        }
+        _ => run_ok(root, &["restore", "--worktree", "--", &change.path]),
+    }
+}
+
+fn clean_untracked_path(root: &Path, path: &str) -> Result<()> {
+    run_ok(root, &["clean", "-f", "--", path])?;
+    if fs::symlink_metadata(root.join(path)).is_ok() {
+        bail!("Git did not remove untracked path {path}");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct Commit {
     pub oid: String,
@@ -2172,6 +2208,161 @@ mod tests {
             changes
                 .iter()
                 .any(|change| change.path == "split.txt" && !change.staged)
+        );
+    }
+
+    #[test]
+    fn discards_only_selected_unstaged_changes_and_preserves_the_index() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "-b", "main"]);
+        git(root, &["config", "user.name", "Test Author"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        fs::write(root.join("tracked.txt"), "base\n").unwrap();
+        fs::write(root.join("other.txt"), "other base\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-m", "base"]);
+
+        fs::write(root.join("tracked.txt"), "staged\n").unwrap();
+        git(root, &["add", "tracked.txt"]);
+        fs::write(root.join("tracked.txt"), "unstaged\n").unwrap();
+        fs::write(root.join("other.txt"), "other unstaged\n").unwrap();
+        let change = load(root)
+            .unwrap()
+            .changes
+            .into_iter()
+            .find(|change| change.path == "tracked.txt" && !change.staged)
+            .unwrap();
+
+        discard_unstaged(root, &change).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(root.join("tracked.txt")).unwrap(),
+            "staged\n"
+        );
+        assert_eq!(
+            String::from_utf8(run(root, &["show", ":tracked.txt"]).unwrap().stdout).unwrap(),
+            "staged\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("other.txt")).unwrap(),
+            "other unstaged\n"
+        );
+        let changes = load(root).unwrap().changes;
+        assert_eq!(
+            changes
+                .iter()
+                .filter(|change| change.path == "tracked.txt")
+                .count(),
+            1
+        );
+        assert!(
+            changes
+                .iter()
+                .any(|change| change.path == "tracked.txt" && change.staged)
+        );
+        assert!(
+            changes
+                .iter()
+                .any(|change| change.path == "other.txt" && !change.staged)
+        );
+    }
+
+    #[test]
+    fn discards_untracked_files_and_restores_deleted_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "-b", "main"]);
+        fs::write(root.join("tracked.txt"), "tracked\n").unwrap();
+        git(root, &["add", "tracked.txt"]);
+        fs::remove_file(root.join("tracked.txt")).unwrap();
+        fs::write(root.join("remove.txt"), "remove\n").unwrap();
+        fs::write(root.join("keep.txt"), "keep\n").unwrap();
+        let changes = load(root).unwrap().changes;
+
+        let deleted = changes
+            .iter()
+            .find(|change| change.path == "tracked.txt" && !change.staged)
+            .unwrap();
+        discard_unstaged(root, deleted).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("tracked.txt")).unwrap(),
+            "tracked\n"
+        );
+
+        let untracked = changes
+            .iter()
+            .find(|change| change.path == "remove.txt" && !change.staged)
+            .unwrap();
+        discard_unstaged(root, untracked).unwrap();
+        assert!(!root.join("remove.txt").exists());
+        assert!(root.join("keep.txt").exists());
+    }
+
+    #[test]
+    fn discards_an_unstaged_rename() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "-b", "main"]);
+        fs::write(root.join("old.txt"), "content\n").unwrap();
+        git(root, &["add", "old.txt"]);
+        git(root, &["commit", "-m", "base"]);
+        fs::rename(root.join("old.txt"), root.join("new.txt")).unwrap();
+        let change = Change {
+            path: "new.txt".to_owned(),
+            original_path: Some("old.txt".to_owned()),
+            code: 'R',
+            staged: false,
+            additions: 0,
+            deletions: 0,
+        };
+
+        discard_unstaged(root, &change).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(root.join("old.txt")).unwrap(),
+            "content\n"
+        );
+        assert!(!root.join("new.txt").exists());
+        assert!(load(root).unwrap().changes.is_empty());
+    }
+
+    #[test]
+    fn refuses_to_discard_an_unresolved_conflict() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "-b", "main"]);
+        git(root, &["config", "user.name", "Test Author"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        fs::write(root.join("conflict.txt"), "base\n").unwrap();
+        git(root, &["add", "conflict.txt"]);
+        git(root, &["commit", "-m", "base"]);
+        git(root, &["switch", "-c", "side"]);
+        fs::write(root.join("conflict.txt"), "side\n").unwrap();
+        git(root, &["commit", "-am", "side"]);
+        git(root, &["switch", "main"]);
+        fs::write(root.join("conflict.txt"), "main\n").unwrap();
+        git(root, &["commit", "-am", "main"]);
+        let merge = run(root, &["merge", "side"]).unwrap();
+        assert!(!merge.status.success());
+        let before = fs::read_to_string(root.join("conflict.txt")).unwrap();
+        let change = load(root)
+            .unwrap()
+            .changes
+            .into_iter()
+            .find(|change| change.path == "conflict.txt" && !change.staged)
+            .unwrap();
+
+        assert!(discard_unstaged(root, &change).is_err());
+        assert_eq!(
+            fs::read_to_string(root.join("conflict.txt")).unwrap(),
+            before
+        );
+        assert!(
+            !run(root, &["ls-files", "--unmerged"])
+                .unwrap()
+                .stdout
+                .is_empty()
         );
     }
 

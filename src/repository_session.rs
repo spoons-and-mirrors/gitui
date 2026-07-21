@@ -26,6 +26,7 @@ pub(crate) enum WorkerCompletion {
     Command(CommandCompletion),
     Mutation(Result<(), String>),
     FileOperation(FileOperationCompletion),
+    DiscardUnstaged(DiscardUnstagedCompletion),
     Format(FormatCompletion),
     BranchDelete(BranchDeleteCompletion),
 }
@@ -65,6 +66,11 @@ pub(crate) struct CommandCompletion {
 pub(crate) struct FileOperationCompletion {
     pub(crate) result: Result<Option<String>, String>,
     pub(crate) message: String,
+}
+
+pub(crate) struct DiscardUnstagedCompletion {
+    pub(crate) path: String,
+    pub(crate) result: Result<(), String>,
 }
 
 pub(crate) struct FormatCompletion {
@@ -111,6 +117,9 @@ enum WorkerKind {
     FileOperation {
         selection: Option<String>,
         message: String,
+    },
+    DiscardUnstaged {
+        path: String,
     },
     Format {
         path: String,
@@ -492,6 +501,35 @@ impl RepositorySession {
         true
     }
 
+    pub(crate) fn start_discard_unstaged(&mut self, change: Change) -> bool {
+        if !self.operations.can_start(Operation::Mutation) {
+            return false;
+        }
+        let Some(root) = self.git_root() else {
+            return false;
+        };
+
+        self.operations.start(Operation::Mutation);
+        let path = change.path.clone();
+        let sender = self.worker_tx.clone();
+        thread::spawn(move || {
+            let result = git::discard_unstaged(&root, &change)
+                .map(|()| CommandOutput {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    success: true,
+                    exit_code: Some(0),
+                })
+                .map_err(|error| error.to_string());
+            let _ = sender.send(WorkerResult {
+                kind: WorkerKind::DiscardUnstaged { path },
+                root,
+                result,
+            });
+        });
+        true
+    }
+
     pub(crate) fn start_branch_delete(
         &mut self,
         branch: String,
@@ -655,6 +693,17 @@ impl RepositorySession {
                             result: done.result.map(|_| selection),
                             message,
                         }));
+                    }
+                }
+                WorkerKind::DiscardUnstaged { path } => {
+                    self.operations.finish(Operation::Mutation);
+                    if active {
+                        return Some(WorkerCompletion::DiscardUnstaged(
+                            DiscardUnstagedCompletion {
+                                path,
+                                result: done.result.map(|_| ()),
+                            },
+                        ));
                     }
                 }
                 WorkerKind::Format { path, formatter } => {

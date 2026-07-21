@@ -681,6 +681,25 @@ pub(super) fn draw_file_dialog(frame: &mut Frame<'_>, dialog: &FileDialog) -> Fi
             "Cancel",
             true,
         ),
+        FileDialogKind::DiscardUnstaged { change } => (
+            "DISCARD UNSTAGED CHANGES",
+            match change.code {
+                '?' => format!("Permanently delete untracked file {}?", change.path),
+                'R' => format!(
+                    "Discard rename {} → {} and restore the original file?",
+                    change.original_path.as_deref().unwrap_or("unknown"),
+                    change.path
+                ),
+                'C' => format!("Permanently delete untracked copy {}?", change.path),
+                _ => format!(
+                    "Restore {} from the index? Any staged changes will be preserved.",
+                    change.path
+                ),
+            },
+            "Discard",
+            "Cancel",
+            true,
+        ),
     };
     frame.render_widget(
         Paragraph::new(title).style(
@@ -1885,9 +1904,10 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
         help_line("→ / l", "Enter / stage hunk"),
         help_line("Enter", "Toggle folder"),
         help_line("Space", "Stage file / hunk"),
+        help_line("Delete", "Discard unstaged file changes"),
         help_line("a / u", "Stage / unstage all"),
         help_line("F2", "Rename file / folder"),
-        help_line("Ctrl+Delete", "Delete file / folder"),
+        help_line("Ctrl+Delete", "Delete from Files"),
         help_line("Ctrl+S", "Format selected file"),
         help_line("Drag", "Move file / folder"),
         help_line("c", "Commit editor"),
