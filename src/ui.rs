@@ -369,54 +369,80 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         area,
     );
 
-    let graph_label = " Tab Git Graph ";
     let compact = area.width < 88;
-    let left_pane_label = if compact {
-        " f "
-    } else if app.view == View::Graph || app.changes.pane == LeftPane::Worktree {
-        " f Files "
+    let left_pane_label = if app.view == View::Graph || app.changes.pane == LeftPane::Worktree {
+        "Files"
     } else {
-        " f Changes "
+        "Changes"
     };
-    let refresh_label = if compact { " r " } else { " r Refresh " };
-    let explorer_label = if compact { " o " } else { " o Explorer " };
-    let browser_label = if compact { " b " } else { " b Branches " };
-    let settings_label = if compact { " s " } else { " s Settings " };
-    let help_label = if compact { " ? " } else { " ? Help " };
-    let workspace_label = if compact { " w " } else { " w Workspaces " };
-    let mut labels = vec![graph_label, left_pane_label];
+    let mut labels = vec![("Tab", "Git Graph"), ("f", left_pane_label)];
     if app.workspace_panel.is_available() {
-        labels.push(workspace_label);
+        labels.push(("w", "Workspaces"));
     }
     labels.extend([
-        refresh_label,
-        explorer_label,
-        browser_label,
-        settings_label,
-        help_label,
+        ("o", "Explorer"),
+        ("b", "Branches"),
+        ("s", "Settings"),
+        ("?", "Help"),
     ]);
 
-    let total_width = labels.iter().fold(0_u16, |width, label| {
-        width.saturating_add(UnicodeWidthStr::width(*label) as u16)
+    let total_width = labels.iter().fold(0_u16, |width, (key, label)| {
+        let label_width = if compact {
+            0
+        } else {
+            UnicodeWidthStr::width(*label) as u16 + 1
+        };
+        width.saturating_add(UnicodeWidthStr::width(*key) as u16 + label_width + 2)
     });
     let mut spans = Vec::new();
     let start_x = area.right().saturating_sub(total_width).max(area.x);
     let mut x = start_x;
     let mut rects = Vec::new();
-    for (index, label) in labels.iter().enumerate() {
+    for (index, (key, label)) in labels.iter().enumerate() {
         let active = index == 0 && app.view == View::Graph;
+        let background = active.then_some(palette().raised);
         spans.push(Span::styled(
-            *label,
-            if active {
-                Style::default()
-                    .fg(palette().accent)
-                    .bg(palette().raised)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(palette().muted)
-            },
+            " ",
+            Style::default().bg(background.unwrap_or(palette().surface_alt)),
         ));
-        let width = UnicodeWidthStr::width(*label) as u16;
+        spans.push(Span::styled(
+            *key,
+            Style::default()
+                .fg(palette().orange)
+                .bg(background.unwrap_or(palette().surface_alt))
+                .add_modifier(if active {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ));
+        if !compact {
+            spans.push(Span::styled(
+                format!(" {label}"),
+                Style::default()
+                    .fg(if active {
+                        palette().accent
+                    } else {
+                        palette().muted
+                    })
+                    .bg(background.unwrap_or(palette().surface_alt))
+                    .add_modifier(if active {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            ));
+        }
+        spans.push(Span::styled(
+            " ",
+            Style::default().bg(background.unwrap_or(palette().surface_alt)),
+        ));
+        let width = UnicodeWidthStr::width(*key) as u16
+            + if compact {
+                2
+            } else {
+                UnicodeWidthStr::width(*label) as u16 + 3
+            };
         rects.push(Rect::new(x, area.y, width, 1));
         x = x.saturating_add(width);
     }
@@ -433,11 +459,10 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             rect,
         );
     }
-    app.regions.refresh = rects.get(2 + offset).copied();
-    app.regions.explorer = rects.get(3 + offset).copied();
-    app.regions.repository_browser = rects.get(4 + offset).copied();
-    app.regions.settings = rects.get(5 + offset).copied();
-    app.regions.help = rects.get(6 + offset).copied();
+    app.regions.explorer = rects.get(2 + offset).copied();
+    app.regions.repository_browser = rects.get(3 + offset).copied();
+    app.regions.settings = rects.get(4 + offset).copied();
+    app.regions.help = rects.get(5 + offset).copied();
 
     frame.render_widget(
         Paragraph::new(Line::from(spans)),

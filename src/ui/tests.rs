@@ -108,8 +108,16 @@ fn renders_every_primary_surface() {
     assert!(footer.contains("f Files"));
     assert!(footer.contains("b Branches"));
     assert!(footer.contains("Tab Git Graph"));
+    assert!(!footer.contains("r Refresh"));
     assert!(!footer.contains("1 Changes"));
     assert!(!footer.contains("2 Graph"));
+    for shortcut in ["Tab Git Graph", "f Files", "o Explorer"] {
+        let offset = footer.find(shortcut).unwrap();
+        assert_eq!(
+            terminal.backend().buffer().content[35 * 120 + offset].fg,
+            super::palette().orange
+        );
+    }
 
     let graph_toggle = app.regions.graph.unwrap();
     click(&mut app, graph_toggle.x, graph_toggle.y);
@@ -1259,7 +1267,9 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
     ));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(app.mode, Mode::WorkspacePresets);
-    assert!(app.regions.workspace_presets_overlay.is_some());
+    let preset_overlay = app.regions.workspace_presets_overlay.unwrap();
+    assert_eq!(preset_overlay.height, 8);
+    assert_eq!(preset_overlay.width, 50);
     assert!(
         app.regions
             .hit_target_rect(HitTarget::WorkspacePanel(
@@ -1276,6 +1286,20 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
         .collect();
     assert!(rendered.contains("WORKSPACE PRESETS"));
     assert!(rendered.contains("Create preset from current setup"));
+    let footer_start = 29 * 120;
+    let footer: String = terminal.backend().buffer().content[footer_start..]
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    for shortcut in ["f Changes", "w Workspaces", "o Explorer"] {
+        let offset = footer
+            .find(shortcut)
+            .unwrap_or_else(|| panic!("missing {shortcut:?} in footer {footer:?}"));
+        assert_eq!(
+            terminal.backend().buffer().content[footer_start + offset].fg,
+            super::palette().orange
+        );
+    }
     app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
     app.handle_paste("Daily setup");
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));

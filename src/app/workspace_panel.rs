@@ -212,6 +212,7 @@ enum Completion {
     Action {
         result: Result<(), String>,
         reopen_path: Option<PathBuf>,
+        warning: Option<String>,
     },
     SnapshotRecall {
         name: String,
@@ -544,10 +545,12 @@ impl WorkspacePanel {
                 Completion::Action {
                     result,
                     reopen_path: action_reopen_path,
+                    warning,
                 } => match result {
                     Ok(()) => {
                         self.next_refresh = Instant::now();
                         reopen_path = action_reopen_path;
+                        action_error = warning;
                     }
                     Err(error) => action_error = Some(error),
                 },
@@ -762,11 +765,15 @@ impl WorkspacePanel {
     }
 
     pub(crate) fn close_workspace(&self, workspace_id: &str) {
-        self.start_action(workspace_close_args(workspace_id));
+        self.start_destructive_action(workspace_close_args(workspace_id), workspace_id, None);
     }
 
     pub(crate) fn delete_worktree(&self, workspace_id: &str, reopen_path: Option<PathBuf>) {
-        self.start_action_with_reopen(worktree_remove_args(workspace_id), reopen_path);
+        self.start_destructive_action(
+            worktree_remove_args(workspace_id),
+            workspace_id,
+            reopen_path,
+        );
     }
 
     pub(crate) fn toggle_create_menu(&mut self) {
@@ -1506,8 +1513,7 @@ impl WorkspacePanel {
         let request_id = self.focus.begin(workspace_id.clone());
         let sender = self.sender.clone();
         thread::spawn(move || {
-            let result =
-                run_herdr(&["workspace".to_owned(), "focus".to_owned(), workspace_id]).map(|_| ());
+            let result = run_herdr(&workspace_focus_args(&workspace_id)).map(|_| ());
             let _ = sender.send(Completion::WorkspaceFocus { request_id, result });
         });
     }
@@ -1523,8 +1529,47 @@ impl WorkspacePanel {
             let _ = sender.send(Completion::Action {
                 result,
                 reopen_path,
+                warning: None,
             });
         });
+    }
+
+    fn start_destructive_action(
+        &self,
+        args: Vec<String>,
+        removed_workspace_id: &str,
+        reopen_path: Option<PathBuf>,
+    ) {
+        let restore_focus = self.focus_to_restore_after_removing(removed_workspace_id);
+        let sender = self.sender.clone();
+        thread::spawn(move || {
+            let result = run_herdr(&args).map(|_| ());
+            let warning = if result.is_ok() {
+                restore_focus.and_then(|workspace_id| {
+                    run_herdr(&workspace_focus_args(&workspace_id))
+                        .err()
+                        .map(|error| {
+                            format!(
+                                "Workspace closed, but Herdr focus could not be restored: {error}"
+                            )
+                        })
+                })
+            } else {
+                None
+            };
+            let _ = sender.send(Completion::Action {
+                result,
+                reopen_path,
+                warning,
+            });
+        });
+    }
+
+    fn focus_to_restore_after_removing(&self, removed_workspace_id: &str) -> Option<String> {
+        self.workspaces
+            .iter()
+            .find(|workspace| workspace.focused && workspace.id != removed_workspace_id)
+            .map(|workspace| workspace.id.clone())
     }
 
     fn start_snapshot_recall(&mut self, snapshot: WorkspaceSnapshot) {
@@ -1723,6 +1768,12 @@ fn worktree_create_args(workspace_id: &str) -> Vec<String> {
 
 fn workspace_close_args(workspace_id: &str) -> Vec<String> {
     ["workspace", "close", workspace_id]
+        .map(str::to_owned)
+        .to_vec()
+}
+
+fn workspace_focus_args(workspace_id: &str) -> Vec<String> {
+    ["workspace", "focus", workspace_id]
         .map(str::to_owned)
         .to_vec()
 }
@@ -2529,6 +2580,21 @@ mod tests {
     }
 
     #[test]
+    fn preserves_herdr_focus_when_removing_another_workspace() {
+        let panel = WorkspacePanel::ready_for_test(&snapshot());
+
+        assert_eq!(
+            panel.focus_to_restore_after_removing("w2").as_deref(),
+            Some("w1")
+        );
+        assert_eq!(panel.focus_to_restore_after_removing("w1"), None);
+        assert_eq!(
+            workspace_focus_args("w1"),
+            ["workspace", "focus", "w1"].map(str::to_owned)
+        );
+    }
+
+    #[test]
     fn reopens_the_parent_only_after_successful_worktree_removal() {
         let mut panel = WorkspacePanel::ready_for_test(&snapshot());
         panel.next_refresh = Instant::now() + Duration::from_secs(60);
@@ -2540,6 +2606,7 @@ mod tests {
             .send(Completion::Action {
                 result: Ok(()),
                 reopen_path: Some(parent.clone()),
+                warning: None,
             })
             .unwrap();
         let (changed, error, reopen_path, _) = panel.poll();
@@ -2553,6 +2620,7 @@ mod tests {
             .send(Completion::Action {
                 result: Err("worktree has uncommitted changes".to_owned()),
                 reopen_path: Some(parent),
+                warning: None,
             })
             .unwrap();
         let (changed, error, reopen_path, _) = panel.poll();

@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::layout::{Position, Rect};
 use std::time::{Duration, Instant};
 
-use crate::{git::RefreshScope, selection::SelectionOutcome};
+use crate::selection::SelectionOutcome;
 
 use super::{
     ACTION_ITEMS, App, GraphHitTarget, HitTarget, LeftPane, MINIMUM_WORKSPACE_PANEL_WIDTH, Mode,
@@ -458,12 +458,6 @@ impl App {
             };
             self.graph_commit_open = false;
             self.show_graph_if_diff_empty();
-        } else if self
-            .regions
-            .refresh
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.reload(RefreshScope::ALL);
         } else if self
             .regions
             .explorer

@@ -167,7 +167,6 @@ pub struct Regions {
     pub changes: Option<Rect>,
     pub graph: Option<Rect>,
     pub left_pane_toggle: Option<Rect>,
-    pub refresh: Option<Rect>,
     pub explorer: Option<Rect>,
     pub repository_browser: Option<Rect>,
     pub settings: Option<Rect>,

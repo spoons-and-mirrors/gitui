@@ -548,7 +548,13 @@ pub(super) fn draw_workspace_presets(
     frame: &mut Frame<'_>,
     panel: &WorkspacePanel,
 ) -> (Rect, Vec<(HitTarget, Rect)>) {
-    let area = centered_min(frame.area(), 68, 68, 58, 18);
+    let item_count = panel.snapshots.len() + 1;
+    let desired_height = if panel.snapshot_editing {
+        10
+    } else {
+        u16::try_from(item_count).unwrap_or(u16::MAX).min(7) + 7
+    };
+    let area = centered_min(frame.area(), 0, 0, 50, desired_height);
     let mut targets = vec![(
         HitTarget::WorkspacePanel(WorkspacePanelHitTarget::PresetOverlay),
         area,
@@ -575,25 +581,17 @@ pub(super) fn draw_workspace_presets(
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "  Recall an entire Hunkle setup",
+                format!(
+                    "  {} workspaces · {} groups",
+                    panel.workspaces.len(),
+                    panel.groups.len()
+                ),
                 Style::default().fg(palette().faint),
             ),
         ])),
         Rect::new(inner.x, area.y.saturating_add(1), inner.width, 1),
     );
-    let compact = area.height < 16;
-    if !compact {
-        frame.render_widget(
-            Paragraph::new(format!(
-                "Current setup  {} workspaces  ·  {} groups",
-                panel.workspaces.len(),
-                panel.groups.len()
-            ))
-            .style(Style::default().fg(palette().muted)),
-            Rect::new(inner.x, area.y.saturating_add(4), inner.width, 1),
-        );
-    }
-    let section_y = area.y.saturating_add(if compact { 3 } else { 6 });
+    let section_y = area.y.saturating_add(3);
 
     if panel.snapshot_editing {
         frame.render_widget(
@@ -650,7 +648,6 @@ pub(super) fn draw_workspace_presets(
         inner.width,
         area.bottom().saturating_sub(2).saturating_sub(list_y),
     );
-    let item_count = panel.snapshots.len() + 1;
     let visible = usize::from(list.height).min(item_count);
     let start = panel
         .snapshot_menu_choice
@@ -710,7 +707,7 @@ pub(super) fn draw_workspace_presets(
     let status = panel
         .snapshot_error
         .as_deref()
-        .unwrap_or("Enter load   n new   u update   Del delete   Esc close");
+        .unwrap_or("Enter load  n new  u update  Del delete  Esc");
     frame.render_widget(
         Paragraph::new(status)
             .alignment(Alignment::Right)
