@@ -11,6 +11,7 @@ use crate::app::{
     ACTION_ITEMS, ActionsState, BranchDeleteDialog, BrowserTab, CommandStatus, Explorer,
     FileDialog, FileDialogKind, FileNameAction, FileSearch, HitTarget, PickerAction, PickerEntry,
     PullRequest, RemoteItems, RepositoryBrowser, RepositoryBrowserHitTarget, Settings,
+    WorkspaceDeleteDialog, WorkspaceDeleteKind,
 };
 
 use super::{fill, palette, truncate_width};
@@ -377,6 +378,83 @@ pub(super) fn draw_branch_delete_dialog(frame: &mut Frame<'_>, dialog: &BranchDe
     }
     frame.render_widget(
         Paragraph::new("←/→ choose   Enter confirm   Esc cancel")
+            .alignment(Alignment::Right)
+            .style(Style::default().fg(palette().muted)),
+        Rect::new(inner.x, area.bottom().saturating_sub(1), inner.width, 1),
+    );
+}
+
+pub(super) fn draw_workspace_delete_dialog(frame: &mut Frame<'_>, dialog: &WorkspaceDeleteDialog) {
+    let area = centered_min(frame.area(), 66, 0, 54, 12);
+    frame.render_widget(Clear, area);
+    fill(frame, area, palette().panel);
+    fill(
+        frame,
+        Rect::new(area.x, area.y, area.width, 3),
+        palette().surface_alt,
+    );
+    let inner = area.inner(ratatui::layout::Margin::new(2, 1));
+    let (title, prompt, detail, warning, action) = match &dialog.kind {
+        WorkspaceDeleteKind::Workspace { pane_count } => {
+            let noun = if *pane_count == 1 { "pane" } else { "panes" };
+            (
+                "CLOSE WORKSPACE",
+                format!("Close workspace {}?", dialog.label),
+                format!("This closes the workspace and all {pane_count} {noun} inside it."),
+                "Processes running in those panes will stop.".to_owned(),
+                "Close workspace",
+            )
+        }
+        WorkspaceDeleteKind::Worktree { path } => {
+            let path = path.as_deref().map_or_else(
+                || "its checkout directory".to_owned(),
+                |path| path.display().to_string(),
+            );
+            (
+                "DELETE WORKTREE",
+                format!("Delete worktree {}?", dialog.label),
+                format!("This removes the linked checkout at {path}."),
+                "Uncommitted work will block safe deletion.".to_owned(),
+                "Delete worktree",
+            )
+        }
+    };
+    frame.render_widget(
+        Paragraph::new(title).style(
+            Style::default()
+                .fg(palette().red)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Rect::new(inner.x, area.y.saturating_add(1), inner.width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new(truncate_width(&prompt, usize::from(inner.width)))
+            .style(Style::default().fg(palette().ink)),
+        Rect::new(inner.x, area.y.saturating_add(4), inner.width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new(truncate_width(&detail, usize::from(inner.width)))
+            .style(Style::default().fg(palette().muted)),
+        Rect::new(inner.x, area.y.saturating_add(6), inner.width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new(warning).style(Style::default().fg(palette().red)),
+        Rect::new(inner.x, area.y.saturating_add(7), inner.width, 1),
+    );
+    let button = Rect::new(
+        inner.right().saturating_sub(18),
+        area.y.saturating_add(9),
+        18,
+        1,
+    );
+    frame.render_widget(
+        Paragraph::new(action)
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(palette().red).bg(palette().selected)),
+        button,
+    );
+    frame.render_widget(
+        Paragraph::new("Enter confirm   Esc cancel")
             .alignment(Alignment::Right)
             .style(Style::default().fg(palette().muted)),
         Rect::new(inner.x, area.bottom().saturating_sub(1), inner.width, 1),

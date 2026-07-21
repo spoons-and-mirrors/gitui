@@ -183,7 +183,7 @@ pub(super) fn draw(
                 panel.group_input.text()
             }
         } else if focused {
-            "Enter open  g group"
+            "Enter open  g group  Del"
         } else {
             "w move/off"
         })

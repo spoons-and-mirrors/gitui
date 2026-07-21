@@ -1183,6 +1183,20 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
     );
     app.workspace_panel.close_create_menu();
     assert!(app.workspace_panel.select_workspace(0));
+    app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let delete_screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(delete_screen.contains("CLOSE WORKSPACE"));
+    assert!(delete_screen.contains("Close workspace HUNKLE?"));
+    assert!(delete_screen.contains("all 2 panes"));
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.workspace_panel.delete_dialog.is_none());
     app.mode = Mode::Normal;
 
     let divider = app.regions.workspace_panel_splitter.unwrap();

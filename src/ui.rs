@@ -249,7 +249,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             dim(frame);
             overlays::draw_help(frame);
         }
-        Mode::WorkspacePanel | Mode::Normal | Mode::Commit => {}
+        Mode::WorkspacePanel => {
+            if let Some(dialog) = &app.workspace_panel.delete_dialog {
+                dim(frame);
+                overlays::draw_workspace_delete_dialog(frame, dialog);
+            }
+        }
+        Mode::Normal | Mode::Commit => {}
     }
     finish_selection(frame, app);
 }

@@ -65,6 +65,10 @@ impl App {
             return;
         }
 
+        if self.workspace_panel.delete_dialog.is_some() {
+            return;
+        }
+
         if self.workspace_panel.is_dragging_workspace() {
             match mouse.kind {
                 MouseEventKind::Drag(MouseButton::Left) => {

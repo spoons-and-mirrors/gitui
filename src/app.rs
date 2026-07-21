@@ -24,8 +24,9 @@ pub(crate) use repository_browser::{
 };
 pub(crate) use workspace_panel::{
     AgentStatus, DEFAULT_WIDTH as DEFAULT_WORKSPACE_PANEL_WIDTH,
-    MINIMUM_WIDTH as MINIMUM_WORKSPACE_PANEL_WIDTH, WorkspaceDropTarget, WorkspacePanel,
-    WorkspacePanelEffect, WorkspacePanelPlacement, WorkspacePanelRow,
+    MINIMUM_WIDTH as MINIMUM_WORKSPACE_PANEL_WIDTH, WorkspaceDeleteDialog, WorkspaceDeleteKind,
+    WorkspaceDropTarget, WorkspacePanel, WorkspacePanelEffect, WorkspacePanelPlacement,
+    WorkspacePanelRow,
 };
 
 use std::{
@@ -1578,6 +1579,18 @@ impl App {
                     "Herdr worktree create requested workspace={workspace_id}"
                 ));
                 self.workspace_panel.create_worktree(&workspace_id);
+            }
+            WorkspacePanelEffect::CloseWorkspace(workspace_id) => {
+                diagnostics::event(format!(
+                    "Herdr workspace close requested workspace={workspace_id}"
+                ));
+                self.workspace_panel.close_workspace(&workspace_id);
+            }
+            WorkspacePanelEffect::DeleteWorktree(workspace_id) => {
+                diagnostics::event(format!(
+                    "Herdr worktree remove requested workspace={workspace_id}"
+                ));
+                self.workspace_panel.delete_worktree(&workspace_id);
             }
             WorkspacePanelEffect::OpenWorkspace(path) => {
                 diagnostics::event(format!("workspace clicked path={}", path.display()));

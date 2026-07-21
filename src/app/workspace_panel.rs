@@ -78,6 +78,19 @@ pub(crate) struct WorkspaceGroup {
     workspace_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkspaceDeleteKind {
+    Workspace { pane_count: usize },
+    Worktree { path: Option<PathBuf> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkspaceDeleteDialog {
+    pub(crate) workspace_id: String,
+    pub(crate) label: String,
+    pub(crate) kind: WorkspaceDeleteKind,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkspacePanelRow {
     Header,
@@ -129,6 +142,7 @@ pub(crate) struct WorkspacePanel {
     pub(crate) group_error: Option<String>,
     pub(crate) create_menu_open: bool,
     pub(crate) create_menu_choice: usize,
+    pub(crate) delete_dialog: Option<WorkspaceDeleteDialog>,
     groups_path: Option<PathBuf>,
     workspace_drag: Option<WorkspaceDrag>,
     last_click: Option<(SelectionKey, Instant)>,
@@ -174,6 +188,7 @@ impl WorkspacePanel {
             group_error: None,
             create_menu_open: false,
             create_menu_choice: 0,
+            delete_dialog: None,
             groups_path,
             workspace_drag: None,
             last_click: None,
@@ -285,7 +300,7 @@ impl WorkspacePanel {
                             self.workspaces = workspaces;
                             self.agents = agents;
                             self.error = None;
-                            if self.remove_worktrees_from_groups()
+                            if self.reconcile_group_workspace_ids()
                                 && let Err(error) = self.persist_groups()
                             {
                                 action_error = Some(error);
@@ -316,6 +331,9 @@ impl WorkspacePanel {
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> WorkspacePanelEffect {
+        if self.delete_dialog.is_some() {
+            return self.handle_delete_dialog(key);
+        }
         if self.group_editing {
             return self.handle_group_input(key);
         }
@@ -353,6 +371,57 @@ impl WorkspacePanel {
                 self.begin_group();
                 WorkspacePanelEffect::None
             }
+            KeyCode::Delete if key.modifiers.is_empty() => self.begin_delete(),
+            _ => WorkspacePanelEffect::None,
+        }
+    }
+
+    fn begin_delete(&mut self) -> WorkspacePanelEffect {
+        let Some(workspace) = self
+            .selected
+            .and_then(|selected| self.workspaces.get(selected))
+        else {
+            return WorkspacePanelEffect::Notice("Select a workspace to close".to_owned());
+        };
+        let kind = if workspace.linked_worktree {
+            WorkspaceDeleteKind::Worktree {
+                path: workspace.path.clone(),
+            }
+        } else {
+            WorkspaceDeleteKind::Workspace {
+                pane_count: workspace.pane_count,
+            }
+        };
+        let workspace_id = workspace.id.clone();
+        let label = workspace.label.clone();
+        self.close_create_menu();
+        self.delete_dialog = Some(WorkspaceDeleteDialog {
+            workspace_id,
+            label,
+            kind,
+        });
+        WorkspacePanelEffect::None
+    }
+
+    fn handle_delete_dialog(&mut self, key: KeyEvent) -> WorkspacePanelEffect {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('n') => {
+                self.delete_dialog = None;
+                WorkspacePanelEffect::None
+            }
+            KeyCode::Enter | KeyCode::Char('y') => {
+                let Some(dialog) = self.delete_dialog.take() else {
+                    return WorkspacePanelEffect::None;
+                };
+                match dialog.kind {
+                    WorkspaceDeleteKind::Workspace { .. } => {
+                        WorkspacePanelEffect::CloseWorkspace(dialog.workspace_id)
+                    }
+                    WorkspaceDeleteKind::Worktree { .. } => {
+                        WorkspacePanelEffect::DeleteWorktree(dialog.workspace_id)
+                    }
+                }
+            }
             _ => WorkspacePanelEffect::None,
         }
     }
@@ -377,6 +446,14 @@ impl WorkspacePanel {
 
     pub(crate) fn create_worktree(&self, workspace_id: &str) {
         self.start_action(worktree_create_args(workspace_id));
+    }
+
+    pub(crate) fn close_workspace(&self, workspace_id: &str) {
+        self.start_action(workspace_close_args(workspace_id));
+    }
+
+    pub(crate) fn delete_worktree(&self, workspace_id: &str) {
+        self.start_action(worktree_remove_args(workspace_id));
     }
 
     pub(crate) fn toggle_create_menu(&mut self) {
@@ -665,11 +742,11 @@ impl WorkspacePanel {
             .collect()
     }
 
-    fn remove_worktrees_from_groups(&mut self) -> bool {
-        let worktree_ids = self
+    fn reconcile_group_workspace_ids(&mut self) -> bool {
+        let valid_workspace_ids = self
             .workspaces
             .iter()
-            .filter(|workspace| workspace.linked_worktree)
+            .filter(|workspace| !workspace.linked_worktree)
             .map(|workspace| workspace.id.as_str())
             .collect::<Vec<_>>();
         let mut changed = false;
@@ -677,7 +754,7 @@ impl WorkspacePanel {
             let previous_len = group.workspace_ids.len();
             group
                 .workspace_ids
-                .retain(|id| !worktree_ids.contains(&id.as_str()));
+                .retain(|id| valid_workspace_ids.contains(&id.as_str()));
             changed |= group.workspace_ids.len() != previous_len;
         }
         changed
@@ -862,6 +939,8 @@ pub(crate) enum WorkspacePanelEffect {
     Cycle,
     CreateWorkspace,
     CreateWorktree(String),
+    CloseWorkspace(String),
+    DeleteWorktree(String),
     OpenWorkspace(PathBuf),
     Notice(String),
 }
@@ -890,6 +969,18 @@ fn worktree_create_args(workspace_id: &str) -> Vec<String> {
     ]
     .map(str::to_owned)
     .to_vec()
+}
+
+fn workspace_close_args(workspace_id: &str) -> Vec<String> {
+    ["workspace", "close", workspace_id]
+        .map(str::to_owned)
+        .to_vec()
+}
+
+fn worktree_remove_args(workspace_id: &str) -> Vec<String> {
+    ["worktree", "remove", "--workspace", workspace_id]
+        .map(str::to_owned)
+        .to_vec()
 }
 
 fn load_groups(path: &Path) -> Vec<WorkspaceGroup> {
@@ -1232,6 +1323,76 @@ mod tests {
             worktree_create_args("w1"),
             ["worktree", "create", "--workspace", "w1", "--no-focus",].map(str::to_owned)
         );
+        assert_eq!(
+            workspace_close_args("w1"),
+            ["workspace", "close", "w1"].map(str::to_owned)
+        );
+        assert_eq!(
+            worktree_remove_args("w3"),
+            ["worktree", "remove", "--workspace", "w3"].map(str::to_owned)
+        );
+    }
+
+    #[test]
+    fn confirms_workspace_close_or_linked_worktree_removal() {
+        let mut value = snapshot();
+        value["result"]["snapshot"]["workspaces"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "workspace_id": "w3",
+                "label": "feature-worktree",
+                "pane_count": 1,
+                "focused": false,
+                "agent_status": "idle",
+                "worktree": {
+                    "checkout_path": "/tmp/worktrees/feature",
+                    "is_linked_worktree": true,
+                    "repo_key": "/home/spoon/code/gitui/.git",
+                    "repo_root": "/home/spoon/code/gitui"
+                }
+            }));
+        let mut panel = WorkspacePanel::ready_for_test(&value);
+
+        assert_eq!(
+            panel.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE)),
+            WorkspacePanelEffect::None
+        );
+        assert_eq!(
+            panel.delete_dialog.as_ref().map(|dialog| &dialog.kind),
+            Some(&WorkspaceDeleteKind::Workspace { pane_count: 2 })
+        );
+        assert_eq!(
+            panel.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            WorkspacePanelEffect::None
+        );
+        assert!(panel.delete_dialog.is_none());
+
+        panel.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(
+            panel.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            WorkspacePanelEffect::CloseWorkspace("w1".to_owned())
+        );
+        assert!(panel.delete_dialog.is_none());
+
+        assert!(panel.select_workspace(2));
+        panel.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(
+            panel.delete_dialog.as_ref().map(|dialog| &dialog.kind),
+            Some(&WorkspaceDeleteKind::Worktree {
+                path: Some(PathBuf::from("/tmp/worktrees/feature")),
+            })
+        );
+        assert_eq!(
+            panel.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+            WorkspacePanelEffect::DeleteWorktree("w3".to_owned())
+        );
+
+        assert!(panel.select_agent(0));
+        assert_eq!(
+            panel.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE)),
+            WorkspacePanelEffect::Notice("Select a workspace to close".to_owned())
+        );
     }
 
     #[test]
@@ -1338,7 +1499,7 @@ mod tests {
                 workspace_ids: vec!["w3".to_owned()],
             },
         ];
-        assert!(panel.remove_worktrees_from_groups());
+        assert!(panel.reconcile_group_workspace_ids());
         assert!(panel.groups[1].workspace_ids.is_empty());
         assert_eq!(panel.group_for_workspace(2), Some(0));
         assert_eq!(panel.workspace_indent(2), "    ");
