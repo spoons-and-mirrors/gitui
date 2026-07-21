@@ -95,16 +95,16 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         app.regions.workspace_panel = Some(panel_area);
         app.regions.workspace_panel_splitter = Some(divider);
         app.regions.workspace_panel_bounds = Some(content);
-        let create_hovered = app.hovered_hit_target
-            == Some(HitTarget::WorkspacePanel(
-                WorkspacePanelHitTarget::CreateWorkspace,
-            ));
+        let workspace_panel_hover = match app.hovered_hit_target {
+            Some(HitTarget::WorkspacePanel(target)) => Some(target),
+            _ => None,
+        };
         for (target, rect) in workspace_panel::draw(
             frame,
             &mut app.workspace_panel,
             panel_area,
             app.mode == Mode::WorkspacePanel,
-            create_hovered,
+            workspace_panel_hover,
         ) {
             app.regions.register_hit_target(target, rect);
         }

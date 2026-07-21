@@ -1115,7 +1115,7 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
     let create_button = app
         .regions
         .hit_target_rect(HitTarget::WorkspacePanel(
-            WorkspacePanelHitTarget::CreateWorkspace,
+            WorkspacePanelHitTarget::CreateMenu,
         ))
         .unwrap();
     assert_eq!(create_button.width, 3);
@@ -1134,6 +1134,55 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
         terminal.backend().buffer()[(create_button.x + 1, create_button.y)].bg,
         super::palette().accent
     );
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        create_button.x + 1,
+        create_button.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        create_button.x + 1,
+        create_button.y,
+    ));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.workspace_panel.create_menu_open);
+    let new_workspace = app
+        .regions
+        .hit_target_rect(HitTarget::WorkspacePanel(
+            WorkspacePanelHitTarget::CreateWorkspace,
+        ))
+        .unwrap();
+    let new_worktree = app
+        .regions
+        .hit_target_rect(HitTarget::WorkspacePanel(
+            WorkspacePanelHitTarget::CreateWorktree,
+        ))
+        .unwrap();
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(rendered.contains("New workspace"));
+    assert!(rendered.contains("New worktree"));
+    assert_eq!(
+        terminal.backend().buffer()[(new_workspace.x + 2, new_workspace.y)].bg,
+        super::palette().selected
+    );
+    assert_eq!(
+        terminal.backend().buffer()[(new_worktree.x + 2, new_worktree.y)].fg,
+        super::palette().ink
+    );
+    assert!(app.workspace_panel.select_agent(0));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(
+        terminal.backend().buffer()[(new_worktree.x + 2, new_worktree.y)].fg,
+        super::palette().faint
+    );
+    app.workspace_panel.close_create_menu();
+    assert!(app.workspace_panel.select_workspace(0));
     app.mode = Mode::Normal;
 
     let divider = app.regions.workspace_panel_splitter.unwrap();

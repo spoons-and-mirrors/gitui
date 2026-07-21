@@ -6,7 +6,7 @@ use crate::{git::RefreshScope, selection::SelectionOutcome};
 use super::{
     ACTION_ITEMS, App, GraphHitTarget, HitTarget, LeftPane, MINIMUM_WORKSPACE_PANEL_WIDTH, Mode,
     RepositoryBrowserEffect, RepositoryBrowserHitTarget, View, WorkspaceDropTarget,
-    WorkspacePanelEffect, WorkspacePanelHitTarget, WorkspacePanelPlacement, scroll_table,
+    WorkspacePanelHitTarget, WorkspacePanelPlacement, scroll_table,
 };
 
 impl App {
@@ -77,6 +77,13 @@ impl App {
                 }
                 _ => {}
             }
+            return;
+        }
+        if self.workspace_panel.create_menu_open
+            && mouse.kind == MouseEventKind::Down(MouseButton::Left)
+        {
+            self.selection.clear();
+            self.handle_workspace_panel_click(point);
             return;
         }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
@@ -472,7 +479,21 @@ impl App {
     }
 
     fn handle_workspace_panel_click(&mut self, point: Position) {
-        if let Some(HitTarget::WorkspacePanel(target)) = self.regions.hit_target_at(point) {
+        let target = self.regions.hit_target_at(point);
+        if self.workspace_panel.create_menu_open
+            && !matches!(
+                target,
+                Some(HitTarget::WorkspacePanel(
+                    WorkspacePanelHitTarget::CreateMenu
+                        | WorkspacePanelHitTarget::CreateWorkspace
+                        | WorkspacePanelHitTarget::CreateWorktree
+                ))
+            )
+        {
+            self.workspace_panel.close_create_menu();
+            return;
+        }
+        if let Some(HitTarget::WorkspacePanel(target)) = target {
             self.activate_workspace_panel_target(target);
         } else if !self
             .regions
@@ -491,9 +512,17 @@ impl App {
                 self.workspace_panel.hide();
                 self.mode = Mode::Normal;
             }
-            WorkspacePanelHitTarget::CreateWorkspace => {
+            WorkspacePanelHitTarget::CreateMenu => {
                 self.mode = Mode::WorkspacePanel;
-                self.apply_workspace_panel_effect(WorkspacePanelEffect::CreateWorkspace);
+                self.workspace_panel.toggle_create_menu();
+            }
+            WorkspacePanelHitTarget::CreateWorkspace => {
+                let effect = self.workspace_panel.activate_create_choice(0);
+                self.apply_workspace_panel_effect(effect);
+            }
+            WorkspacePanelHitTarget::CreateWorktree => {
+                let effect = self.workspace_panel.activate_create_choice(1);
+                self.apply_workspace_panel_effect(effect);
             }
             WorkspacePanelHitTarget::Group(index) => self.workspace_panel.toggle_group(index),
             WorkspacePanelHitTarget::Workspace(index) => {

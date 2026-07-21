@@ -19,7 +19,7 @@ pub(super) fn draw(
     panel: &mut WorkspacePanel,
     area: Rect,
     focused: bool,
-    create_hovered: bool,
+    hovered: Option<WorkspacePanelHitTarget>,
 ) -> Vec<(HitTarget, Rect)> {
     fill(frame, area, palette().surface_alt);
     let mut targets = Vec::new();
@@ -43,6 +43,7 @@ pub(super) fn draw(
     keep_selection_visible(panel, usize::from(body.height));
     let selected_row = focused.then(|| panel.selected_visual_row()).flatten();
     let rows = panel.rows();
+    let mut create_button = None;
     for (visual_row, row) in rows.iter().copied().enumerate().skip(panel.scroll) {
         let screen_row = visual_row.saturating_sub(panel.scroll);
         if screen_row >= usize::from(body.height) {
@@ -51,9 +52,15 @@ pub(super) fn draw(
         let row_area = Rect::new(body.x, body.y + screen_row as u16, body.width, 1);
         match row {
             WorkspacePanelRow::Header => {
-                let create = draw_workspace_header(frame, row_area, panel.loading, create_hovered);
+                let create = draw_workspace_header(
+                    frame,
+                    row_area,
+                    panel.loading,
+                    panel.create_menu_open || hovered == Some(WorkspacePanelHitTarget::CreateMenu),
+                );
+                create_button = Some(create);
                 targets.push((
-                    HitTarget::WorkspacePanel(WorkspacePanelHitTarget::CreateWorkspace),
+                    HitTarget::WorkspacePanel(WorkspacePanelHitTarget::CreateMenu),
                     create,
                 ));
                 let collapse = Rect::new(row_area.right().saturating_sub(1), row_area.y, 1, 1);
@@ -198,7 +205,85 @@ pub(super) fn draw(
             footer,
         );
     }
+    if panel.create_menu_open
+        && let Some(anchor) = create_button
+    {
+        let worktree_enabled = panel.selected_workspace_id().is_some();
+        let (workspace, worktree) = draw_create_popover(
+            frame,
+            body,
+            anchor,
+            panel.create_menu_choice,
+            worktree_enabled,
+            hovered,
+        );
+        targets.push((
+            HitTarget::WorkspacePanel(WorkspacePanelHitTarget::CreateWorkspace),
+            workspace,
+        ));
+        targets.push((
+            HitTarget::WorkspacePanel(WorkspacePanelHitTarget::CreateWorktree),
+            worktree,
+        ));
+    }
     targets
+}
+
+fn draw_create_popover(
+    frame: &mut Frame<'_>,
+    bounds: Rect,
+    anchor: Rect,
+    selection: usize,
+    worktree_enabled: bool,
+    hovered: Option<WorkspacePanelHitTarget>,
+) -> (Rect, Rect) {
+    let width = 18.min(bounds.width);
+    let x = anchor
+        .right()
+        .saturating_sub(width)
+        .clamp(bounds.x, bounds.right().saturating_sub(width));
+    let y = anchor.bottom();
+    let workspace = Rect::new(x, y, width, 1);
+    let worktree = Rect::new(x, y.saturating_add(1), width, 1);
+    let overlay = Rect::new(x, y, width, 2);
+    frame.render_widget(ratatui::widgets::Clear, overlay);
+    fill(frame, overlay, palette().raised);
+    for (index, (label, area, enabled, target)) in [
+        (
+            "New workspace",
+            workspace,
+            true,
+            WorkspacePanelHitTarget::CreateWorkspace,
+        ),
+        (
+            "New worktree",
+            worktree,
+            worktree_enabled,
+            WorkspacePanelHitTarget::CreateWorktree,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let active = enabled && (selection == index || hovered == Some(target));
+        frame.render_widget(
+            Paragraph::new(format!("  {label}")).style(
+                Style::default()
+                    .fg(if enabled {
+                        palette().ink
+                    } else {
+                        palette().faint
+                    })
+                    .bg(if active {
+                        palette().selected
+                    } else {
+                        palette().raised
+                    }),
+            ),
+            area,
+        );
+    }
+    (workspace, worktree)
 }
 
 fn draw_group(

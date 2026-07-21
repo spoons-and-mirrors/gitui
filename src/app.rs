@@ -122,7 +122,9 @@ pub(crate) enum HitTarget {
 pub(crate) enum WorkspacePanelHitTarget {
     Focus,
     Collapse,
+    CreateMenu,
     CreateWorkspace,
+    CreateWorktree,
     Group(usize),
     Workspace(usize),
     Agent(usize),
@@ -1570,6 +1572,12 @@ impl App {
                         .map_or_else(|| "<default>".to_owned(), |path| path.display().to_string())
                 ));
                 self.workspace_panel.create_workspace(path.as_deref());
+            }
+            WorkspacePanelEffect::CreateWorktree(workspace_id) => {
+                diagnostics::event(format!(
+                    "Herdr worktree create requested workspace={workspace_id}"
+                ));
+                self.workspace_panel.create_worktree(&workspace_id);
             }
             WorkspacePanelEffect::OpenWorkspace(path) => {
                 diagnostics::event(format!("workspace clicked path={}", path.display()));

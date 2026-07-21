@@ -123,6 +123,8 @@ pub(crate) struct WorkspacePanel {
     pub(crate) group_input: TextInput,
     pub(crate) group_editing: bool,
     pub(crate) group_error: Option<String>,
+    pub(crate) create_menu_open: bool,
+    pub(crate) create_menu_choice: usize,
     groups_path: Option<PathBuf>,
     workspace_drag: Option<WorkspaceDrag>,
     last_click: Option<(SelectionKey, Instant)>,
@@ -166,6 +168,8 @@ impl WorkspacePanel {
             group_input: TextInput::default(),
             group_editing: false,
             group_error: None,
+            create_menu_open: false,
+            create_menu_choice: 0,
             groups_path,
             workspace_drag: None,
             last_click: None,
@@ -289,6 +293,9 @@ impl WorkspacePanel {
         if self.group_editing {
             return self.handle_group_input(key);
         }
+        if self.create_menu_open {
+            return self.handle_create_menu(key);
+        }
         match key.code {
             KeyCode::Esc => WorkspacePanelEffect::Close,
             KeyCode::Char('w') if key.modifiers.is_empty() => WorkspacePanelEffect::Cycle,
@@ -340,6 +347,64 @@ impl WorkspacePanel {
 
     pub(crate) fn create_workspace(&self, path: Option<&Path>) {
         self.start_action(workspace_create_args(path));
+    }
+
+    pub(crate) fn create_worktree(&self, workspace_id: &str) {
+        self.start_action(worktree_create_args(workspace_id));
+    }
+
+    pub(crate) fn toggle_create_menu(&mut self) {
+        self.create_menu_open = !self.create_menu_open;
+        self.create_menu_choice = 0;
+    }
+
+    pub(crate) fn close_create_menu(&mut self) {
+        self.create_menu_open = false;
+        self.create_menu_choice = 0;
+    }
+
+    pub(crate) fn selected_workspace_id(&self) -> Option<&str> {
+        self.selected
+            .and_then(|selected| self.workspaces.get(selected))
+            .map(|workspace| workspace.id.as_str())
+    }
+
+    pub(crate) fn activate_create_choice(&mut self, choice: usize) -> WorkspacePanelEffect {
+        let effect = match choice {
+            0 => WorkspacePanelEffect::CreateWorkspace,
+            1 => self
+                .selected_workspace_id()
+                .map(|id| WorkspacePanelEffect::CreateWorktree(id.to_owned()))
+                .unwrap_or(WorkspacePanelEffect::None),
+            _ => WorkspacePanelEffect::None,
+        };
+        if effect != WorkspacePanelEffect::None {
+            self.close_create_menu();
+        }
+        effect
+    }
+
+    fn handle_create_menu(&mut self, key: KeyEvent) -> WorkspacePanelEffect {
+        match key.code {
+            KeyCode::Esc => {
+                self.close_create_menu();
+                WorkspacePanelEffect::None
+            }
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+                if self.selected_workspace_id().is_some() {
+                    self.create_menu_choice = 1;
+                }
+                WorkspacePanelEffect::None
+            }
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
+                self.create_menu_choice = 0;
+                WorkspacePanelEffect::None
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                self.activate_create_choice(self.create_menu_choice)
+            }
+            _ => WorkspacePanelEffect::None,
+        }
     }
 
     fn handle_group_input(&mut self, key: KeyEvent) -> WorkspacePanelEffect {
@@ -721,6 +786,7 @@ pub(crate) enum WorkspacePanelEffect {
     Close,
     Cycle,
     CreateWorkspace,
+    CreateWorktree(String),
     OpenWorkspace(PathBuf),
     Notice(String),
 }
@@ -737,6 +803,18 @@ fn workspace_create_args(path: Option<&Path>) -> Vec<String> {
     }
     args.push("--no-focus".to_owned());
     args
+}
+
+fn worktree_create_args(workspace_id: &str) -> Vec<String> {
+    [
+        "worktree",
+        "create",
+        "--workspace",
+        workspace_id,
+        "--no-focus",
+    ]
+    .map(str::to_owned)
+    .to_vec()
 }
 
 fn load_groups(path: &Path) -> Vec<WorkspaceGroup> {
@@ -1021,7 +1099,7 @@ mod tests {
     }
 
     #[test]
-    fn creates_a_background_workspace_at_the_current_path() {
+    fn builds_background_workspace_and_worktree_commands() {
         assert_eq!(
             workspace_create_args(Some(Path::new("/tmp/current workspace"))),
             [
@@ -1032,6 +1110,39 @@ mod tests {
                 "--no-focus",
             ]
             .map(str::to_owned)
+        );
+        assert_eq!(
+            worktree_create_args("w1"),
+            ["worktree", "create", "--workspace", "w1", "--no-focus",].map(str::to_owned)
+        );
+    }
+
+    #[test]
+    fn create_menu_requires_a_selected_workspace_for_worktrees() {
+        let mut panel = WorkspacePanel::ready_for_test(&snapshot());
+        panel.toggle_create_menu();
+        assert!(panel.create_menu_open);
+        assert_eq!(
+            panel.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            WorkspacePanelEffect::None
+        );
+        assert_eq!(panel.create_menu_choice, 1);
+        assert_eq!(
+            panel.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            WorkspacePanelEffect::CreateWorktree("w1".to_owned())
+        );
+        assert!(!panel.create_menu_open);
+
+        assert!(panel.select_agent(0));
+        panel.toggle_create_menu();
+        assert_eq!(
+            panel.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            WorkspacePanelEffect::None
+        );
+        assert_eq!(panel.create_menu_choice, 0);
+        assert_eq!(
+            panel.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            WorkspacePanelEffect::CreateWorkspace
         );
     }
 

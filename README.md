@@ -62,7 +62,7 @@ In Explorer, start typing a folder name, press `p` to search from an empty field
 
 When hunkle runs inside Herdr, it can show a Workspaces and Agents rail backed by Herdr's session snapshot. Single-click a workspace to open its directory in hunkle; a repository that has not fetched successfully in the last five minutes is fetched in the background. Use `j`/`k` and `Enter` to switch the active Herdr workspace, or `Esc` to return to hunkle. The rail refreshes in the background and hides automatically on narrow terminals or outside Herdr.
 
-The rail starts on the left. Press `w` to cycle it through the right side, off, and back to the left. Click `+` beside WORKSPACES to create a Herdr workspace at Hunkle's current path without leaving the current workspace. Inside the rail, press `g` to create a group. Click groups to fold or expand them, and drag workspaces onto a group or back into ungrouped space. A single workspace or agent click only selects it; press `Enter` or double-click to switch.
+The rail starts on the left. Press `w` to cycle it through the right side, off, and back to the left. Click `+` beside WORKSPACES to create a Herdr workspace at Hunkle's current path or a worktree based on the selected workspace, without leaving the current workspace. Inside the rail, press `g` to create a group. Click groups to fold or expand them, and drag workspaces onto a group or back into ungrouped space. A single workspace or agent click only selects it; press `Enter` or double-click to switch.
 
 ## Mouse
 
