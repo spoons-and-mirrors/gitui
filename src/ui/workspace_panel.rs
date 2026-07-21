@@ -43,6 +43,7 @@ pub(super) fn draw(
     keep_selection_visible(panel, usize::from(body.height));
     let rows = panel.rows();
     let mut create_button = None;
+    let mut snapshot_button = None;
     for (visual_row, row) in rows.iter().copied().enumerate().skip(panel.scroll) {
         let screen_row = visual_row.saturating_sub(panel.scroll);
         if screen_row >= usize::from(body.height) {
@@ -51,16 +52,25 @@ pub(super) fn draw(
         let row_area = Rect::new(body.x, body.y + screen_row as u16, body.width, 1);
         match row {
             WorkspacePanelRow::Header => {
-                let create = draw_workspace_header(
+                let (create, load) = draw_workspace_header(
                     frame,
                     row_area,
                     panel.create_menu_open || hovered == Some(WorkspacePanelHitTarget::CreateMenu),
+                    panel.snapshot_menu_open
+                        || hovered == Some(WorkspacePanelHitTarget::SnapshotMenu),
                 );
                 create_button = Some(create);
                 targets.push((
                     HitTarget::WorkspacePanel(WorkspacePanelHitTarget::CreateMenu),
                     create,
                 ));
+                if let Some(load) = load {
+                    snapshot_button = Some(load);
+                    targets.push((
+                        HitTarget::WorkspacePanel(WorkspacePanelHitTarget::SnapshotMenu),
+                        load,
+                    ));
+                }
                 let collapse = Rect::new(row_area.right().saturating_sub(1), row_area.y, 1, 1);
                 let collapse_marker = match panel.placement {
                     WorkspacePanelPlacement::Right => "›",
@@ -176,12 +186,23 @@ pub(super) fn draw(
     }
 
     frame.render_widget(
-        Paragraph::new(if panel.group_editing {
+        Paragraph::new(if panel.snapshot_editing {
+            if let Some(error) = panel.snapshot_error.as_deref() {
+                error
+            } else {
+                panel.snapshot_input.text()
+            }
+        } else if panel.group_editing {
             if let Some(error) = panel.group_error.as_deref() {
                 error
             } else {
                 panel.group_input.text()
             }
+        } else if panel.snapshot_menu_open {
+            panel
+                .snapshot_error
+                .as_deref()
+                .unwrap_or("Enter load  Del remove")
         } else if focused {
             "Enter open  g group  Del"
         } else {
@@ -197,6 +218,13 @@ pub(super) fn draw(
     if panel.group_editing && panel.group_error.is_none() {
         frame.render_widget(
             Paragraph::new(format!("Group: {}", panel.group_input.text()))
+                .style(Style::default().fg(palette().accent)),
+            footer,
+        );
+    }
+    if panel.snapshot_editing && panel.snapshot_error.is_none() {
+        frame.render_widget(
+            Paragraph::new(format!("Snapshot: {}", panel.snapshot_input.text()))
                 .style(Style::default().fg(palette().accent)),
             footer,
         );
@@ -222,7 +250,86 @@ pub(super) fn draw(
             worktree,
         ));
     }
+    if panel.snapshot_menu_open
+        && let Some(anchor) = snapshot_button
+    {
+        for (index, area) in draw_snapshot_popover(frame, panel, body, anchor, hovered) {
+            let target = if index == 0 {
+                WorkspacePanelHitTarget::SaveSnapshot
+            } else {
+                WorkspacePanelHitTarget::Snapshot(index - 1)
+            };
+            targets.push((HitTarget::WorkspacePanel(target), area));
+        }
+    }
     targets
+}
+
+fn draw_snapshot_popover(
+    frame: &mut Frame<'_>,
+    panel: &WorkspacePanel,
+    bounds: Rect,
+    anchor: Rect,
+    hovered: Option<WorkspacePanelHitTarget>,
+) -> Vec<(usize, Rect)> {
+    let item_count = panel.snapshots.len() + 1;
+    let height = u16::try_from(item_count)
+        .unwrap_or(u16::MAX)
+        .min(bounds.height.saturating_sub(1));
+    if height == 0 {
+        return Vec::new();
+    }
+    let width = 23.min(bounds.width);
+    let x = anchor
+        .right()
+        .saturating_sub(width)
+        .clamp(bounds.x, bounds.right().saturating_sub(width));
+    let y = anchor.bottom();
+    let overlay = Rect::new(x, y, width, height);
+    frame.render_widget(ratatui::widgets::Clear, overlay);
+    fill(frame, overlay, palette().raised);
+
+    let visible = usize::from(height);
+    let start = panel
+        .snapshot_menu_choice
+        .saturating_add(1)
+        .saturating_sub(visible)
+        .min(item_count.saturating_sub(visible));
+    let mut areas = Vec::with_capacity(visible);
+    for index in start..start + visible {
+        let area = Rect::new(x, y + u16::try_from(index - start).unwrap_or(0), width, 1);
+        let target = if index == 0 {
+            WorkspacePanelHitTarget::SaveSnapshot
+        } else {
+            WorkspacePanelHitTarget::Snapshot(index - 1)
+        };
+        let hovered = hovered == Some(target);
+        let selected = panel.snapshot_menu_choice == index;
+        let label = if index == 0 {
+            "Save current...".to_owned()
+        } else {
+            let snapshot = &panel.snapshots[index - 1];
+            format!("{}  {}", snapshot.name, snapshot.workspace_count())
+        };
+        frame.render_widget(
+            Paragraph::new(format!(
+                "  {}",
+                truncate_width(&label, usize::from(width).saturating_sub(2))
+            ))
+            .style(
+                Style::default()
+                    .fg(palette().ink)
+                    .bg(if selected || hovered {
+                        palette().selected
+                    } else {
+                        palette().raised
+                    }),
+            ),
+            area,
+        );
+        areas.push((index, area));
+    }
+    areas
 }
 
 fn draw_create_popover(
@@ -320,16 +427,24 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, label: &str, count: usize) {
     );
 }
 
-fn draw_workspace_header(frame: &mut Frame<'_>, area: Rect, create_hovered: bool) -> Rect {
+fn draw_workspace_header(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    create_hovered: bool,
+    snapshot_hovered: bool,
+) -> (Rect, Option<Rect>) {
+    let compact = area.width < 22;
+    let title = if compact { "WS" } else { "WORKSPACES" };
+    let title_width = if compact { 2 } else { 10 };
     frame.render_widget(
-        Paragraph::new("WORKSPACES").style(
+        Paragraph::new(title).style(
             Style::default()
                 .fg(palette().muted)
                 .add_modifier(Modifier::BOLD),
         ),
-        Rect::new(area.x, area.y, 10.min(area.width), 1),
+        Rect::new(area.x, area.y, title_width.min(area.width), 1),
     );
-    let button_x = area.x.saturating_add(11);
+    let button_x = area.x.saturating_add(title_width + 1);
     let button = Rect::new(
         button_x,
         area.y,
@@ -353,7 +468,28 @@ fn draw_workspace_header(frame: &mut Frame<'_>, area: Rect, create_hovered: bool
         ),
         button,
     );
-    button
+    let load_x = button.right().saturating_add(1);
+    let available = area.right().saturating_sub(1).saturating_sub(load_x);
+    let load = (available >= 6).then(|| Rect::new(load_x, area.y, 6, 1));
+    if let Some(load) = load {
+        frame.render_widget(
+            Paragraph::new(" Load ").style(
+                Style::default()
+                    .fg(if snapshot_hovered {
+                        palette().canvas
+                    } else {
+                        palette().accent
+                    })
+                    .bg(if snapshot_hovered {
+                        palette().accent
+                    } else {
+                        palette().raised
+                    }),
+            ),
+            load,
+        );
+    }
+    (button, load)
 }
 
 fn draw_entry(

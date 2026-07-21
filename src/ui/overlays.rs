@@ -11,7 +11,7 @@ use crate::app::{
     ACTION_ITEMS, ActionsState, BranchDeleteDialog, BrowserTab, CommandStatus, Explorer,
     FileDialog, FileDialogKind, FileNameAction, FileSearch, HitTarget, PickerAction, PickerEntry,
     PullRequest, RemoteItems, RepositoryBrowser, RepositoryBrowserHitTarget, Settings,
-    WorkspaceDeleteDialog, WorkspaceDeleteKind,
+    SnapshotLoadDialog, WorkspaceDeleteDialog, WorkspaceDeleteKind,
 };
 
 use super::{fill, palette, truncate_width};
@@ -451,6 +451,88 @@ pub(super) fn draw_workspace_delete_dialog(frame: &mut Frame<'_>, dialog: &Works
         Paragraph::new(action)
             .alignment(Alignment::Center)
             .style(Style::default().fg(palette().red).bg(palette().selected)),
+        button,
+    );
+    frame.render_widget(
+        Paragraph::new("Enter confirm   Esc cancel")
+            .alignment(Alignment::Right)
+            .style(Style::default().fg(palette().muted)),
+        Rect::new(inner.x, area.bottom().saturating_sub(1), inner.width, 1),
+    );
+}
+
+pub(super) fn draw_snapshot_load_dialog(frame: &mut Frame<'_>, dialog: &SnapshotLoadDialog) {
+    let area = centered_min(frame.area(), 68, 0, 56, 13);
+    frame.render_widget(Clear, area);
+    fill(frame, area, palette().panel);
+    fill(
+        frame,
+        Rect::new(area.x, area.y, area.width, 3),
+        palette().surface_alt,
+    );
+    let inner = area.inner(ratatui::layout::Margin::new(2, 1));
+    frame.render_widget(
+        Paragraph::new("LOAD SNAPSHOT").style(
+            Style::default()
+                .fg(palette().accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Rect::new(inner.x, area.y.saturating_add(1), inner.width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new(truncate_width(
+            &format!("Load workspace snapshot {}?", dialog.name),
+            usize::from(inner.width),
+        ))
+        .style(Style::default().fg(palette().ink)),
+        Rect::new(inner.x, area.y.saturating_add(4), inner.width, 1),
+    );
+    let workspace_noun = if dialog.close_count == 1 {
+        "workspace"
+    } else {
+        "workspaces"
+    };
+    let pane_noun = if dialog.close_pane_count == 1 {
+        "pane"
+    } else {
+        "panes"
+    };
+    frame.render_widget(
+        Paragraph::new(format!(
+            "Open {}  |  Close {} {} ({} {})  |  Restore {} groups",
+            dialog.open_count,
+            dialog.close_count,
+            workspace_noun,
+            dialog.close_pane_count,
+            pane_noun,
+            dialog.group_count,
+        ))
+        .style(Style::default().fg(palette().muted)),
+        Rect::new(inner.x, area.y.saturating_add(6), inner.width, 1),
+    );
+    let warning = if dialog.close_count == 0 {
+        "Existing workspaces are reused by directory."
+    } else {
+        "Processes in closed workspace panes will stop."
+    };
+    frame.render_widget(
+        Paragraph::new(warning).style(Style::default().fg(if dialog.close_count == 0 {
+            palette().accent
+        } else {
+            palette().red
+        })),
+        Rect::new(inner.x, area.y.saturating_add(8), inner.width, 1),
+    );
+    let button = Rect::new(
+        inner.right().saturating_sub(18),
+        area.y.saturating_add(10),
+        18,
+        1,
+    );
+    frame.render_widget(
+        Paragraph::new("Load snapshot")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(palette().accent).bg(palette().selected)),
         button,
     );
     frame.render_widget(

@@ -26,9 +26,9 @@ pub(crate) use repository_browser::{
 };
 pub(crate) use workspace_panel::{
     AgentStatus, DEFAULT_WIDTH as DEFAULT_WORKSPACE_PANEL_WIDTH,
-    MINIMUM_WIDTH as MINIMUM_WORKSPACE_PANEL_WIDTH, WorkspaceDeleteDialog, WorkspaceDeleteKind,
-    WorkspaceDropTarget, WorkspacePanel, WorkspacePanelEffect, WorkspacePanelPlacement,
-    WorkspacePanelRow,
+    MINIMUM_WIDTH as MINIMUM_WORKSPACE_PANEL_WIDTH, SnapshotLoadDialog, WorkspaceDeleteDialog,
+    WorkspaceDeleteKind, WorkspaceDropTarget, WorkspacePanel, WorkspacePanelEffect,
+    WorkspacePanelPlacement, WorkspacePanelRow,
 };
 
 use std::{
@@ -130,6 +130,9 @@ pub(crate) enum WorkspacePanelHitTarget {
     CreateMenu,
     CreateWorkspace,
     CreateWorktree,
+    SnapshotMenu,
+    SaveSnapshot,
+    Snapshot(usize),
     Group(usize),
     Workspace(usize),
     Agent(usize),
@@ -319,10 +322,11 @@ impl App {
                 }
             })
             .unwrap_or_default();
-        let workspace_groups_path = settings_path
-            .as_ref()
-            .and_then(|path| path.parent())
-            .map(|path| path.join("workspace-groups.json"));
+        let workspace_config_dir = settings_path.as_ref().and_then(|path| path.parent());
+        let workspace_groups_path =
+            workspace_config_dir.map(|path| path.join("workspace-groups.json"));
+        let workspace_snapshots_path =
+            workspace_config_dir.map(|path| path.join("workspace-snapshots.json"));
         let interval = fetch_interval(&settings);
         let session = if open_in_background {
             RepositorySession::opening(path.clone(), interval)
@@ -383,7 +387,10 @@ impl App {
             file_search,
             actions: ActionsState::default(),
             repository_browser,
-            workspace_panel: WorkspacePanel::detect(workspace_groups_path),
+            workspace_panel: WorkspacePanel::detect(
+                workspace_groups_path,
+                workspace_snapshots_path,
+            ),
             hovered_hit_target: None,
             settings,
             settings_selection: 0,

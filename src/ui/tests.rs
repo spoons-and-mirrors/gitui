@@ -1215,6 +1215,7 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(rendered.contains("WORKSPACES  +"));
+    assert!(rendered.contains("Load"));
     assert!(rendered.contains("HUNKLE"));
     assert!(rendered.contains("topic"));
     assert!(rendered.contains("AGENTS"));
@@ -1238,6 +1239,34 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
         .unwrap();
     assert_eq!(create_button.width, 3);
     assert_eq!(create_button.x, app.regions.workspace_panel.unwrap().x + 12);
+    let load_button = app
+        .regions
+        .hit_target_rect(HitTarget::WorkspacePanel(
+            WorkspacePanelHitTarget::SnapshotMenu,
+        ))
+        .unwrap();
+    assert_eq!(load_button.width, 6);
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        load_button.x + 1,
+        load_button.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        load_button.x + 1,
+        load_button.y,
+    ));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.workspace_panel.snapshot_menu_open);
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::WorkspacePanel(
+                WorkspacePanelHitTarget::SaveSnapshot,
+            ))
+            .is_some()
+    );
+    app.workspace_panel.close_snapshot_menu();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(
         terminal.backend().buffer()[(create_button.x + 1, create_button.y)].bg,
         super::palette().raised

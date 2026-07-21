@@ -68,7 +68,9 @@ impl App {
             return;
         }
 
-        if self.workspace_panel.delete_dialog.is_some() {
+        if self.workspace_panel.delete_dialog.is_some()
+            || self.workspace_panel.snapshot_load_dialog.is_some()
+        {
             return;
         }
 
@@ -86,7 +88,7 @@ impl App {
             }
             return;
         }
-        if self.workspace_panel.create_menu_open
+        if (self.workspace_panel.create_menu_open || self.workspace_panel.snapshot_menu_open)
             && mouse.kind == MouseEventKind::Down(MouseButton::Left)
         {
             self.selection.clear();
@@ -585,6 +587,19 @@ impl App {
             self.workspace_panel.close_create_menu();
             return;
         }
+        if self.workspace_panel.snapshot_menu_open
+            && !matches!(
+                target,
+                Some(HitTarget::WorkspacePanel(
+                    WorkspacePanelHitTarget::SnapshotMenu
+                        | WorkspacePanelHitTarget::SaveSnapshot
+                        | WorkspacePanelHitTarget::Snapshot(_)
+                ))
+            )
+        {
+            self.workspace_panel.close_snapshot_menu();
+            return;
+        }
         if let Some(HitTarget::WorkspacePanel(target)) = target {
             self.activate_workspace_panel_target(target);
         } else if !self
@@ -614,6 +629,18 @@ impl App {
             }
             WorkspacePanelHitTarget::CreateWorktree => {
                 let effect = self.workspace_panel.activate_create_choice(1);
+                self.apply_workspace_panel_effect(effect);
+            }
+            WorkspacePanelHitTarget::SnapshotMenu => {
+                self.mode = Mode::WorkspacePanel;
+                self.workspace_panel.toggle_snapshot_menu();
+            }
+            WorkspacePanelHitTarget::SaveSnapshot => {
+                let effect = self.workspace_panel.activate_snapshot_choice(0);
+                self.apply_workspace_panel_effect(effect);
+            }
+            WorkspacePanelHitTarget::Snapshot(index) => {
+                let effect = self.workspace_panel.activate_snapshot_choice(index + 1);
                 self.apply_workspace_panel_effect(effect);
             }
             WorkspacePanelHitTarget::Group(index) => self.workspace_panel.toggle_group(index),
