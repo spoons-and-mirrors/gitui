@@ -190,10 +190,6 @@ impl TextInput {
         self.reset_blink();
     }
 
-    pub(crate) fn visual_row(&self, width: usize) -> usize {
-        visual_position(&self.text, self.cursor, width).0
-    }
-
     pub(crate) fn select_all(&mut self) {
         self.anchor = Some(0);
         self.cursor = self.text.len();

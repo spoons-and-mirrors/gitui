@@ -82,8 +82,8 @@ The rail starts on the left. Press `w` to cycle it through the right side, off, 
 - Click the Graph `AUTHOR` header to include or exclude commits by author.
 - Drag the one-column Diff scrollbar or click its track to move quickly through large patches.
 - Click the Changes `Stage all` checkbox to stage everything; click it again when checked to unstage everything.
-- Click the commit editor inside Changes, type a message, and press `Ctrl+Enter` to commit.
-- When `opencode` is installed, click `✦` below the commit editor to generate a message from the staged diff, or from the unstaged diff when nothing is staged. Hunkle uses `openai/gpt-5.6-sol` with low reasoning and never overwrites a message edited while generation is running.
+- Click the commit editor inside Changes, type a message, use the mouse wheel to scroll longer messages, and press `Ctrl+Enter` to commit.
+- When `opencode` is installed, click `✦` below the commit editor to generate a message from the staged diff, or from the unstaged diff when nothing is staged. Hunkle streams the complete diff directly to OpenCode without file-attachment or tool-output truncation, deletes the one-shot OpenCode session after generation, uses `openai/gpt-5.6-sol` with low reasoning, and never overwrites a message edited while generation is running.
 - Click the Explorer path field to type, or click a directory/repository entry to navigate or open it.
 - Drag across visible text to select it and automatically copy it to the clipboard. In Files, hold `Shift` while dragging to select text instead of moving an entry. Selection stays within the panel where the drag starts.
 

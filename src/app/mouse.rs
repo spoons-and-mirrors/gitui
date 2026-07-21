@@ -490,18 +490,15 @@ impl App {
         } else if self.select_graph_row(point) {
             self.open_selected_graph_commit();
         } else if let Some(commit) = self.regions.commit.filter(|rect| rect.contains(point)) {
+            let scroll = self.regions.commit_scroll;
             self.focus_commit();
             let width = usize::from(commit.width.saturating_sub(2)).max(1);
-            let visible_height = usize::from(commit.height).max(1);
-            let scroll = self
-                .commit_input
-                .visual_row(width)
-                .saturating_sub(visible_height.saturating_sub(1));
             let row = scroll + usize::from(point.y.saturating_sub(commit.y));
             let column = usize::from(point.x.saturating_sub(commit.x.saturating_add(1)))
                 .min(width.saturating_sub(1));
             self.commit_input
                 .set_cursor_at_visual_position(width, row, column);
+            self.commit_scroll = Some(scroll.min(self.regions.commit_scroll_max));
         }
     }
 
@@ -905,6 +902,16 @@ impl App {
                 },
                 KeyModifiers::NONE,
             ));
+        } else if self.regions.commit.is_some_and(|rect| rect.contains(point)) {
+            let amount = delta.saturating_mul(2);
+            let current = self.regions.commit_scroll;
+            let next = if amount < 0 {
+                current.saturating_sub(amount.unsigned_abs())
+            } else {
+                current.saturating_add(amount as usize)
+            }
+            .min(self.regions.commit_scroll_max);
+            self.commit_scroll = Some(next);
         } else if self.regions.diff.is_some_and(|rect| rect.contains(point)) {
             self.changes
                 .scroll_diff_by(self.regions.diff_scroll_max, delta.saturating_mul(3));

@@ -690,8 +690,35 @@ fn renders_every_primary_surface() {
     assert!(unfocused_screen.contains("SubYject"));
     assert!(unfocused_screen.contains("BoXdy"));
 
+    app.mode = Mode::Commit;
+    app.commit_input.set(
+        (1..=10)
+            .map(|line| format!("message line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    app.commit_scroll = None;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let scroll_max = app.regions.commit_scroll_max;
+    assert!(scroll_max > 2);
+    assert_eq!(app.regions.commit_scroll, scroll_max);
+    app.handle_mouse(mouse(MouseEventKind::ScrollUp, commit.x + 1, commit.y + 1));
+    assert_eq!(app.commit_scroll, Some(scroll_max - 2));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(app.regions.commit_scroll, scroll_max - 2);
+    app.handle_mouse(mouse(
+        MouseEventKind::ScrollDown,
+        commit.x + 1,
+        commit.y + 1,
+    ));
+    assert_eq!(app.commit_scroll, Some(scroll_max));
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(app.commit_scroll, None);
+
+    app.mode = Mode::Normal;
     app.commit_input
         .set(format!("wrap-start {} wrap-end", "x".repeat(90)));
+    app.commit_scroll = None;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     let wrapped_screen: String = terminal
         .backend()

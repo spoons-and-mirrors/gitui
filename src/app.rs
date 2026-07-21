@@ -186,6 +186,8 @@ pub struct Regions {
     pub splitter: Option<Rect>,
     pub split_bounds: Option<Rect>,
     pub commit: Option<Rect>,
+    pub commit_scroll: usize,
+    pub commit_scroll_max: usize,
     pub graph_table: Option<Rect>,
     pub workspace_explorer_path: Option<Rect>,
     pub workspace_explorer_list: Option<Rect>,
@@ -246,6 +248,7 @@ pub struct App {
     pub(crate) author_filter: AuthorFilter,
     pub(crate) commit_summaries: CommitSummaryCache,
     pub(crate) commit_input: TextInput,
+    pub(crate) commit_scroll: Option<usize>,
     pub(crate) commit_message_generator: CommitMessageGenerator,
     commit_draft_path: Option<PathBuf>,
     commit_draft_due: Option<Instant>,
@@ -363,6 +366,7 @@ impl App {
             author_filter,
             commit_summaries: CommitSummaryCache::default(),
             commit_input: TextInput::default(),
+            commit_scroll: None,
             commit_message_generator: CommitMessageGenerator::detect(),
             commit_draft_path: None,
             commit_draft_due: None,
@@ -614,6 +618,7 @@ impl App {
                 match completion.result {
                     Ok(message) => {
                         self.commit_input.set(message);
+                        self.commit_scroll = None;
                         self.commit_input.focus();
                         self.mode = Mode::Commit;
                         self.schedule_commit_draft();
@@ -639,6 +644,7 @@ impl App {
                 WorkerCompletion::Commit(result) => match result {
                     Ok(output) if output.success => {
                         self.commit_input.clear();
+                        self.commit_scroll = None;
                         self.schedule_commit_draft();
                         self.flush_commit_draft();
                         self.reload(RefreshScope::WORKTREE.union(RefreshScope::HISTORY_AND_REFS));
@@ -1119,6 +1125,7 @@ impl App {
 
     fn handle_commit_input(&mut self, key: KeyEvent) {
         self.commit_input.focus();
+        self.commit_scroll = None;
         let previous = self.commit_input.text().to_owned();
         let input_width = self
             .regions
@@ -1862,6 +1869,7 @@ impl App {
 
     fn restore_commit_draft(&mut self) {
         self.commit_input.clear();
+        self.commit_scroll = None;
         self.commit_draft_due = None;
         self.commit_draft_path = self
             .repository()
@@ -2164,6 +2172,7 @@ impl App {
             return;
         }
         self.mode = Mode::Commit;
+        self.commit_scroll = None;
         self.commit_input.focus();
     }
 }

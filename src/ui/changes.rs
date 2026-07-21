@@ -513,17 +513,27 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             )
         }
     };
-    let commit_scroll = if commit_active {
+    let automatic_commit_scroll = if commit_active {
         commit_cursor_row(&app.commit_input, usize::from(commit_content.width))
             .saturating_sub(usize::from(commit_content.height).saturating_sub(1))
     } else {
         commit_height.saturating_sub(usize::from(commit_content.height))
+    };
+    let commit_scroll_max = commit_height.saturating_sub(usize::from(commit_content.height));
+    let commit_scroll = app
+        .commit_scroll
+        .unwrap_or(automatic_commit_scroll)
+        .min(commit_scroll_max)
+        .min(usize::from(u16::MAX));
+    if app.commit_scroll.is_some() {
+        app.commit_scroll = Some(commit_scroll);
     }
-    .min(usize::from(u16::MAX)) as u16;
+    app.regions.commit_scroll = commit_scroll;
+    app.regions.commit_scroll_max = commit_scroll_max;
     frame.render_widget(
         Paragraph::new(commit_text)
             .wrap(Wrap { trim: false })
-            .scroll((commit_scroll, 0))
+            .scroll((commit_scroll as u16, 0))
             .style(Style::default().bg(palette().canvas)),
         commit_content,
     );
