@@ -1038,6 +1038,9 @@ fn renders_every_primary_surface() {
 fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
     let directory = tempfile::tempdir().unwrap();
     let mut app = App::new(directory.path().to_path_buf());
+    let settings_path = directory.path().join("config");
+    app.settings_path = Some(settings_path.clone());
+    app.settings.workspace_panel_width = 26;
     app.workspace_panel = WorkspacePanel::ready_for_test(&serde_json::json!({
         "result": {
             "snapshot": {
@@ -1092,10 +1095,39 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(rendered.contains("WORKSPACES"));
+    assert!(rendered.contains("WORKSPACE +"));
     assert!(rendered.contains("HUNKLE"));
     assert!(rendered.contains("AGENTS"));
     assert!(rendered.contains("opencode / HUNKLE"));
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::WorkspacePanel(
+                WorkspacePanelHitTarget::CreateWorkspace
+            ))
+            .is_some()
+    );
+
+    let divider = app.regions.workspace_panel_splitter.unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        divider.x,
+        divider.y + 2,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        35,
+        divider.y + 2,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        35,
+        divider.y + 2,
+    ));
+    assert_eq!(app.settings.workspace_panel_width, 35);
+    assert!(!app.dragging_workspace_panel_splitter);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(app.regions.workspace_panel.unwrap().width, 35);
+    assert_eq!(app.regions.worktree.unwrap().x, 36);
 
     app.workspace_panel.begin_group();
     app.workspace_panel.paste("Current work");
@@ -1118,8 +1150,34 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
 
     app.workspace_panel.cycle_placement();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(app.regions.workspace_panel.unwrap().x, 94);
+    assert_eq!(app.regions.workspace_panel.unwrap().x, 85);
     assert_eq!(app.regions.worktree.unwrap().x, 0);
+
+    let divider = app.regions.workspace_panel_splitter.unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        divider.x,
+        divider.y + 2,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        78,
+        divider.y + 2,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        78,
+        divider.y + 2,
+    ));
+    assert_eq!(app.settings.workspace_panel_width, 41);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert_eq!(app.regions.workspace_panel.unwrap().x, 79);
+    assert_eq!(app.regions.workspace_panel.unwrap().width, 41);
+    assert!(
+        fs::read_to_string(&settings_path)
+            .unwrap()
+            .contains("workspace_panel_width=41")
+    );
 
     app.workspace_panel.cycle_placement();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -1128,7 +1186,7 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
 
     app.workspace_panel.show_left();
 
-    let mut narrow = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    let mut narrow = Terminal::new(TestBackend::new(78, 24)).unwrap();
     narrow.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(app.regions.workspace_panel.is_none());
     app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));

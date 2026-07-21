@@ -12,6 +12,9 @@ use serde_json::Value;
 
 use super::TextInput;
 
+pub(crate) const DEFAULT_WIDTH: u16 = 26;
+pub(crate) const MINIMUM_WIDTH: u16 = 18;
+
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 
@@ -330,6 +333,10 @@ impl WorkspacePanel {
         self.group_editing = true;
     }
 
+    pub(crate) fn create_workspace(&self, path: Option<&Path>) {
+        self.start_action(workspace_create_args(path));
+    }
+
     fn handle_group_input(&mut self, key: KeyEvent) -> WorkspacePanelEffect {
         self.group_input.focus();
         match key.code {
@@ -573,6 +580,10 @@ impl WorkspacePanel {
             };
             vec!["tab".to_owned(), "focus".to_owned(), agent.tab_id.clone()]
         };
+        self.start_action(args);
+    }
+
+    fn start_action(&self, args: Vec<String>) {
         let sender = self.sender.clone();
         thread::spawn(move || {
             let result = run_herdr(&args).map(|_| ());
@@ -700,12 +711,23 @@ pub(crate) enum WorkspacePanelEffect {
     None,
     Close,
     Cycle,
+    CreateWorkspace,
     OpenWorkspace(PathBuf),
     Notice(String),
 }
 
 fn sort_groups(groups: &mut [WorkspaceGroup]) {
     groups.sort_by_cached_key(|group| group.name.to_lowercase());
+}
+
+fn workspace_create_args(path: Option<&Path>) -> Vec<String> {
+    let mut args = vec!["workspace".to_owned(), "create".to_owned()];
+    if let Some(path) = path {
+        args.push("--cwd".to_owned());
+        args.push(path.to_string_lossy().into_owned());
+    }
+    args.push("--no-focus".to_owned());
+    args
 }
 
 fn load_groups(path: &Path) -> Vec<WorkspaceGroup> {
@@ -945,6 +967,21 @@ mod tests {
         assert_eq!(
             panel.click_workspace(0),
             WorkspacePanelEffect::OpenWorkspace(PathBuf::from("/home/spoon/code/gitui"))
+        );
+    }
+
+    #[test]
+    fn creates_a_background_workspace_at_the_current_path() {
+        assert_eq!(
+            workspace_create_args(Some(Path::new("/tmp/current workspace"))),
+            [
+                "workspace",
+                "create",
+                "--cwd",
+                "/tmp/current workspace",
+                "--no-focus",
+            ]
+            .map(str::to_owned)
         );
     }
 

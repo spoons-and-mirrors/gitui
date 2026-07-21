@@ -23,8 +23,9 @@ pub(crate) use repository_browser::{
     RepositoryBrowserEffect,
 };
 pub(crate) use workspace_panel::{
-    AgentStatus, WorkspaceDropTarget, WorkspacePanel, WorkspacePanelEffect,
-    WorkspacePanelPlacement, WorkspacePanelRow,
+    AgentStatus, DEFAULT_WIDTH as DEFAULT_WORKSPACE_PANEL_WIDTH,
+    MINIMUM_WIDTH as MINIMUM_WORKSPACE_PANEL_WIDTH, WorkspaceDropTarget, WorkspacePanel,
+    WorkspacePanelEffect, WorkspacePanelPlacement, WorkspacePanelRow,
 };
 
 use std::{
@@ -81,6 +82,7 @@ pub struct Settings {
     pub auto_fetch: bool,
     pub fetch_interval_minutes: u16,
     pub worktree_width: u16,
+    pub workspace_panel_width: u16,
     pub history_height: u16,
     pub editor_command: Option<String>,
 }
@@ -91,6 +93,7 @@ impl Default for Settings {
             auto_fetch: false,
             fetch_interval_minutes: 5,
             worktree_width: 38,
+            workspace_panel_width: DEFAULT_WORKSPACE_PANEL_WIDTH,
             history_height: 7,
             editor_command: None,
         }
@@ -119,6 +122,7 @@ pub(crate) enum HitTarget {
 pub(crate) enum WorkspacePanelHitTarget {
     Focus,
     Collapse,
+    CreateWorkspace,
     Group(usize),
     Workspace(usize),
     Agent(usize),
@@ -156,6 +160,8 @@ pub struct Regions {
     pub settings: Option<Rect>,
     pub help: Option<Rect>,
     pub workspace_panel: Option<Rect>,
+    pub workspace_panel_splitter: Option<Rect>,
+    pub workspace_panel_bounds: Option<Rect>,
     pub actions: Option<Rect>,
     pub worktree: Option<Rect>,
     pub worktree_tab: Option<Rect>,
@@ -236,6 +242,7 @@ pub struct App {
     commit_draft_path: Option<PathBuf>,
     commit_draft_due: Option<Instant>,
     pub dragging_splitter: bool,
+    pub dragging_workspace_panel_splitter: bool,
     pub dragging_history: bool,
     pub dragging_diff_scrollbar: bool,
     diff_scroll_drag_offset: u16,
@@ -350,6 +357,7 @@ impl App {
             commit_draft_path: None,
             commit_draft_due: None,
             dragging_splitter: false,
+            dragging_workspace_panel_splitter: false,
             dragging_history: false,
             dragging_diff_scrollbar: false,
             diff_scroll_drag_offset: 0,
@@ -703,7 +711,9 @@ impl App {
                     self.pending_reload = None;
                     self.pending_file_selection = None;
                     self.reload_queued = None;
-                    self.mode = Mode::Normal;
+                    if self.mode != Mode::WorkspacePanel {
+                        self.mode = Mode::Normal;
+                    }
                     self.actions = ActionsState::default();
                     self.notice = Some(
                         if self.session.data().is_some_and(RepositoryData::is_local) {
@@ -1546,6 +1556,19 @@ impl App {
             WorkspacePanelEffect::None => {}
             WorkspacePanelEffect::Close => self.mode = Mode::Normal,
             WorkspacePanelEffect::Cycle => self.cycle_workspace_panel(),
+            WorkspacePanelEffect::CreateWorkspace => {
+                let path = self
+                    .session
+                    .data()
+                    .map(|repository| repository.root.clone())
+                    .or_else(|| std::env::current_dir().ok());
+                diagnostics::event(format!(
+                    "Herdr workspace create requested path={}",
+                    path.as_deref()
+                        .map_or_else(|| "<default>".to_owned(), |path| path.display().to_string())
+                ));
+                self.workspace_panel.create_workspace(path.as_deref());
+            }
             WorkspacePanelEffect::OpenWorkspace(path) => {
                 diagnostics::event(format!("workspace clicked path={}", path.display()));
                 self.open_repository_with_fetch(path);
@@ -2077,6 +2100,12 @@ fn load_settings(path: &Path) -> Settings {
                     settings.worktree_width = width.clamp(24, 4096);
                 }
             }
+            "workspace_panel_width" => {
+                if let Ok(width) = value.trim().parse::<u16>() {
+                    settings.workspace_panel_width =
+                        width.clamp(MINIMUM_WORKSPACE_PANEL_WIDTH, 4096);
+                }
+            }
             "history_height" => {
                 if let Ok(height) = value.trim().parse::<u16>() {
                     settings.history_height = height.clamp(3, 256);
@@ -2099,10 +2128,11 @@ fn save_settings(path: &Path, settings: &Settings) -> std::io::Result<()> {
     fs::write(
         path,
         format!(
-            "auto_fetch={}\nfetch_interval_minutes={}\nworktree_width={}\nhistory_height={}\neditor_command={}\n",
+            "auto_fetch={}\nfetch_interval_minutes={}\nworktree_width={}\nworkspace_panel_width={}\nhistory_height={}\neditor_command={}\n",
             settings.auto_fetch,
             settings.fetch_interval_minutes,
             settings.worktree_width,
+            settings.workspace_panel_width,
             settings.history_height,
             settings.editor_command.as_deref().unwrap_or_default()
         ),
@@ -2199,6 +2229,25 @@ mod tests {
             fs::canonicalize(root).unwrap()
         );
         assert_eq!(app.notice.as_deref(), Some("Workspace opened"));
+    }
+
+    #[test]
+    fn workspace_click_open_keeps_the_workspace_panel_focused() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        fs::write(first.path().join("first.txt"), "first\n").unwrap();
+        fs::write(second.path().join("second.txt"), "second\n").unwrap();
+        let mut app = App::new(first.path().to_path_buf());
+        app.mode = Mode::WorkspacePanel;
+
+        app.open_repository_with_fetch(second.path().to_path_buf());
+        wait_for_state(&mut app, |app| !app.session.open_running());
+
+        assert_eq!(app.mode, Mode::WorkspacePanel);
+        assert_eq!(
+            app.repository().unwrap().root,
+            fs::canonicalize(second.path()).unwrap()
+        );
     }
 
     #[test]
@@ -2331,6 +2380,7 @@ mod tests {
             auto_fetch: true,
             fetch_interval_minutes: 17,
             worktree_width: 61,
+            workspace_panel_width: 33,
             history_height: 9,
             editor_command: Some("code --wait".to_owned()),
         };
@@ -2340,12 +2390,13 @@ mod tests {
 
         fs::write(
             &path,
-            "auto_fetch=true\nfetch_interval_minutes=0\nworktree_width=5\nhistory_height=1\n",
+            "auto_fetch=true\nfetch_interval_minutes=0\nworktree_width=5\nworkspace_panel_width=2\nhistory_height=1\n",
         )
         .unwrap();
         let loaded = load_settings(&path);
         assert_eq!(loaded.fetch_interval_minutes, 1);
         assert_eq!(loaded.worktree_width, 24);
+        assert_eq!(loaded.workspace_panel_width, MINIMUM_WORKSPACE_PANEL_WIDTH);
         assert_eq!(loaded.history_height, 3);
     }
 
@@ -2447,6 +2498,7 @@ mod tests {
                 auto_fetch: true,
                 fetch_interval_minutes: 6,
                 worktree_width: 38,
+                workspace_panel_width: DEFAULT_WORKSPACE_PANEL_WIDTH,
                 history_height: 7,
                 editor_command: None,
             }

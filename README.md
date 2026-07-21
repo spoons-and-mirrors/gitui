@@ -62,12 +62,13 @@ In Explorer, start typing a folder name, press `p` to search from an empty field
 
 When hunkle runs inside Herdr, it can show a Workspaces and Agents rail backed by Herdr's session snapshot. Single-click a workspace to open its directory in hunkle; a repository that has not fetched successfully in the last five minutes is fetched in the background. Use `j`/`k` and `Enter` to switch the active Herdr workspace, or `Esc` to return to hunkle. The rail refreshes in the background and hides automatically on narrow terminals or outside Herdr.
 
-The rail starts hidden. Press `w` to cycle it through the left side, right side, and off. Inside the rail, press `g` to create a group. Click groups to fold or expand them, and drag workspaces onto a group or back into ungrouped space. A single workspace or agent click only selects it; press `Enter` or double-click to switch.
+The rail starts hidden. Press `w` to cycle it through the left side, right side, and off. Click `+` beside WORKSPACE to create a Herdr workspace at Hunkle's current path without leaving the current workspace. Inside the rail, press `g` to create a group. Click groups to fold or expand them, and drag workspaces onto a group or back into ungrouped space. A single workspace or agent click only selects it; press `Enter` or double-click to switch.
 
 ## Mouse
 
 - Click header controls to switch views, refresh, open Explorer, or open help.
 - Drag the divider between Worktree and Diff to resize either panel.
+- Drag the Workspaces rail divider to resize it on either side of the window.
 - Drag the History section header vertically to resize the current-branch commit shelf.
 - Click `x ACTIONS` above History to push, fetch, pull with rebase, or run a custom Git command.
 - Click or scroll History to inspect a commit's patch; click a Worktree file to return to its current diff.

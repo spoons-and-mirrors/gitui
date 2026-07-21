@@ -14,9 +14,6 @@ use crate::app::{
 
 use super::{fill, palette, truncate_width};
 
-pub(super) const WIDTH: u16 = 26;
-pub(super) const MINIMUM_TOTAL_WIDTH: u16 = WIDTH + 1 + 60;
-
 pub(super) fn draw(
     frame: &mut Frame<'_>,
     panel: &mut WorkspacePanel,
@@ -53,13 +50,11 @@ pub(super) fn draw(
         let row_area = Rect::new(body.x, body.y + screen_row as u16, body.width, 1);
         match row {
             WorkspacePanelRow::Header => {
-                draw_header(
-                    frame,
-                    row_area,
-                    "WORKSPACES",
-                    panel.workspaces.len(),
-                    panel.loading,
-                );
+                let create = draw_workspace_header(frame, row_area, panel.loading);
+                targets.push((
+                    HitTarget::WorkspacePanel(WorkspacePanelHitTarget::CreateWorkspace),
+                    create,
+                ));
                 let collapse = Rect::new(row_area.right().saturating_sub(1), row_area.y, 1, 1);
                 let collapse_marker = match panel.placement {
                     WorkspacePanelPlacement::Right => "›",
@@ -243,6 +238,30 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, label: &str, count: usize, loa
         ])),
         area,
     );
+}
+
+fn draw_workspace_header(frame: &mut Frame<'_>, area: Rect, loading: bool) -> Rect {
+    let suffix = if loading { "  ↻" } else { "" };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "WORKSPACE",
+                Style::default()
+                    .fg(palette().muted)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                "+",
+                Style::default()
+                    .fg(palette().accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(suffix, Style::default().fg(palette().faint)),
+        ])),
+        area,
+    );
+    Rect::new(area.x.saturating_add(10), area.y, 1, 1)
 }
 
 fn draw_entry(

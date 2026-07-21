@@ -19,8 +19,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{
-        App, FileDialogKind, GraphHitTarget, HitTarget, Mode, Regions, View,
-        WorkspacePanelHitTarget, WorkspacePanelPlacement,
+        App, FileDialogKind, GraphHitTarget, HitTarget, MINIMUM_WORKSPACE_PANEL_WIDTH, Mode,
+        Regions, View, WorkspacePanelHitTarget, WorkspacePanelPlacement,
     },
     theme::{Palette, load_theme},
 };
@@ -58,20 +58,28 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     app.regions.screen = Some(frame.area());
     draw_header(frame, app, layout[0]);
     let content = layout[1];
-    let panel_available =
-        app.workspace_panel.is_enabled() && content.width >= workspace_panel::MINIMUM_TOTAL_WIDTH;
+    const MINIMUM_MAIN_WIDTH: u16 = 60;
+    let panel_available = app.workspace_panel.is_enabled()
+        && content.width
+            >= MINIMUM_WORKSPACE_PANEL_WIDTH
+                .saturating_add(1)
+                .saturating_add(MINIMUM_MAIN_WIDTH);
     app.workspace_panel.set_layout_available(panel_available);
     if !panel_available && app.mode == Mode::WorkspacePanel {
         app.mode = Mode::Normal;
     }
     let main_content = if app.workspace_panel.is_visible() && panel_available {
-        let main_width = content
-            .width
-            .saturating_sub(workspace_panel::WIDTH)
-            .saturating_sub(1);
+        let panel_width = app.settings.workspace_panel_width.clamp(
+            MINIMUM_WORKSPACE_PANEL_WIDTH,
+            content
+                .width
+                .saturating_sub(1)
+                .saturating_sub(MINIMUM_MAIN_WIDTH),
+        );
+        let main_width = content.width.saturating_sub(panel_width).saturating_sub(1);
         let (panel_area, divider, main) = match app.workspace_panel.placement {
             WorkspacePanelPlacement::Left => {
-                let panel = Rect::new(content.x, content.y, workspace_panel::WIDTH, content.height);
+                let panel = Rect::new(content.x, content.y, panel_width, content.height);
                 let divider = Rect::new(panel.right(), content.y, 1, content.height);
                 let main = Rect::new(divider.right(), content.y, main_width, content.height);
                 (panel, divider, main)
@@ -79,17 +87,14 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             WorkspacePanelPlacement::Right => {
                 let main = Rect::new(content.x, content.y, main_width, content.height);
                 let divider = Rect::new(main.right(), content.y, 1, content.height);
-                let panel = Rect::new(
-                    divider.right(),
-                    content.y,
-                    workspace_panel::WIDTH,
-                    content.height,
-                );
+                let panel = Rect::new(divider.right(), content.y, panel_width, content.height);
                 (panel, divider, main)
             }
             WorkspacePanelPlacement::Off => unreachable!(),
         };
         app.regions.workspace_panel = Some(panel_area);
+        app.regions.workspace_panel_splitter = Some(divider);
+        app.regions.workspace_panel_bounds = Some(content);
         for (target, rect) in workspace_panel::draw(
             frame,
             &mut app.workspace_panel,
@@ -98,7 +103,15 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         ) {
             app.regions.register_hit_target(target, rect);
         }
-        fill(frame, divider, palette().canvas);
+        fill(
+            frame,
+            divider,
+            if app.dragging_workspace_panel_splitter {
+                palette().accent
+            } else {
+                palette().canvas
+            },
+        );
         main
     } else {
         content

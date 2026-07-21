@@ -4,8 +4,9 @@ use ratatui::layout::{Position, Rect};
 use crate::{git::RefreshScope, selection::SelectionOutcome};
 
 use super::{
-    ACTION_ITEMS, App, GraphHitTarget, HitTarget, LeftPane, Mode, RepositoryBrowserEffect,
-    RepositoryBrowserHitTarget, View, WorkspaceDropTarget, WorkspacePanelHitTarget, scroll_table,
+    ACTION_ITEMS, App, GraphHitTarget, HitTarget, LeftPane, MINIMUM_WORKSPACE_PANEL_WIDTH, Mode,
+    RepositoryBrowserEffect, RepositoryBrowserHitTarget, View, WorkspaceDropTarget,
+    WorkspacePanelEffect, WorkspacePanelHitTarget, WorkspacePanelPlacement, scroll_table,
 };
 
 impl App {
@@ -17,6 +18,20 @@ impl App {
                 MouseEventKind::Up(MouseButton::Left) => {
                     self.resize_worktree(mouse.column);
                     self.dragging_splitter = false;
+                    self.persist_settings();
+                }
+                _ => {}
+            }
+            return;
+        }
+        if self.dragging_workspace_panel_splitter {
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    self.resize_workspace_panel(mouse.column);
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    self.resize_workspace_panel(mouse.column);
+                    self.dragging_workspace_panel_splitter = false;
                     self.persist_settings();
                 }
                 _ => {}
@@ -190,6 +205,18 @@ impl App {
     }
 
     fn begin_mouse_control(&mut self, point: Position) -> bool {
+        if matches!(
+            self.mode,
+            Mode::Normal | Mode::Commit | Mode::WorkspacePanel
+        ) && self
+            .regions
+            .workspace_panel_splitter
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.dragging_workspace_panel_splitter = true;
+            self.resize_workspace_panel(point.x);
+            return true;
+        }
         if !matches!(self.mode, Mode::Normal | Mode::Commit) {
             return false;
         }
@@ -460,6 +487,10 @@ impl App {
             WorkspacePanelHitTarget::Collapse => {
                 self.workspace_panel.hide();
                 self.mode = Mode::Normal;
+            }
+            WorkspacePanelHitTarget::CreateWorkspace => {
+                self.mode = Mode::WorkspacePanel;
+                self.apply_workspace_panel_effect(WorkspacePanelEffect::CreateWorkspace);
             }
             WorkspacePanelHitTarget::Group(index) => self.workspace_panel.toggle_group(index),
             WorkspacePanelHitTarget::Workspace(index) => {
@@ -903,6 +934,37 @@ impl App {
         let maximum = bounds.right().saturating_sub(25).max(minimum);
         let position = column.clamp(minimum, maximum);
         self.settings.worktree_width = position.saturating_sub(bounds.x);
+    }
+
+    fn resize_workspace_panel(&mut self, column: u16) {
+        const MINIMUM_MAIN_WIDTH: u16 = 60;
+        let Some(bounds) = self.regions.workspace_panel_bounds else {
+            return;
+        };
+        self.settings.workspace_panel_width = match self.workspace_panel.placement {
+            WorkspacePanelPlacement::Left => {
+                let minimum = bounds.x.saturating_add(MINIMUM_WORKSPACE_PANEL_WIDTH);
+                let maximum = bounds
+                    .right()
+                    .saturating_sub(MINIMUM_MAIN_WIDTH)
+                    .saturating_sub(1)
+                    .max(minimum);
+                column.clamp(minimum, maximum).saturating_sub(bounds.x)
+            }
+            WorkspacePanelPlacement::Right => {
+                let minimum = bounds.x.saturating_add(MINIMUM_MAIN_WIDTH);
+                let maximum = bounds
+                    .right()
+                    .saturating_sub(MINIMUM_WORKSPACE_PANEL_WIDTH)
+                    .saturating_sub(1)
+                    .max(minimum);
+                bounds
+                    .right()
+                    .saturating_sub(column.clamp(minimum, maximum))
+                    .saturating_sub(1)
+            }
+            WorkspacePanelPlacement::Off => return,
+        };
     }
 
     fn resize_history(&mut self, row: u16) {
