@@ -106,7 +106,7 @@ pub(super) fn draw(
                     &label,
                     workspace.branch.as_deref(),
                     workspace.status,
-                    workspace.focused,
+                    panel.workspace_is_active(index),
                     selected_row == Some(visual_row) || ungrouped_drop,
                 );
                 targets.push((
