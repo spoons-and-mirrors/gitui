@@ -387,14 +387,15 @@ impl WorkspacePanel {
         rows
     }
 
-    pub(crate) fn poll(&mut self) -> (bool, Option<String>, Option<PathBuf>) {
+    pub(crate) fn poll(&mut self) -> (bool, Option<String>, Option<PathBuf>, bool) {
         if !self.enabled {
-            return (false, None, None);
+            return (false, None, None, false);
         }
 
         let mut changed = false;
         let mut action_error = None;
         let mut reopen_path = None;
+        let mut workspace_focus_succeeded = false;
         while let Ok(completion) = self.receiver.try_recv() {
             changed = true;
             match completion {
@@ -423,6 +424,7 @@ impl WorkspacePanel {
                         WorkspaceFocusCompletion::Succeeded => {
                             self.select_host_workspace();
                             self.next_refresh = Instant::now();
+                            workspace_focus_succeeded = true;
                         }
                         WorkspaceFocusCompletion::Failed(error) => {
                             action_error = Some(error);
@@ -446,7 +448,12 @@ impl WorkspacePanel {
             self.start_snapshot();
             changed = true;
         }
-        (changed, action_error, reopen_path)
+        (
+            changed,
+            action_error,
+            reopen_path,
+            workspace_focus_succeeded,
+        )
     }
 
     pub(crate) fn refresh(&mut self) {
@@ -733,20 +740,32 @@ impl WorkspacePanel {
     }
 
     pub(crate) fn click_workspace(&mut self, index: usize) -> WorkspacePanelEffect {
-        if !self.select_workspace(index) {
+        if index >= self.workspaces.len() {
             return WorkspacePanelEffect::None;
+        }
+        if self.register_workspace_click(index) {
+            self.focus_selected();
+            WorkspacePanelEffect::None
+        } else {
+            self.workspaces[index].path.clone().map_or(
+                WorkspacePanelEffect::None,
+                WorkspacePanelEffect::OpenWorkspace,
+            )
+        }
+    }
+
+    fn register_workspace_click(&mut self, index: usize) -> bool {
+        if !self.select_workspace(index) {
+            return false;
         }
         let key = SelectionKey::Workspace(self.workspaces[index].id.clone());
         if self.is_double_click(&key) {
-            self.focus_selected();
-            self.last_click = Some((key, Instant::now()));
-            return WorkspacePanelEffect::None;
+            self.last_click = None;
+            return true;
         }
-        self.last_click = Some((key, Instant::now()));
-        self.workspaces[index].path.clone().map_or_else(
-            || WorkspacePanelEffect::Notice("Workspace has no directory to open".to_owned()),
-            WorkspacePanelEffect::OpenWorkspace,
-        )
+        let now = Instant::now();
+        self.last_click = Some((key, now));
+        false
     }
 
     pub(crate) fn click_agent(&mut self, index: usize) {
@@ -756,6 +775,8 @@ impl WorkspacePanel {
         let key = SelectionKey::Agent(self.agents[index].pane_id.clone());
         if self.is_double_click(&key) {
             self.focus_selected();
+            self.last_click = None;
+            return;
         }
         self.last_click = Some((key, Instant::now()));
     }
@@ -1519,6 +1540,16 @@ mod tests {
             panel.click_workspace(0),
             WorkspacePanelEffect::OpenWorkspace(PathBuf::from("/home/spoon/code/gitui"))
         );
+        assert_eq!(panel.selected, Some(0));
+    }
+
+    #[test]
+    fn a_second_workspace_click_becomes_a_focus_request() {
+        let mut panel = WorkspacePanel::ready_for_test(&snapshot());
+        panel.workspaces[1].path = Some(PathBuf::from("/tmp/work-b"));
+
+        assert!(!panel.register_workspace_click(1));
+        assert!(panel.register_workspace_click(1));
     }
 
     #[test]
@@ -1533,9 +1564,10 @@ mod tests {
 
         let stale = parse_snapshot(&snapshot()).unwrap();
         panel.sender.send(Completion::Snapshot(Ok(stale))).unwrap();
-        let (changed, error, _) = panel.poll();
+        let (changed, error, _, focus_succeeded) = panel.poll();
         assert!(changed);
         assert!(error.is_none());
+        assert!(!focus_succeeded);
         assert_eq!(panel.selected, Some(1));
         assert!(!panel.workspace_is_active(0));
         assert!(panel.workspace_is_active(1));
@@ -1563,7 +1595,8 @@ mod tests {
                 result: Ok(()),
             })
             .unwrap();
-        panel.poll();
+        let (_, _, _, focus_succeeded) = panel.poll();
+        assert!(focus_succeeded);
         assert!(panel.focus.pending.is_none());
         assert!(!panel.workspace_is_active(0));
         assert!(panel.workspace_is_active(1));
@@ -1600,8 +1633,9 @@ mod tests {
             })
             .unwrap();
 
-        panel.poll();
+        let (_, _, _, focus_succeeded) = panel.poll();
 
+        assert!(focus_succeeded);
         assert!(panel.focus.pending.is_none());
         assert_eq!(panel.selected, Some(0));
         assert_eq!(panel.selected_workspace_id(), Some("w1"));
@@ -1621,7 +1655,7 @@ mod tests {
                 result: Err("old failure".to_owned()),
             })
             .unwrap();
-        let (_, error, _) = panel.poll();
+        let (_, error, _, _) = panel.poll();
         assert!(error.is_none());
         assert_eq!(
             panel
@@ -1640,7 +1674,7 @@ mod tests {
                 result: Err("focus failed".to_owned()),
             })
             .unwrap();
-        let (_, error, _) = panel.poll();
+        let (_, error, _, _) = panel.poll();
         assert_eq!(error.as_deref(), Some("focus failed"));
         assert!(panel.focus.pending.is_none());
         assert!(panel.workspace_is_active(0));
@@ -1755,7 +1789,7 @@ mod tests {
                 reopen_path: Some(parent.clone()),
             })
             .unwrap();
-        let (changed, error, reopen_path) = panel.poll();
+        let (changed, error, reopen_path, _) = panel.poll();
         assert!(changed);
         assert_eq!(error, None);
         assert_eq!(reopen_path, Some(parent.clone()));
@@ -1768,7 +1802,7 @@ mod tests {
                 reopen_path: Some(parent),
             })
             .unwrap();
-        let (changed, error, reopen_path) = panel.poll();
+        let (changed, error, reopen_path, _) = panel.poll();
         assert!(changed);
         assert_eq!(error.as_deref(), Some("worktree has uncommitted changes"));
         assert_eq!(reopen_path, None);

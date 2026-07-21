@@ -282,6 +282,8 @@ pub struct App {
     file_drag: Option<FileDrag>,
     last_worktree_file_click: Option<(String, bool, Instant)>,
     pending_file_selection: Option<String>,
+    workspace_focus_restore_path: Option<PathBuf>,
+    pending_workspace_restore: Option<PathBuf>,
     recent_fetches: HashMap<PathBuf, Instant>,
     workspace_fetch_pending: bool,
 }
@@ -401,6 +403,8 @@ impl App {
             file_drag: None,
             last_worktree_file_click: None,
             pending_file_selection: None,
+            workspace_focus_restore_path: None,
+            pending_workspace_restore: None,
             recent_fetches: HashMap::new(),
             workspace_fetch_pending: false,
         };
@@ -588,7 +592,8 @@ impl App {
 
     pub fn poll_worker(&mut self) -> bool {
         let mut changed = self.mode == Mode::Explorer && self.workspace_explorer.poll_index();
-        let (panel_changed, panel_error, panel_reopen_path) = self.workspace_panel.poll();
+        let (panel_changed, panel_error, panel_reopen_path, workspace_focus_succeeded) =
+            self.workspace_panel.poll();
         changed |= panel_changed;
         if let Some(error) = panel_error {
             self.notice = Some(error);
@@ -599,6 +604,10 @@ impl App {
                 path.display()
             ));
             self.open_repository_with_fetch(path);
+        }
+        if workspace_focus_succeeded && let Some(path) = self.workspace_focus_restore_path.take() {
+            self.queue_workspace_restore(path);
+            changed = true;
         }
         changed |= self.repository_browser.poll();
         self.prefetch_commit_summaries();
@@ -865,6 +874,7 @@ impl App {
                 }
             }
         }
+        self.try_start_workspace_restore();
         self.maybe_start_workspace_fetch();
         changed |= self
             .changes
@@ -1685,7 +1695,14 @@ impl App {
                     .delete_worktree(&workspace_id, reopen_path);
             }
             WorkspacePanelEffect::OpenWorkspace(path) => {
-                diagnostics::event(format!("workspace clicked path={}", path.display()));
+                if self.workspace_focus_restore_path.is_none() {
+                    self.workspace_focus_restore_path =
+                        self.repository().map(|repository| repository.root.clone());
+                }
+                diagnostics::event(format!(
+                    "opening selected workspace in current hunkle path={}",
+                    path.display()
+                ));
                 self.open_repository_with_fetch(path);
             }
             WorkspacePanelEffect::Notice(notice) => self.notice = Some(notice),
@@ -1775,6 +1792,34 @@ impl App {
             return;
         }
         self.start_repository_open(path, true);
+    }
+
+    fn queue_workspace_restore(&mut self, path: PathBuf) {
+        self.pending_workspace_restore = Some(path);
+        self.try_start_workspace_restore();
+    }
+
+    fn try_start_workspace_restore(&mut self) {
+        let Some(path) = self.pending_workspace_restore.as_ref() else {
+            return;
+        };
+        // The loaded repository still names the source while a speculative open is in flight.
+        // Wait for that open before deciding whether the restore is already satisfied.
+        if self.session.open_running() || !self.session.can_start_open() {
+            return;
+        }
+        if self
+            .repository()
+            .is_some_and(|repository| same_workspace_path(&repository.root, path))
+        {
+            self.pending_workspace_restore = None;
+            return;
+        }
+        let path = self
+            .pending_workspace_restore
+            .take()
+            .expect("checked pending workspace restore");
+        self.start_repository_open(path, false);
     }
 
     fn start_repository_open(&mut self, path: PathBuf, fetch_if_stale: bool) {
@@ -2432,7 +2477,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_click_open_keeps_the_workspace_panel_focused() {
+    fn opening_a_workspace_keeps_the_workspace_panel_focused() {
         let first = tempfile::tempdir().unwrap();
         let second = tempfile::tempdir().unwrap();
         fs::write(first.path().join("first.txt"), "first\n").unwrap();
@@ -2448,6 +2493,62 @@ mod tests {
             app.repository().unwrap().root,
             fs::canonicalize(second.path()).unwrap()
         );
+    }
+
+    #[test]
+    fn speculative_workspace_open_restores_after_focus_succeeds() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        fs::write(first.path().join("first.txt"), "first\n").unwrap();
+        fs::write(second.path().join("second.txt"), "second\n").unwrap();
+        let first_path = fs::canonicalize(first.path()).unwrap();
+        let second_path = fs::canonicalize(second.path()).unwrap();
+        let mut app = App::new(first.path().to_path_buf());
+        app.mode = Mode::WorkspacePanel;
+
+        app.apply_workspace_panel_effect(WorkspacePanelEffect::OpenWorkspace(
+            second.path().to_path_buf(),
+        ));
+        assert!(app.session.open_running());
+        wait_for_state(&mut app, |app| {
+            !app.session.open_running()
+                && app
+                    .repository()
+                    .is_some_and(|repository| repository.root == second_path)
+        });
+        assert_eq!(
+            app.workspace_focus_restore_path.as_deref(),
+            Some(first_path.as_path())
+        );
+
+        let restore_path = app.workspace_focus_restore_path.take().unwrap();
+        app.queue_workspace_restore(restore_path);
+        wait_for_state(&mut app, |app| {
+            !app.session.open_running()
+                && app.pending_workspace_restore.is_none()
+                && app
+                    .repository()
+                    .is_some_and(|repository| repository.root == first_path)
+        });
+
+        app.apply_workspace_panel_effect(WorkspacePanelEffect::OpenWorkspace(
+            second.path().to_path_buf(),
+        ));
+        let restore_path = app.workspace_focus_restore_path.take().unwrap();
+        app.queue_workspace_restore(restore_path);
+        assert_eq!(
+            app.pending_workspace_restore.as_deref(),
+            Some(first_path.as_path())
+        );
+        wait_for_state(&mut app, |app| {
+            !app.session.open_running()
+                && app.pending_workspace_restore.is_none()
+                && app
+                    .repository()
+                    .is_some_and(|repository| repository.root == first_path)
+        });
+
+        assert_eq!(app.mode, Mode::WorkspacePanel);
     }
 
     #[test]

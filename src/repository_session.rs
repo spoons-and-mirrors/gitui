@@ -332,6 +332,10 @@ impl RepositorySession {
         self.operations.is_running(Operation::Load(LoadKind::Open))
     }
 
+    pub(crate) fn can_start_open(&self) -> bool {
+        self.operations.can_start(Operation::Load(LoadKind::Open))
+    }
+
     pub(crate) fn start_open(&mut self, path: PathBuf, fetch_interval: Duration) -> bool {
         self.start_load(
             path,

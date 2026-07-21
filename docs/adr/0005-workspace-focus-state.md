@@ -17,13 +17,16 @@ The displayed active workspace is derived in this order: pending request target,
 
 After a successful outbound focus command, the hidden Hunkle process resets its cursor to its containing workspace so its buffered UI is ready when that workspace is shown again. Rendering consumes a unified entry state containing both `active` and `selected` rather than reconstructing either value.
 
+A workspace-row click changes the local cursor and immediately opens that repository in the current Hunkle. Hunkle records the repository shown before the first click as speculative restore state. `Enter` or a matching second click requests Herdr focus; after that request succeeds, the now-hidden source process restores its recorded repository. A failed focus request leaves the single-click navigation in place.
+
 ## Consequences
 
 - Cursor navigation remains independent from Herdr focus.
 - Stale snapshots and out-of-order completions cannot cause transition flicker.
 - Each Hunkle process can pre-render its containing workspace correctly while hidden.
+- Switching Herdr workspaces cannot replace a hidden Hunkle process's repository.
 - Focus precedence and failure rollback have one owner and transition-focused tests.
-- Repository opening, grouping, dragging, and agent focus remain outside workspace-focus state.
+- Speculative single-click repository opening and rollback, grouping, dragging, and agent focus remain outside workspace-focus state.
 
 ## Rejected Alternatives
 
