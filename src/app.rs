@@ -567,10 +567,17 @@ impl App {
 
     pub fn poll_worker(&mut self) -> bool {
         let mut changed = self.mode == Mode::Explorer && self.workspace_explorer.poll_index();
-        let (panel_changed, panel_error) = self.workspace_panel.poll();
+        let (panel_changed, panel_error, panel_reopen_path) = self.workspace_panel.poll();
         changed |= panel_changed;
         if let Some(error) = panel_error {
             self.notice = Some(error);
+        }
+        if let Some(path) = panel_reopen_path {
+            diagnostics::event(format!(
+                "opening parent workspace after worktree removal path={}",
+                path.display()
+            ));
+            self.open_repository_with_fetch(path);
         }
         changed |= self.repository_browser.poll();
         self.prefetch_commit_summaries();
@@ -1586,11 +1593,23 @@ impl App {
                 ));
                 self.workspace_panel.close_workspace(&workspace_id);
             }
-            WorkspacePanelEffect::DeleteWorktree(workspace_id) => {
+            WorkspacePanelEffect::DeleteWorktree {
+                workspace_id,
+                path,
+                parent_path,
+            } => {
                 diagnostics::event(format!(
                     "Herdr worktree remove requested workspace={workspace_id}"
                 ));
-                self.workspace_panel.delete_worktree(&workspace_id);
+                let reopen_path = parent_path.filter(|_| {
+                    path.as_deref().is_some_and(|worktree_path| {
+                        self.session.data().is_some_and(|repository| {
+                            same_workspace_path(&repository.root, worktree_path)
+                        })
+                    })
+                });
+                self.workspace_panel
+                    .delete_worktree(&workspace_id, reopen_path);
             }
             WorkspacePanelEffect::OpenWorkspace(path) => {
                 diagnostics::event(format!("workspace clicked path={}", path.display()));
@@ -2082,6 +2101,14 @@ fn fetch_is_fresh(fetched_at: Option<&Instant>, now: Instant) -> bool {
     fetched_at.is_some_and(|fetched_at| {
         now.saturating_duration_since(*fetched_at) < WORKSPACE_FETCH_FRESHNESS
     })
+}
+
+fn same_workspace_path(left: &Path, right: &Path) -> bool {
+    left == right
+        || fs::canonicalize(left)
+            .ok()
+            .zip(fs::canonicalize(right).ok())
+            .is_some_and(|(left, right)| left == right)
 }
 
 fn settings_path() -> Option<PathBuf> {

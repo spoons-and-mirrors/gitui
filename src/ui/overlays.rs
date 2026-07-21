@@ -405,7 +405,7 @@ pub(super) fn draw_workspace_delete_dialog(frame: &mut Frame<'_>, dialog: &Works
                 "Close workspace",
             )
         }
-        WorkspaceDeleteKind::Worktree { path } => {
+        WorkspaceDeleteKind::Worktree { path, .. } => {
             let path = path.as_deref().map_or_else(
                 || "its checkout directory".to_owned(),
                 |path| path.display().to_string(),

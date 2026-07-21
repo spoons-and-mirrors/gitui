@@ -80,8 +80,13 @@ pub(crate) struct WorkspaceGroup {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkspaceDeleteKind {
-    Workspace { pane_count: usize },
-    Worktree { path: Option<PathBuf> },
+    Workspace {
+        pane_count: usize,
+    },
+    Worktree {
+        path: Option<PathBuf>,
+        parent_path: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,7 +128,10 @@ enum SelectionKey {
 
 enum Completion {
     Snapshot(Result<(Vec<HerdrWorkspace>, Vec<HerdrAgent>), String>),
-    Action(Result<(), String>),
+    Action {
+        result: Result<(), String>,
+        reopen_path: Option<PathBuf>,
+    },
 }
 
 pub(crate) struct WorkspacePanel {
@@ -282,13 +290,14 @@ impl WorkspacePanel {
         rows
     }
 
-    pub(crate) fn poll(&mut self) -> (bool, Option<String>) {
+    pub(crate) fn poll(&mut self) -> (bool, Option<String>, Option<PathBuf>) {
         if !self.enabled {
-            return (false, None);
+            return (false, None, None);
         }
 
         let mut changed = false;
         let mut action_error = None;
+        let mut reopen_path = None;
         while let Ok(completion) = self.receiver.try_recv() {
             changed = true;
             match completion {
@@ -310,8 +319,14 @@ impl WorkspacePanel {
                         Err(error) => self.error = Some(error),
                     }
                 }
-                Completion::Action(result) => match result {
-                    Ok(()) => self.next_refresh = Instant::now(),
+                Completion::Action {
+                    result,
+                    reopen_path: action_reopen_path,
+                } => match result {
+                    Ok(()) => {
+                        self.next_refresh = Instant::now();
+                        reopen_path = action_reopen_path;
+                    }
                     Err(error) => action_error = Some(error),
                 },
             }
@@ -321,7 +336,7 @@ impl WorkspacePanel {
             self.start_snapshot();
             changed = true;
         }
-        (changed, action_error)
+        (changed, action_error, reopen_path)
     }
 
     pub(crate) fn refresh(&mut self) {
@@ -384,8 +399,19 @@ impl WorkspacePanel {
             return WorkspacePanelEffect::Notice("Select a workspace to close".to_owned());
         };
         let kind = if workspace.linked_worktree {
+            let parent_path = workspace
+                .parent_workspace_id
+                .as_deref()
+                .and_then(|parent_id| {
+                    self.workspaces
+                        .iter()
+                        .find(|candidate| candidate.id == parent_id)
+                })
+                .and_then(|parent| parent.path.clone())
+                .or_else(|| workspace.repo_root.clone());
             WorkspaceDeleteKind::Worktree {
                 path: workspace.path.clone(),
+                parent_path,
             }
         } else {
             WorkspaceDeleteKind::Workspace {
@@ -417,8 +443,12 @@ impl WorkspacePanel {
                     WorkspaceDeleteKind::Workspace { .. } => {
                         WorkspacePanelEffect::CloseWorkspace(dialog.workspace_id)
                     }
-                    WorkspaceDeleteKind::Worktree { .. } => {
-                        WorkspacePanelEffect::DeleteWorktree(dialog.workspace_id)
+                    WorkspaceDeleteKind::Worktree { path, parent_path } => {
+                        WorkspacePanelEffect::DeleteWorktree {
+                            workspace_id: dialog.workspace_id,
+                            path,
+                            parent_path,
+                        }
                     }
                 }
             }
@@ -452,8 +482,8 @@ impl WorkspacePanel {
         self.start_action(workspace_close_args(workspace_id));
     }
 
-    pub(crate) fn delete_worktree(&self, workspace_id: &str) {
-        self.start_action(worktree_remove_args(workspace_id));
+    pub(crate) fn delete_worktree(&self, workspace_id: &str, reopen_path: Option<PathBuf>) {
+        self.start_action_with_reopen(worktree_remove_args(workspace_id), reopen_path);
     }
 
     pub(crate) fn toggle_create_menu(&mut self) {
@@ -806,10 +836,17 @@ impl WorkspacePanel {
     }
 
     fn start_action(&self, args: Vec<String>) {
+        self.start_action_with_reopen(args, None);
+    }
+
+    fn start_action_with_reopen(&self, args: Vec<String>, reopen_path: Option<PathBuf>) {
         let sender = self.sender.clone();
         thread::spawn(move || {
             let result = run_herdr(&args).map(|_| ());
-            let _ = sender.send(Completion::Action(result));
+            let _ = sender.send(Completion::Action {
+                result,
+                reopen_path,
+            });
         });
     }
 
@@ -940,7 +977,11 @@ pub(crate) enum WorkspacePanelEffect {
     CreateWorkspace,
     CreateWorktree(String),
     CloseWorkspace(String),
-    DeleteWorktree(String),
+    DeleteWorktree {
+        workspace_id: String,
+        path: Option<PathBuf>,
+        parent_path: Option<PathBuf>,
+    },
     OpenWorkspace(PathBuf),
     Notice(String),
 }
@@ -1381,11 +1422,16 @@ mod tests {
             panel.delete_dialog.as_ref().map(|dialog| &dialog.kind),
             Some(&WorkspaceDeleteKind::Worktree {
                 path: Some(PathBuf::from("/tmp/worktrees/feature")),
+                parent_path: Some(PathBuf::from("/home/spoon/code/gitui")),
             })
         );
         assert_eq!(
             panel.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
-            WorkspacePanelEffect::DeleteWorktree("w3".to_owned())
+            WorkspacePanelEffect::DeleteWorktree {
+                workspace_id: "w3".to_owned(),
+                path: Some(PathBuf::from("/tmp/worktrees/feature")),
+                parent_path: Some(PathBuf::from("/home/spoon/code/gitui")),
+            }
         );
 
         assert!(panel.select_agent(0));
@@ -1393,6 +1439,39 @@ mod tests {
             panel.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE)),
             WorkspacePanelEffect::Notice("Select a workspace to close".to_owned())
         );
+    }
+
+    #[test]
+    fn reopens_the_parent_only_after_successful_worktree_removal() {
+        let mut panel = WorkspacePanel::ready_for_test(&snapshot());
+        panel.next_refresh = Instant::now() + Duration::from_secs(60);
+        panel.loading = true;
+        let parent = PathBuf::from("/home/spoon/code/gitui");
+
+        panel
+            .sender
+            .send(Completion::Action {
+                result: Ok(()),
+                reopen_path: Some(parent.clone()),
+            })
+            .unwrap();
+        let (changed, error, reopen_path) = panel.poll();
+        assert!(changed);
+        assert_eq!(error, None);
+        assert_eq!(reopen_path, Some(parent.clone()));
+
+        panel.next_refresh = Instant::now() + Duration::from_secs(60);
+        panel
+            .sender
+            .send(Completion::Action {
+                result: Err("worktree has uncommitted changes".to_owned()),
+                reopen_path: Some(parent),
+            })
+            .unwrap();
+        let (changed, error, reopen_path) = panel.poll();
+        assert!(changed);
+        assert_eq!(error.as_deref(), Some("worktree has uncommitted changes"));
+        assert_eq!(reopen_path, None);
     }
 
     #[test]
