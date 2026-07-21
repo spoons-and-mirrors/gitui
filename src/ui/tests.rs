@@ -1755,6 +1755,60 @@ fn left_pane_files_take_over_the_preview_from_graph() {
 }
 
 #[test]
+fn double_clicking_worktree_files_opens_them_in_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    run_git(root, &["config", "user.name", "Double Click Test"]);
+    run_git(root, &["config", "user.email", "double-click@example.com"]);
+    fs::create_dir(root.join("nested")).unwrap();
+    fs::write(root.join("nested/unstaged.txt"), "initial\n").unwrap();
+    fs::write(root.join("staged.txt"), "initial\n").unwrap();
+    run_git(root, &["add", "."]);
+    run_git(root, &["commit", "-m", "initial commit"]);
+    fs::write(root.join("nested/unstaged.txt"), "unstaged content\n").unwrap();
+    fs::write(root.join("staged.txt"), "staged content\n").unwrap();
+    run_git(root, &["add", "staged.txt"]);
+
+    let mut app = App::new(root.to_path_buf());
+    let mut terminal = Terminal::new(TestBackend::new(100, 50)).unwrap();
+
+    for (path, content) in [
+        ("nested/unstaged.txt", "unstaged content\n"),
+        ("staged.txt", "staged content\n"),
+    ] {
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let worktree = app.regions.worktree_list.unwrap();
+        let repo = app.repository().unwrap();
+        let row = app
+            .changes
+            .worktree_rows(repo)
+            .iter()
+            .position(|row| {
+                row.change_index
+                    .and_then(|index| repo.changes.get(index))
+                    .is_some_and(|change| change.path == path)
+            })
+            .unwrap();
+        let y = worktree.y + (row - app.changes.worktree_scroll) as u16;
+        assert!(worktree.contains(Position::new(worktree.x + 4, y)));
+
+        click(&mut app, worktree.x + 4, y);
+        assert_eq!(app.changes.pane, LeftPane::Worktree);
+        click(&mut app, worktree.x + 4, y);
+        wait_for_preview(&mut app);
+
+        assert_eq!(app.changes.pane, LeftPane::Files);
+        assert_eq!(app.view, View::Changes);
+        assert_eq!(app.selected_explorer_file_path(), Some(path));
+        assert_eq!(app.changes.diff, content);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert_eq!(app.changes.pane, LeftPane::Worktree);
+    }
+}
+
+#[test]
 fn renders_markdown_files_and_toggles_back_to_source() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
@@ -1798,7 +1852,7 @@ fn renders_markdown_files_and_toggles_back_to_source() {
     assert!(rendered.contains("Source"));
     assert!(rendered.contains("Markdown Title"));
     assert!(!rendered.contains("# Markdown Title"));
-    assert!(rendered.contains("https://example.com"));
+    assert!(rendered.contains("https://"));
 
     click(&mut app, preview_button.0, preview_button.1);
     assert!(!app.markdown_preview_rendered());

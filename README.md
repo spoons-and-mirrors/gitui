@@ -73,7 +73,7 @@ The rail starts on the left. Press `w` to cycle it through the right side, off, 
 - Drag the Workspaces rail divider to resize it on either side of the window.
 - Drag the History section header vertically to resize the current-branch commit shelf.
 - Click `x ACTIONS` above History to push, fetch, pull with rebase, or run a custom Git command.
-- Click or scroll History to inspect a commit's patch; click a Changes file to return to its current diff.
+- Click or scroll History to inspect a commit's patch; click a Changes file to return to its current diff, or double-click it to open its current content in Files.
 - Click a directory to expand or collapse it. Click a file's right-aligned checkbox or right-click its row to stage or unstage it.
 - Click `CHANGES` or `FILES` in the left header to switch modes; clicking a repository file previews its contents.
 - Markdown files in Files show a top-right `Preview` button for switching between rendered Markdown and source.

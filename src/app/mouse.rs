@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
+use std::time::{Duration, Instant};
 
 use crate::{git::RefreshScope, selection::SelectionOutcome};
 
@@ -8,6 +9,8 @@ use super::{
     RepositoryBrowserEffect, RepositoryBrowserHitTarget, View, WorkspaceDropTarget,
     WorkspacePanelHitTarget, WorkspacePanelPlacement, scroll_table,
 };
+
+const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 
 impl App {
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
@@ -332,6 +335,13 @@ impl App {
     }
 
     pub(super) fn handle_primary_left_click(&mut self, point: Position) {
+        if !self
+            .regions
+            .worktree_list
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.last_worktree_file_click = None;
+        }
         if self.mode == Mode::Commit
             && !self.regions.commit.is_some_and(|rect| rect.contains(point))
         {
@@ -481,6 +491,7 @@ impl App {
                 .and_then(|repo| self.changes.selected_directory_path(repo))
                 .is_some()
             {
+                self.last_worktree_file_click = None;
                 let repo = self.session.data();
                 self.changes.toggle_selected_directory(repo);
             } else if self
@@ -488,8 +499,20 @@ impl App {
                 .worktree_status
                 .is_some_and(|rect| rect.contains(point))
             {
+                self.last_worktree_file_click = None;
                 self.toggle_stage();
             } else {
+                let selected = self.repository().and_then(|repo| {
+                    let index = self.changes.selected_change_index(repo)?;
+                    let change = repo.changes.get(index)?;
+                    Some((change.path.clone(), change.staged))
+                });
+                if let Some((path, staged)) = selected
+                    && self.register_worktree_file_click(&path, staged)
+                    && self.open_worktree_file_in_files(&path)
+                {
+                    return;
+                }
                 self.view = View::Changes;
                 self.graph_commit_open = false;
             }
@@ -514,6 +537,37 @@ impl App {
                 .set_cursor_at_visual_position(width, row, column);
             self.commit_scroll = Some(scroll.min(self.regions.commit_scroll_max));
         }
+    }
+
+    fn register_worktree_file_click(&mut self, path: &str, staged: bool) -> bool {
+        let double_click = self.last_worktree_file_click.as_ref().is_some_and(
+            |(previous_path, previous_staged, at)| {
+                previous_path == path
+                    && *previous_staged == staged
+                    && at.elapsed() <= DOUBLE_CLICK_INTERVAL
+            },
+        );
+        self.last_worktree_file_click =
+            (!double_click).then(|| (path.to_owned(), staged, Instant::now()));
+        double_click
+    }
+
+    fn open_worktree_file_in_files(&mut self, path: &str) -> bool {
+        let viewport = self
+            .regions
+            .worktree_list
+            .map_or(0, |rect| usize::from(rect.height));
+        let Some(repo) = self.session.data() else {
+            return false;
+        };
+        if !self.changes.select_explorer_path(repo, path, viewport) {
+            return false;
+        }
+        self.changes.set_pane(LeftPane::Files, Some(repo));
+        self.mode = Mode::Normal;
+        self.view = View::Changes;
+        self.graph_commit_open = false;
+        true
     }
 
     fn handle_workspace_panel_click(&mut self, point: Position) {
