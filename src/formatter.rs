@@ -1,12 +1,20 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Command,
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
 
-use crate::{filesystem, git::CommandOutput};
+use crate::{
+    filesystem,
+    git::CommandOutput,
+    process::{self, Limits},
+};
+
+const FORMATTER_OUTPUT_LIMIT: usize = 1024 * 1024;
+const FORMATTER_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 
 #[derive(Debug, Clone)]
 pub(crate) struct FormatCommand {
@@ -154,20 +162,37 @@ pub(crate) fn detect(root: &Path, relative: &Path) -> Result<FormatCommand> {
 
 pub(crate) fn run(root: &Path, relative: &str, command: &FormatCommand) -> Result<CommandOutput> {
     let file = filesystem::safe_regular_file(root, relative)?;
-    let output = Command::new(&command.program)
-        .args(&command.args)
-        .arg(file)
-        .current_dir(root)
-        .stdin(Stdio::null())
-        .output()
-        .with_context(|| format!("Could not run {}", command.label))?;
+    let output = process::run(
+        Command::new(&command.program)
+            .args(&command.args)
+            .arg(file)
+            .current_dir(root),
+        Limits::new(
+            FORMATTER_OUTPUT_LIMIT,
+            FORMATTER_OUTPUT_LIMIT,
+            FORMATTER_TIMEOUT,
+        ),
+    )
+    .with_context(|| format!("Could not run {}", command.label))?;
 
+    let mut stderr = output_text(output.stderr, output.stderr_truncated, "stderr");
+    if output.timed_out {
+        stderr.push_str("\n[formatter timed out]");
+    }
     Ok(CommandOutput {
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        success: output.status.success(),
+        stdout: output_text(output.stdout, output.stdout_truncated, "stdout"),
+        stderr,
+        success: output.status.success() && !output.timed_out,
         exit_code: output.status.code(),
     })
+}
+
+fn output_text(bytes: Vec<u8>, truncated: bool, stream: &str) -> String {
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    if truncated {
+        text.push_str(&format!("\n[{stream} truncated]"));
+    }
+    text
 }
 
 fn formatter_specs(path: &Path) -> Vec<FormatterSpec> {

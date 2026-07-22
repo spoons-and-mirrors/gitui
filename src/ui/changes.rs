@@ -372,6 +372,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     });
     let live_summary = selected_change.map(|change| DiffSummary {
         files: vec![change.path.clone()],
+        files_truncated: false,
         additions: change.additions,
         deletions: change.deletions,
     });
@@ -742,9 +743,14 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
         content.width,
         content.bottom().saturating_sub(header.y.saturating_add(2)),
     );
-    let file_count = app.repository().map_or(0, |repo| repo.files.len());
+    let (file_count, inventory_truncated) = app.repository().map_or((0, false), |repo| {
+        (repo.files.len(), repo.inventory_truncated)
+    });
     let files_title = if header.width >= 30 {
-        format!("FILES  {file_count}")
+        format!(
+            "FILES  {file_count}{}",
+            if inventory_truncated { "+" } else { "" }
+        )
     } else {
         "FILES".to_owned()
     };
@@ -1146,6 +1152,11 @@ fn draw_diff_summary(
     };
 
     let file_count = summary.files.len();
+    let displayed_file_count = format!(
+        "{}{}",
+        file_count,
+        if summary.files_truncated { "+" } else { "" }
+    );
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
@@ -1165,7 +1176,7 @@ fn draw_diff_summary(
             ),
             Span::styled(
                 format!(
-                    "  {file_count} {}",
+                    "  {displayed_file_count} {}",
                     if file_count == 1 { "file" } else { "files" }
                 ),
                 Style::default().fg(palette().faint),
@@ -1665,6 +1676,7 @@ mod summary_tests {
 
         let summary = DiffSummary {
             files: files.to_vec(),
+            files_truncated: false,
             additions: 1,
             deletions: 1,
         };

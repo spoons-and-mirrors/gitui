@@ -9,7 +9,7 @@ const MAX_RESULTS: usize = 20;
 #[derive(Debug, Clone)]
 struct IndexedFile {
     path_lower: String,
-    name_lower: String,
+    name_start: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -45,14 +45,10 @@ impl FileSearch {
             .iter()
             .map(|path| {
                 let path_lower = path.to_lowercase();
-                let name_lower = path_lower
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&path_lower)
-                    .to_owned();
+                let name_start = path_lower.rfind('/').map_or(0, |index| index + 1);
                 IndexedFile {
                     path_lower,
-                    name_lower,
+                    name_start,
                 }
             })
             .collect();
@@ -168,8 +164,8 @@ impl FileSearch {
 fn file_score(terms: &[&str], file: &IndexedFile) -> Option<u32> {
     terms.iter().try_fold(0_u32, |total, term| {
         let path_score = fuzzy_text_score_lower(term, &file.path_lower);
-        let name_score =
-            fuzzy_text_score_lower(term, &file.name_lower).map(|score| score.saturating_add(1_500));
+        let name_score = fuzzy_text_score_lower(term, &file.path_lower[file.name_start..])
+            .map(|score| score.saturating_add(1_500));
         path_score
             .into_iter()
             .chain(name_score)

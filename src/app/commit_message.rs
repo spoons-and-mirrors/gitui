@@ -4,18 +4,25 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Command,
     sync::mpsc::{self, Receiver, Sender},
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
-use crate::diagnostics;
+use crate::{
+    diagnostics,
+    process::{self, Limits},
+};
 use serde_json::Value;
 
 const MODEL: &str = "openai/gpt-5.6-sol";
 const VARIANT: &str = "low";
 const MAX_MESSAGE_BYTES: usize = 2_000;
+const MAX_DIFF_BYTES: usize = 1024 * 1024;
+const MAX_OPENCODE_OUTPUT_BYTES: usize = 1024 * 1024;
+const MAX_ERROR_BYTES: usize = 256 * 1024;
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(3 * 60);
 const DIFF_START: &str = "--- BEGIN GIT DIFF ---\n";
 const DIFF_END: &str = "\n--- END GIT DIFF ---\n";
 
@@ -144,24 +151,18 @@ fn generate_message(root: &Path) -> Result<String, String> {
     let diff_len = diff.len();
     let args = opencode_args(source);
     let working_directory = opencode_working_directory()?;
-    let mut child = Command::new("opencode")
-        .args(&args)
-        .current_dir(&working_directory)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("Could not run OpenCode: {error}"))?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "Could not send the diff to OpenCode".to_owned())?;
-    write_prompt_input(&mut stdin, &diff)
-        .map_err(|error| format!("Could not send the diff to OpenCode: {error}"))?;
-    drop(stdin);
-    let output = child
-        .wait_with_output()
-        .map_err(|error| format!("Could not wait for OpenCode: {error}"))?;
+    let mut input = Vec::with_capacity(DIFF_START.len() + diff.len() + DIFF_END.len());
+    write_prompt_input(&mut input, &diff)
+        .map_err(|error| format!("Could not prepare the diff for OpenCode: {error}"))?;
+    drop(diff);
+    let output = process::run_with_input(
+        Command::new("opencode")
+            .args(&args)
+            .current_dir(&working_directory),
+        input,
+        Limits::new(MAX_OPENCODE_OUTPUT_BYTES, MAX_ERROR_BYTES, COMMAND_TIMEOUT),
+    )
+    .map_err(|error| format!("Could not run OpenCode: {error}"))?;
     let events = parse_opencode_events(&output.stdout);
     let cleanup = events
         .session_id
@@ -178,6 +179,12 @@ fn generate_message(root: &Path) -> Result<String, String> {
         output.status.success(),
         cleanup.as_ref().is_some_and(Result::is_ok)
     ));
+    if output.timed_out {
+        return Err("OpenCode timed out while generating a commit message".to_owned());
+    }
+    if output.stdout_truncated {
+        return Err("OpenCode returned more than 1 MiB; no message was inserted".to_owned());
+    }
     if !output.status.success() {
         let mut error = format!(
             "OpenCode could not generate a commit message: {}",
@@ -251,15 +258,14 @@ fn parse_opencode_events(output: &[u8]) -> OpenCodeEvents {
 }
 
 fn delete_opencode_session(directory: &Path, session_id: &str) -> Result<(), String> {
-    let output = Command::new("opencode")
-        .args(["session", "delete", session_id, "--pure"])
-        .current_dir(directory)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|error| format!("Could not remove the temporary OpenCode session: {error}"))?;
-    if output.status.success() {
+    let output = process::run(
+        Command::new("opencode")
+            .args(["session", "delete", session_id, "--pure"])
+            .current_dir(directory),
+        Limits::new(0, MAX_ERROR_BYTES, Duration::from_secs(30)),
+    )
+    .map_err(|error| format!("Could not remove the temporary OpenCode session: {error}"))?;
+    if output.status.success() && !output.timed_out {
         Ok(())
     } else {
         Err(format!(
@@ -319,11 +325,17 @@ fn git_diff(root: &Path, staged: bool) -> Result<Vec<u8>, String> {
     if staged {
         command.arg("--cached");
     }
-    let output = command
-        .arg("--")
-        .output()
-        .map_err(|error| format!("Could not inspect Git changes: {error}"))?;
-    if output.status.success() {
+    command.arg("--");
+    let output = process::run(
+        &mut command,
+        Limits::new(MAX_DIFF_BYTES, MAX_ERROR_BYTES, Duration::from_secs(60)),
+    )
+    .map_err(|error| format!("Could not inspect Git changes: {error}"))?;
+    if output.timed_out {
+        Err("Could not inspect Git changes: Git diff timed out".to_owned())
+    } else if output.stdout_truncated {
+        Err("Diff is larger than 1 MiB; write the commit message manually".to_owned())
+    } else if output.status.success() {
         Ok(output.stdout)
     } else {
         Err(format!(

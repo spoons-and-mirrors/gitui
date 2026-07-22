@@ -15,7 +15,7 @@ enum Language {
     Generic,
 }
 
-pub(super) fn syntax_spans(code: &str, path: &str) -> Vec<Span<'static>> {
+pub(super) fn syntax_spans<'a>(code: &'a str, path: &str) -> Vec<Span<'a>> {
     let language = Language::from_path(path);
     let mut spans = Vec::new();
     let mut cursor = 0;
@@ -56,7 +56,7 @@ pub(super) fn syntax_spans(code: &str, path: &str) -> Vec<Span<'static>> {
         let character = rest.chars().next().expect("nonempty remainder");
         if character.is_whitespace() {
             let end = take_while(rest, char::is_whitespace);
-            spans.push(Span::raw(rest[..end].to_owned()));
+            spans.push(Span::raw(&rest[..end]));
             cursor += end;
             continue;
         }
@@ -301,8 +301,8 @@ fn take_while(input: &str, predicate: impl Fn(char) -> bool) -> usize {
         .unwrap_or(input.len())
 }
 
-fn styled(content: &str, style: Style) -> Span<'static> {
-    Span::styled(content.to_owned(), style)
+fn styled(content: &str, style: Style) -> Span<'_> {
+    Span::styled(content, style)
 }
 
 fn is_primitive(token: &str) -> bool {

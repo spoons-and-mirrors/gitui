@@ -5,14 +5,23 @@ use std::{
     collections::{HashMap, hash_map::DefaultHasher},
     fs,
     hash::{Hash, Hasher},
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Command, Stdio},
     thread,
-    time::UNIX_EPOCH,
+    time::{Duration, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+
+use crate::process::{self, Limits, Output};
+
+const GIT_STDOUT_LIMIT: usize = 64 * 1024 * 1024;
+const GIT_STDERR_LIMIT: usize = 1024 * 1024;
+const GIT_TIMEOUT: Duration = Duration::from_secs(120);
+const GIT_NETWORK_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const COMMAND_OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
+const DIFF_PREVIEW_LIMIT: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepositoryKind {
@@ -31,6 +40,7 @@ pub struct RepositoryData {
     pub history: Vec<Commit>,
     pub commits: Vec<Commit>,
     pub files_fingerprint: u64,
+    pub inventory_truncated: bool,
     pub changes_fingerprint: u64,
     pub change_counts: (usize, usize),
     pub graph_width: usize,
@@ -85,6 +95,7 @@ struct InventoryData {
     files: Vec<String>,
     directories: Vec<String>,
     fingerprint: u64,
+    truncated: bool,
 }
 
 #[derive(Debug)]
@@ -149,6 +160,7 @@ impl RepositoryData {
             self.files = inventory.files;
             self.directories = inventory.directories;
             self.files_fingerprint = inventory.fingerprint;
+            self.inventory_truncated = inventory.truncated;
         }
         if let Some(history) = update.history {
             self.branch = history.branch;
@@ -227,6 +239,7 @@ pub struct Commit {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DiffSummary {
     pub files: Vec<String>,
+    pub files_truncated: bool,
     pub additions: u64,
     pub deletions: u64,
 }
@@ -246,13 +259,16 @@ pub struct CommandOutput {
 }
 
 pub fn discover(path: &Path) -> Result<PathBuf> {
-    let output = Command::new("git")
-        .args(["-C"])
-        .arg(path)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .with_context(|| "could not start git; make sure it is installed")?;
+    let output = process::run(
+        Command::new("git")
+            .args(["-C"])
+            .arg(path)
+            .args(["rev-parse", "--show-toplevel"]),
+        git_limits(),
+    )
+    .with_context(|| "could not start git; make sure it is installed")?;
 
+    ensure_complete(&output, "git rev-parse")?;
     if !output.status.success() {
         bail!("{}", clean_stderr(&output));
     }
@@ -295,13 +311,18 @@ pub(crate) fn delete_branch(
     run_ok(root, &args)?;
     if let Some((remote, remote_branch)) = remote {
         let refspec = format!(":refs/heads/{remote_branch}");
-        let output = base_command(root)
-            .arg("push")
-            .arg("--")
-            .arg(remote)
-            .arg(&refspec)
-            .output()
-            .with_context(|| format!("could not delete {remote}/{remote_branch}"))?;
+        let output = process::run(
+            base_command(root)
+                .arg("push")
+                .arg("--")
+                .arg(remote)
+                .arg(&refspec),
+            Limits::new(COMMAND_OUTPUT_LIMIT, GIT_STDERR_LIMIT, GIT_NETWORK_TIMEOUT),
+        )
+        .with_context(|| format!("could not delete {remote}/{remote_branch}"))?;
+        if output.timed_out {
+            bail!("Timed out deleting {remote}/{remote_branch}");
+        }
         if !output.status.success() {
             bail!(
                 "Deleted local branch {branch}, but could not delete {remote}/{remote_branch}: {}",
@@ -359,6 +380,7 @@ fn load_git_root(root: PathBuf) -> Result<RepositoryData> {
         history: history.commits,
         commits: graph.commits,
         files_fingerprint: inventory.fingerprint,
+        inventory_truncated: inventory.truncated,
         changes_fingerprint: worktree.fingerprint,
         change_counts: worktree.counts,
         graph_width: graph.width,
@@ -447,20 +469,22 @@ fn load_worktree(root: &Path) -> Result<WorktreeData> {
 }
 
 fn load_git_inventory(root: &Path) -> Result<InventoryData> {
-    let (files, directories) = inventory::git_entries(root)?;
+    let (files, directories, truncated) = inventory::git_entries(root)?;
     Ok(InventoryData {
         fingerprint: fingerprint(&(&files, &directories)),
         files,
         directories,
+        truncated,
     })
 }
 
 fn load_local_inventory(root: &Path) -> Result<InventoryData> {
-    let (files, directories) = inventory::local_entries(root)?;
+    let (files, directories, truncated) = inventory::local_entries(root)?;
     Ok(InventoryData {
         fingerprint: fingerprint(&(&files, &directories)),
         files,
         directories,
+        truncated,
     })
 }
 
@@ -524,6 +548,7 @@ fn local_workspace(path: &Path) -> Result<RepositoryData> {
         history: Vec::new(),
         commits: Vec::new(),
         files_fingerprint: inventory.fingerprint,
+        inventory_truncated: inventory.truncated,
         changes_fingerprint: fingerprint(&Vec::<Change>::new()),
         change_counts: (0, 0),
         graph_width: 0,
@@ -659,7 +684,17 @@ pub fn file_content(root: &Path, relative_path: &str) -> Result<String> {
             metadata.len()
         ));
     }
-    let bytes = fs::read(&path).with_context(|| format!("could not read {}", path.display()))?;
+    let mut bytes = Vec::with_capacity(metadata.len().min(MAX_PREVIEW_BYTES + 1) as usize);
+    fs::File::open(&path)
+        .with_context(|| format!("could not read {}", path.display()))?
+        .take(MAX_PREVIEW_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("could not read {}", path.display()))?;
+    if bytes.len() > MAX_PREVIEW_BYTES as usize {
+        return Ok(format!(
+            "File is too large to preview\n\nMore than {MAX_PREVIEW_BYTES} bytes"
+        ));
+    }
     if bytes.contains(&0) {
         return Ok(format!("Binary file\n\n{} bytes", bytes.len()));
     }
@@ -709,20 +744,13 @@ pub fn unstage_all(root: &Path) -> Result<()> {
 
 pub fn stage_hunk(root: &Path, diff: &str, index: usize) -> Result<()> {
     let patch = hunk_patch(diff, index).context("diff hunk is no longer available")?;
-    let mut child = base_command(root)
-        .args(["apply", "--cached", "-"])
-        .stdin(Stdio::piped())
-        .spawn()
-        .context("could not start git apply --cached")?;
-    child
-        .stdin
-        .take()
-        .context("could not open git apply input")?
-        .write_all(patch.as_bytes())
-        .context("could not write diff hunk to git apply")?;
-    let output = child
-        .wait_with_output()
-        .context("could not finish git apply --cached")?;
+    let output = process::run_with_input(
+        base_command(root).args(["apply", "--cached", "-"]),
+        patch.into_bytes(),
+        git_limits(),
+    )
+    .context("could not finish git apply --cached")?;
+    ensure_complete(&output, "git apply --cached")?;
     if !output.status.success() {
         bail!("{}", clean_stderr(&output));
     }
@@ -771,15 +799,20 @@ pub(crate) fn commit_draft_path(root: &Path) -> Result<PathBuf> {
 }
 
 pub fn fetch(root: &Path) -> Result<CommandOutput> {
-    let output = run(root, &["fetch", "--all", "--prune"])?;
+    let output = run_limited(
+        root,
+        &["fetch", "--all", "--prune"],
+        Limits::new(COMMAND_OUTPUT_LIMIT, GIT_STDERR_LIMIT, GIT_NETWORK_TIMEOUT),
+    )?;
     Ok(command_output(output))
 }
 
 pub fn run_command(root: &Path, args: &[String]) -> Result<CommandOutput> {
-    let output = base_command(root)
-        .args(args)
-        .output()
-        .with_context(|| format!("could not run git {}", args.join(" ")))?;
+    let output = process::run(
+        base_command(root).args(args),
+        Limits::new(COMMAND_OUTPUT_LIMIT, GIT_STDERR_LIMIT, GIT_NETWORK_TIMEOUT),
+    )
+    .with_context(|| format!("could not run git {}", args.join(" ")))?;
     Ok(command_output(output))
 }
 
@@ -877,15 +910,22 @@ pub fn diff(root: &Path, change: &Change) -> Result<String> {
         args.push(original);
     }
     args.push(&change.path);
-    let output = run(root, &args)?;
+    let output = run_limited(
+        root,
+        &args,
+        Limits::new(DIFF_PREVIEW_LIMIT, GIT_STDERR_LIMIT, GIT_TIMEOUT),
+    )?;
+    if output.timed_out {
+        bail!("Git diff timed out");
+    }
     if !output.status.success() {
         bail!("{}", clean_stderr(&output));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(preview_text(output.stdout, output.stdout_truncated))
 }
 
 pub fn commit_diff(root: &Path, oid: &str) -> Result<String> {
-    let output = run(
+    let output = run_limited(
         root,
         &[
             "show",
@@ -895,11 +935,15 @@ pub fn commit_diff(root: &Path, oid: &str) -> Result<String> {
             "--unified=3",
             oid,
         ],
+        Limits::new(DIFF_PREVIEW_LIMIT, GIT_STDERR_LIMIT, GIT_TIMEOUT),
     )?;
+    if output.timed_out {
+        bail!("Git commit preview timed out");
+    }
     if !output.status.success() {
         bail!("{}", clean_stderr(&output));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(preview_text(output.stdout, output.stdout_truncated))
 }
 
 pub fn commit_summaries(root: &Path, oids: &[String]) -> Result<HashMap<String, DiffSummary>> {
@@ -923,6 +967,7 @@ pub fn commit_summaries(root: &Path, oids: &[String]) -> Result<HashMap<String, 
 }
 
 fn parse_commit_summaries(bytes: &[u8]) -> HashMap<String, DiffSummary> {
+    const MAX_FILES_PER_SUMMARY: usize = 2_000;
     let mut summaries = HashMap::new();
     for record in bytes.split(|byte| *byte == 0x1e) {
         let Some(separator) = record.iter().position(|byte| *byte == 0) else {
@@ -952,9 +997,13 @@ fn parse_commit_summaries(bytes: &[u8]) -> HashMap<String, DiffSummary> {
             summary.deletions = summary
                 .deletions
                 .saturating_add(String::from_utf8_lossy(deletions).parse().unwrap_or(0));
-            summary
-                .files
-                .push(String::from_utf8_lossy(path).into_owned());
+            if summary.files.len() < MAX_FILES_PER_SUMMARY {
+                summary
+                    .files
+                    .push(String::from_utf8_lossy(path).into_owned());
+            } else {
+                summary.files_truncated = true;
+            }
         }
         summaries.insert(oid, summary);
     }
@@ -1203,10 +1252,28 @@ fn parse_log(bytes: &[u8]) -> Vec<Commit> {
 }
 
 fn run(root: &Path, args: &[&str]) -> Result<Output> {
-    base_command(root)
-        .args(args)
-        .output()
+    let output = run_limited(root, args, git_limits())?;
+    ensure_complete(&output, &format!("git {}", args.join(" ")))?;
+    Ok(output)
+}
+
+fn run_limited(root: &Path, args: &[&str], limits: Limits) -> Result<Output> {
+    process::run(base_command(root).args(args), limits)
         .with_context(|| format!("could not run git {}", args.join(" ")))
+}
+
+fn git_limits() -> Limits {
+    Limits::new(GIT_STDOUT_LIMIT, GIT_STDERR_LIMIT, GIT_TIMEOUT)
+}
+
+fn ensure_complete(output: &Output, label: &str) -> Result<()> {
+    if output.timed_out {
+        bail!("{label} timed out");
+    }
+    if output.stdout_truncated {
+        bail!("{label} produced more than {GIT_STDOUT_LIMIT} bytes");
+    }
+    Ok(())
 }
 
 fn base_command(root: &Path) -> Command {
@@ -1234,7 +1301,13 @@ fn run_ok(root: &Path, args: &[&str]) -> Result<()> {
 }
 
 fn clean_stderr(output: &Output) -> String {
-    let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if output.timed_out {
+        return "Git command timed out".to_owned();
+    }
+    let mut message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if output.stderr_truncated {
+        message.push_str("\n[stderr truncated]");
+    }
     if message.is_empty() {
         format!("Git exited with {}", output.status)
     } else {
@@ -1243,12 +1316,35 @@ fn clean_stderr(output: &Output) -> String {
 }
 
 fn command_output(output: Output) -> CommandOutput {
+    let success = output.status.success() && !output.timed_out;
+    let mut stderr = command_text(output.stderr, output.stderr_truncated, "stderr");
+    if output.timed_out {
+        stderr.push_str("\n[command timed out]");
+    }
     CommandOutput {
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        success: output.status.success(),
+        stdout: command_text(output.stdout, output.stdout_truncated, "stdout"),
+        stderr,
+        success,
         exit_code: output.status.code(),
     }
+}
+
+fn preview_text(bytes: Vec<u8>, truncated: bool) -> String {
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    if truncated {
+        text.push_str(&format!(
+            "\n\n[Preview truncated at {DIFF_PREVIEW_LIMIT} bytes]"
+        ));
+    }
+    text
+}
+
+fn command_text(bytes: Vec<u8>, truncated: bool, stream: &str) -> String {
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    if truncated {
+        text.push_str(&format!("\n[{stream} truncated]"));
+    }
+    text
 }
 
 fn trim_ascii(mut bytes: &[u8]) -> &[u8] {
@@ -1468,7 +1564,8 @@ mod tests {
         fs::write(root.join("config/.env.production"), "SECRET=prod\n").unwrap();
         fs::remove_file(root.join("tracked.txt")).unwrap();
 
-        let (files, directories) = inventory::git_entries(root).unwrap();
+        let (files, directories, truncated) = inventory::git_entries(root).unwrap();
+        assert!(!truncated);
         assert_eq!(
             files,
             [
@@ -1502,7 +1599,8 @@ mod tests {
         git(root, &["update-index", "--add", "--cacheinfo", &cache_info]);
         fs::create_dir(root.join("module")).unwrap();
 
-        let (files, directories) = inventory::git_entries(root).unwrap();
+        let (files, directories, truncated) = inventory::git_entries(root).unwrap();
+        assert!(!truncated);
         assert!(!files.iter().any(|path| path == "module"));
         assert!(directories.iter().any(|path| path == "module"));
     }
@@ -1595,6 +1693,7 @@ mod tests {
             summaries["abc123"],
             DiffSummary {
                 files: vec!["src/app.rs".to_owned(), "assets/logo.png".to_owned()],
+                files_truncated: false,
                 additions: 12,
                 deletions: 3,
             }
@@ -1603,10 +1702,26 @@ mod tests {
             summaries["def456"],
             DiffSummary {
                 files: vec!["README.md".to_owned()],
+                files_truncated: false,
                 additions: 4,
                 deletions: 0,
             }
         );
+    }
+
+    #[test]
+    fn bounds_paths_retained_by_commit_summaries() {
+        let mut output = b"\x1eabc123\0\0\n".to_vec();
+        for index in 0..=2_000 {
+            output.extend_from_slice(format!("1\t2\tfile-{index}\0").as_bytes());
+        }
+
+        let summaries = parse_commit_summaries(&output);
+        let summary = &summaries["abc123"];
+        assert_eq!(summary.files.len(), 2_000);
+        assert!(summary.files_truncated);
+        assert_eq!(summary.additions, 2_001);
+        assert_eq!(summary.deletions, 4_002);
     }
 
     #[test]

@@ -6,7 +6,7 @@ use std::{
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
-        mpsc::{SyncSender, sync_channel},
+        mpsc::{SyncSender, TrySendError, sync_channel},
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -17,7 +17,10 @@ const SLOW_ACTIVITY: Duration = Duration::from_millis(100);
 const STALLED_ACTIVITY: Duration = Duration::from_secs(2);
 
 static DIAGNOSTICS: OnceLock<Diagnostics> = OnceLock::new();
+static DROP_REAPER: OnceLock<SyncSender<DropJob>> = OnceLock::new();
 static NEXT_ACTIVITY_ID: AtomicU64 = AtomicU64::new(1);
+
+type DropJob = Box<dyn FnOnce() + Send>;
 
 struct Diagnostics {
     sender: SyncSender<String>,
@@ -126,19 +129,35 @@ pub(crate) fn drop_in_background<T>(label: &'static str, value: T)
 where
     T: Send + 'static,
 {
-    let _ = thread::Builder::new()
-        .name("hunkle-drop".to_owned())
-        .spawn(move || {
-            let started = Instant::now();
-            drop(value);
-            let elapsed = started.elapsed();
-            if elapsed >= SLOW_ACTIVITY {
-                event(format!(
-                    "background drop label={label} elapsed_ms={}",
-                    elapsed.as_millis()
-                ));
-            }
-        });
+    let job: DropJob = Box::new(move || {
+        let started = Instant::now();
+        drop(value);
+        let elapsed = started.elapsed();
+        if elapsed >= SLOW_ACTIVITY {
+            event(format!(
+                "background drop label={label} elapsed_ms={}",
+                elapsed.as_millis()
+            ));
+        }
+    });
+    match drop_reaper().try_send(job) {
+        Ok(()) => {}
+        Err(TrySendError::Full(job) | TrySendError::Disconnected(job)) => job(),
+    }
+}
+
+fn drop_reaper() -> &'static SyncSender<DropJob> {
+    DROP_REAPER.get_or_init(|| {
+        let (sender, receiver) = sync_channel::<DropJob>(2);
+        let _ = thread::Builder::new()
+            .name("hunkle-drop".to_owned())
+            .spawn(move || {
+                while let Ok(job) = receiver.recv() {
+                    job();
+                }
+            });
+        sender
+    })
 }
 
 impl Drop for Activity {

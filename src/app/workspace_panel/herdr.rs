@@ -1,6 +1,8 @@
-use std::{path::PathBuf, process::Command};
+use std::{path::PathBuf, process::Command, time::Duration};
 
 use serde_json::Value;
+
+use crate::process::{self, Limits};
 
 use super::{AgentStatus, HerdrAgent, HerdrWorkspace};
 
@@ -116,10 +118,17 @@ fn action_args(action: Action) -> Vec<String> {
 }
 
 fn run(args: &[String]) -> Result<Value, String> {
-    let output = Command::new("herdr")
-        .args(args)
-        .output()
-        .map_err(|error| format!("Herdr unavailable: {error}"))?;
+    let output = process::run(
+        Command::new("herdr").args(args),
+        Limits::new(4 * 1024 * 1024, 256 * 1024, Duration::from_secs(60)),
+    )
+    .map_err(|error| format!("Herdr unavailable: {error}"))?;
+    if output.timed_out {
+        return Err("Herdr command timed out".to_owned());
+    }
+    if output.stdout_truncated {
+        return Err("Herdr returned more than 4 MiB".to_owned());
+    }
     let value: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let detail = stderr.lines().find(|line| !line.trim().is_empty());

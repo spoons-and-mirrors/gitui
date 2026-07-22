@@ -676,9 +676,8 @@ impl RepositorySession {
     }
 
     pub(crate) fn maybe_start_status_check(&mut self) {
-        if !self.operations.can_start(Operation::StatusCheck)
-            || Instant::now() < self.next_status_check
-        {
+        let now = Instant::now();
+        if !self.operations.can_start(Operation::StatusCheck) || now < self.next_status_check {
             return;
         }
         let Some(root) = self.git_root() else {
@@ -686,6 +685,7 @@ impl RepositorySession {
         };
 
         self.operations.start(Operation::StatusCheck);
+        self.next_status_check = now + self.status_interval;
         let baseline = self.status_signature;
         let activity_generation = self.status_activity_generation;
         let sender = self.status_tx.clone();
@@ -823,8 +823,10 @@ impl RepositorySession {
                     .status_interval
                     .saturating_mul(2)
                     .min(MAX_STATUS_INTERVAL);
-                self.next_status_check = Instant::now() + self.status_interval;
+            } else {
+                self.status_interval = MIN_STATUS_INTERVAL;
             }
+            self.next_status_check = Instant::now() + self.status_interval;
         }
         false
     }
@@ -832,9 +834,13 @@ impl RepositorySession {
     pub(crate) fn note_activity(&mut self) {
         self.status_activity_generation = self.status_activity_generation.wrapping_add(1);
         self.status_interval = MIN_STATUS_INTERVAL;
-        self.next_status_check = self
-            .next_status_check
-            .min(Instant::now() + MIN_STATUS_INTERVAL);
+        let now = Instant::now();
+        let active_deadline = now + MIN_STATUS_INTERVAL;
+        self.next_status_check = if self.next_status_check <= now {
+            active_deadline
+        } else {
+            self.next_status_check.min(active_deadline)
+        };
     }
 
     fn reset_status_interval(&mut self) {
@@ -1098,11 +1104,11 @@ mod tests {
     }
 
     #[test]
-    fn activity_does_not_postpone_or_back_off_status_checks() {
+    fn activity_keeps_status_checks_at_a_bounded_interval() {
         let mut session = session("/active", Some(10));
         session.next_status_check = Instant::now();
         session.note_activity();
-        assert!(session.next_status_check <= Instant::now());
+        assert!(session.next_status_check > Instant::now());
 
         session.operations.start(Operation::StatusCheck);
         session
@@ -1116,6 +1122,7 @@ mod tests {
             .unwrap();
         assert!(!session.next_worktree_change());
         assert_eq!(session.status_interval, MIN_STATUS_INTERVAL);
+        assert!(session.next_status_check > Instant::now());
     }
 
     #[test]
@@ -1192,6 +1199,7 @@ mod tests {
                 history: Vec::new(),
                 commits: Vec::new(),
                 files_fingerprint: 0,
+                inventory_truncated: false,
                 changes_fingerprint: 0,
                 change_counts: (0, 0),
                 graph_width: 0,

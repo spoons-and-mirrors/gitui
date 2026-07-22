@@ -37,7 +37,9 @@ pub(super) fn styled_source_window(
             } else {
                 Vec::new()
             };
-            spans.extend(syntax_spans(line, path));
+            for span in syntax_spans(line, path) {
+                push_merged_span(&mut spans, span);
+            }
             finish_line(spans, width, palette().panel)
         })
         .collect()
@@ -148,32 +150,20 @@ pub(super) fn wrapped_preview_line_starts(
 
 pub(super) fn word_wrapped_height(content: &str, width: usize) -> usize {
     let width = width.max(1);
-    let mut tokens: Vec<(bool, Vec<usize>)> = Vec::new();
-    for grapheme in content.graphemes(true) {
-        let whitespace = grapheme.chars().all(char::is_whitespace);
-        if tokens.last().is_none_or(|token| token.0 != whitespace) {
-            tokens.push((whitespace, Vec::new()));
-        }
-        tokens
-            .last_mut()
-            .expect("token was inserted")
-            .1
-            .push(UnicodeWidthStr::width(grapheme));
-    }
-
     let mut rows = 1_usize;
     let mut row_width = 0_usize;
     let mut has_word = false;
-    let mut pending_whitespace: Option<Vec<usize>> = None;
-    for (whitespace, token) in tokens {
+    let mut pending_whitespace: Option<&str> = None;
+    let mut start = 0;
+    while let Some((whitespace, end)) = next_wrap_token(content, start) {
+        let token = &content[start..end];
+        start = end;
         if whitespace && has_word {
             pending_whitespace = Some(token);
             continue;
         }
-        let token_width = token.iter().sum::<usize>();
-        let whitespace_width = pending_whitespace
-            .as_ref()
-            .map_or(0, |spaces| spaces.iter().sum());
+        let token_width = UnicodeWidthStr::width(token);
+        let whitespace_width = pending_whitespace.map_or(0, UnicodeWidthStr::width);
         if !whitespace
             && has_word
             && token_width <= width
@@ -186,22 +176,53 @@ pub(super) fn word_wrapped_height(content: &str, width: usize) -> usize {
             row_width = 0;
             pending_whitespace = None;
         } else if let Some(spaces) = pending_whitespace.take() {
-            add_wrapped_widths(&spaces, width, &mut rows, &mut row_width);
+            add_wrapped_content(spaces, width, &mut rows, &mut row_width);
         }
-        add_wrapped_widths(&token, width, &mut rows, &mut row_width);
+        add_wrapped_content(token, width, &mut rows, &mut row_width);
         has_word |= !whitespace;
     }
     rows
 }
 
-fn add_wrapped_widths(widths: &[usize], width: usize, rows: &mut usize, row_width: &mut usize) {
-    for grapheme_width in widths {
-        if *row_width > 0 && row_width.saturating_add(*grapheme_width) > width {
+fn next_wrap_token(content: &str, start: usize) -> Option<(bool, usize)> {
+    let mut graphemes = content[start..].grapheme_indices(true);
+    let (_, first) = graphemes.next()?;
+    let whitespace = first.chars().all(char::is_whitespace);
+    let end = graphemes
+        .find_map(|(offset, grapheme)| {
+            (grapheme.chars().all(char::is_whitespace) != whitespace).then_some(start + offset)
+        })
+        .unwrap_or(content.len());
+    Some((whitespace, end))
+}
+
+fn add_wrapped_content(content: &str, width: usize, rows: &mut usize, row_width: &mut usize) {
+    for grapheme in content.graphemes(true) {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        if *row_width > 0 && row_width.saturating_add(grapheme_width) > width {
             *rows = rows.saturating_add(1);
             *row_width = 0;
         }
-        *row_width = row_width.saturating_add(*grapheme_width);
+        *row_width = row_width.saturating_add(grapheme_width);
     }
+}
+
+fn push_merged_span(spans: &mut Vec<Span<'static>>, span: Span<'_>) {
+    if let Some(previous) = spans.last_mut()
+        && previous.style == span.style
+    {
+        previous.content.to_mut().push_str(&span.content);
+    } else {
+        spans.push(Span::styled(span.content.into_owned(), span.style));
+    }
+}
+
+fn owned_syntax_spans(code: &str, path: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for span in syntax_spans(code, path) {
+        push_merged_span(&mut spans, span);
+    }
+    spans
 }
 
 pub(super) fn styled_diff_window(
@@ -369,7 +390,7 @@ fn styled_diff_line(
         *new_line = new_line.map(|value| value + 1);
         (" ", payload, palette().panel, new)
     } else {
-        return finish_line(syntax_spans(line, path), width, palette().panel);
+        return finish_line(owned_syntax_spans(line, path), width, palette().panel);
     };
 
     let mut spans = if numbered {
@@ -389,7 +410,9 @@ fn styled_diff_line(
             })
             .add_modifier(Modifier::BOLD),
     ));
-    spans.extend(syntax_spans(payload, path));
+    for span in syntax_spans(payload, path) {
+        push_merged_span(&mut spans, span);
+    }
     finish_line(spans, width, background)
 }
 

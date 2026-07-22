@@ -1,18 +1,21 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    io::Write,
     path::Path,
-    process::Stdio,
     time::Instant,
 };
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 
-use super::{base_command, clean_stderr, run};
+use super::{base_command, clean_stderr, git_limits, run_limited};
+use crate::process::{self, Output};
 
-pub(super) fn git_entries(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
-    let output = run(
+pub(super) const MAX_INVENTORY_ENTRIES: usize = 100_000;
+const MAX_INVENTORY_PATH_BYTES: usize = 64 * 1024 * 1024;
+
+pub(super) fn git_entries(root: &Path) -> Result<(Vec<String>, Vec<String>, bool)> {
+    let mut truncated = false;
+    let output = inventory_output(
         root,
         &[
             "ls-files",
@@ -23,6 +26,7 @@ pub(super) fn git_entries(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
             "--exclude-standard",
             "--deleted",
         ],
+        &mut truncated,
     )?;
     if !output.status.success() {
         bail!("{}", clean_stderr(&output));
@@ -37,6 +41,10 @@ pub(super) fn git_entries(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
             continue;
         }
         let path = String::from_utf8_lossy(path).into_owned();
+        if states.len() >= MAX_INVENTORY_ENTRIES && !states.contains_key(&path) {
+            truncated = true;
+            continue;
+        }
         let absent_skip_worktree = tag == b'S' && root.join(&path).symlink_metadata().is_err();
         let state = states.entry(path).or_default();
         if tag == b'R' || absent_skip_worktree {
@@ -49,12 +57,21 @@ pub(super) fn git_entries(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
         .into_iter()
         .filter_map(|(path, (present, deleted))| (present && !deleted).then_some(path))
         .collect();
-    let (ignored_files, ignored_directories) = ignored_entries(root)?;
-    files.extend(ignored_files);
+    let (ignored_files, ignored_directories, ignored_truncated) = ignored_entries(root)?;
+    truncated |= ignored_truncated;
+    let remaining = MAX_INVENTORY_ENTRIES.saturating_sub(files.len());
+    if ignored_files.len() > remaining {
+        truncated = true;
+    }
+    files.extend(ignored_files.into_iter().take(remaining));
     files.sort_unstable();
     files.dedup();
+    if files.len() > MAX_INVENTORY_ENTRIES {
+        files.truncate(MAX_INVENTORY_ENTRIES);
+        truncated = true;
+    }
 
-    let output = run(
+    let output = inventory_output(
         root,
         &[
             "ls-files",
@@ -64,21 +81,32 @@ pub(super) fn git_entries(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
             "--empty-directory",
             "--exclude-standard",
         ],
+        &mut truncated,
     )?;
     if !output.status.success() {
         bail!("{}", clean_stderr(&output));
     }
-    let roots = output
+    let mut roots: Vec<_> = output
         .stdout
         .split(|byte| *byte == 0)
         .filter_map(|path| path.strip_suffix(b"/"))
         .map(|path| String::from_utf8_lossy(path).into_owned())
         .filter(|path| !path.is_empty())
+        .take(MAX_INVENTORY_ENTRIES + 1)
         .collect();
-    let mut directories = expand_directories(root, roots)?;
+    if roots.len() > MAX_INVENTORY_ENTRIES {
+        roots.pop();
+        truncated = true;
+    }
+    let (mut directories, expanded_truncated) = expand_directories(
+        root,
+        roots,
+        MAX_INVENTORY_ENTRIES.saturating_sub(files.len()),
+    )?;
+    truncated |= expanded_truncated;
     directories.extend(ignored_directories);
 
-    let output = run(root, &["ls-files", "-z", "--stage"])?;
+    let output = inventory_output(root, &["ls-files", "-z", "--stage"], &mut truncated)?;
     if !output.status.success() {
         bail!("{}", clean_stderr(&output));
     }
@@ -101,13 +129,13 @@ pub(super) fn git_entries(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
         .collect();
     files.retain(|path| !submodules.contains(path));
     directories.extend(submodules);
-    directories.sort_unstable();
-    directories.dedup();
-    Ok((files, directories))
+    normalize_inventory(&mut files, &mut directories, &mut truncated);
+    Ok((files, directories, truncated))
 }
 
-fn ignored_entries(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
-    let output = run(
+fn ignored_entries(root: &Path) -> Result<(Vec<String>, Vec<String>, bool)> {
+    let mut truncated = false;
+    let output = inventory_output(
         root,
         &[
             "ls-files",
@@ -116,17 +144,23 @@ fn ignored_entries(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
             "--ignored",
             "--exclude-standard",
         ],
+        &mut truncated,
     )?;
     if !output.status.success() {
         bail!("{}", clean_stderr(&output));
     }
-    let files = output
+    let mut files: Vec<_> = output
         .stdout
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
         .map(|path| String::from_utf8_lossy(path).into_owned())
+        .take(MAX_INVENTORY_ENTRIES + 1)
         .collect();
-    let output = run(
+    if files.len() > MAX_INVENTORY_ENTRIES {
+        files.pop();
+        truncated = true;
+    }
+    let output = inventory_output(
         root,
         &[
             "ls-files",
@@ -136,26 +170,47 @@ fn ignored_entries(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
             "--exclude-standard",
             "--directory",
         ],
+        &mut truncated,
     )?;
     if !output.status.success() {
         bail!("{}", clean_stderr(&output));
     }
-    let directories = output
+    let mut directories: Vec<_> = output
         .stdout
         .split(|byte| *byte == 0)
         .filter_map(|path| path.strip_suffix(b"/"))
         .map(|path| String::from_utf8_lossy(path).into_owned())
         .filter(|path| !path.is_empty())
+        .take(MAX_INVENTORY_ENTRIES.saturating_sub(files.len()) + 1)
         .collect();
-    Ok((files, directories))
+    let remaining = MAX_INVENTORY_ENTRIES.saturating_sub(files.len());
+    if directories.len() > remaining {
+        directories.pop();
+        truncated = true;
+    }
+    Ok((files, directories, truncated))
 }
 
-fn expand_directories(root: &Path, roots: Vec<String>) -> Result<Vec<String>> {
+fn expand_directories(
+    root: &Path,
+    mut roots: Vec<String>,
+    limit: usize,
+) -> Result<(Vec<String>, bool)> {
+    roots.sort_unstable();
+    roots.dedup();
+    let mut truncated = roots.len() > limit;
+    roots.truncate(limit);
     let mut directories: HashSet<String> = roots.iter().cloned().collect();
     let mut frontier = roots;
     while !frontier.is_empty() {
+        if directories.len() >= limit {
+            truncated = true;
+            break;
+        }
         let mut candidates = Vec::new();
-        for relative in frontier {
+        let mut candidate_bytes = 0_usize;
+        let mut candidate_limit_reached = false;
+        'frontier: for relative in std::mem::take(&mut frontier) {
             let path = root.join(&relative);
             let Ok(entries) = fs::read_dir(path) else {
                 continue;
@@ -173,55 +228,63 @@ fn expand_directories(root: &Path, roots: Vec<String>) -> Result<Vec<String>> {
                 }
                 if let Ok(path) = path.strip_prefix(root) {
                     let path = path.to_string_lossy();
-                    candidates.push(if cfg!(windows) {
+                    let candidate = if cfg!(windows) {
                         path.replace('\\', "/")
                     } else {
                         path.into_owned()
-                    });
+                    };
+                    if candidates.len() >= limit
+                        || candidate_bytes.saturating_add(candidate.len())
+                            > MAX_INVENTORY_PATH_BYTES / 2
+                    {
+                        candidate_limit_reached = true;
+                        break 'frontier;
+                    }
+                    candidate_bytes = candidate_bytes.saturating_add(candidate.len());
+                    candidates.push(candidate);
                 }
             }
         }
+        truncated |= candidate_limit_reached;
         candidates.sort_unstable();
         candidates.dedup();
         let ignored = ignored_paths(root, &candidates)?;
-        frontier = candidates
+        frontier.clear();
+        for path in candidates
             .into_iter()
             .filter(|path| !ignored.contains(path))
-            .filter(|path| directories.insert(path.clone()))
-            .collect();
+        {
+            if directories.contains(&path) {
+                continue;
+            }
+            if directories.len() >= limit {
+                truncated = true;
+                break;
+            }
+            directories.insert(path.clone());
+            frontier.push(path);
+        }
     }
-    Ok(directories.into_iter().collect())
+    Ok((directories.into_iter().collect(), truncated))
 }
 
 fn ignored_paths(root: &Path, paths: &[String]) -> Result<HashSet<String>> {
     if paths.is_empty() {
         return Ok(HashSet::new());
     }
-    let mut command = base_command(root);
-    command
-        .args(["check-ignore", "-z", "--stdin"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn().context("could not run git check-ignore")?;
-    let input = paths.to_vec();
-    let writer = child.stdin.take().map(|mut stdin| {
-        std::thread::spawn(move || -> std::io::Result<()> {
-            for path in input {
-                stdin.write_all(path.as_bytes())?;
-                stdin.write_all(&[0])?;
-            }
-            Ok(())
-        })
-    });
-    let output = child
-        .wait_with_output()
-        .context("could not read git check-ignore")?;
-    if let Some(writer) = writer {
-        writer
-            .join()
-            .map_err(|_| anyhow!("git check-ignore input writer panicked"))?
-            .context("could not write git check-ignore input")?;
+    let mut input = Vec::new();
+    for path in paths {
+        input.extend_from_slice(path.as_bytes());
+        input.push(0);
+    }
+    let output = process::run_with_input(
+        base_command(root).args(["check-ignore", "-z", "--stdin"]),
+        input,
+        git_limits(),
+    )
+    .context("could not read git check-ignore")?;
+    if output.timed_out || output.stdout_truncated {
+        bail!("git check-ignore exceeded its resource limit");
     }
     if !output.status.success() && output.status.code() != Some(1) {
         bail!("{}", clean_stderr(&output));
@@ -234,13 +297,14 @@ fn ignored_paths(root: &Path, paths: &[String]) -> Result<HashSet<String>> {
         .collect())
 }
 
-pub(super) fn local_entries(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
+pub(super) fn local_entries(root: &Path) -> Result<(Vec<String>, Vec<String>, bool)> {
     let started = Instant::now();
     crate::diagnostics::event(format!("local inventory started root={}", root.display()));
     let mut files = Vec::new();
     let mut directory_paths = Vec::new();
     let mut directories = vec![root.to_owned()];
-    let mut next_progress = 100_000;
+    let mut truncated = false;
+    let mut path_bytes = 0_usize;
     while let Some(directory) = directories.pop() {
         let entries = match fs::read_dir(&directory) {
             Ok(entries) => entries,
@@ -257,23 +321,31 @@ pub(super) fn local_entries(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
             };
             if metadata.is_dir() {
                 if let Ok(relative) = path.strip_prefix(root) {
-                    directory_paths.push(relative.to_string_lossy().into_owned());
+                    let relative = relative.to_string_lossy().into_owned();
+                    if files.len().saturating_add(directory_paths.len()) >= MAX_INVENTORY_ENTRIES
+                        || path_bytes.saturating_add(relative.len()) > MAX_INVENTORY_PATH_BYTES
+                    {
+                        truncated = true;
+                        break;
+                    }
+                    path_bytes = path_bytes.saturating_add(relative.len());
+                    directory_paths.push(relative);
                 }
                 directories.push(path);
             } else if let Ok(relative) = path.strip_prefix(root) {
-                files.push(relative.to_string_lossy().into_owned());
+                let relative = relative.to_string_lossy().into_owned();
+                if files.len().saturating_add(directory_paths.len()) >= MAX_INVENTORY_ENTRIES
+                    || path_bytes.saturating_add(relative.len()) > MAX_INVENTORY_PATH_BYTES
+                {
+                    truncated = true;
+                    break;
+                }
+                path_bytes = path_bytes.saturating_add(relative.len());
+                files.push(relative);
             }
-            let entries = files.len().saturating_add(directory_paths.len());
-            if entries >= next_progress {
-                crate::diagnostics::event(format!(
-                    "local inventory progress root={} entries={} pending_directories={} elapsed_ms={}",
-                    root.display(),
-                    entries,
-                    directories.len(),
-                    started.elapsed().as_millis()
-                ));
-                next_progress = next_progress.saturating_add(100_000);
-            }
+        }
+        if truncated {
+            break;
         }
     }
     files.sort();
@@ -287,5 +359,59 @@ pub(super) fn local_entries(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
         directory_paths.len(),
         started.elapsed().as_millis()
     ));
-    Ok((files, directory_paths))
+    Ok((files, directory_paths, truncated))
+}
+
+fn normalize_inventory(
+    files: &mut Vec<String>,
+    directories: &mut Vec<String>,
+    truncated: &mut bool,
+) {
+    files.sort_unstable();
+    files.dedup();
+    directories.sort_unstable();
+    directories.dedup();
+    let mut entries = 0_usize;
+    let mut bytes = 0_usize;
+    files.retain(|path| {
+        let keep = entries < MAX_INVENTORY_ENTRIES
+            && bytes.saturating_add(path.len()) <= MAX_INVENTORY_PATH_BYTES;
+        if keep {
+            entries += 1;
+            bytes = bytes.saturating_add(path.len());
+        } else {
+            *truncated = true;
+        }
+        keep
+    });
+    directories.retain(|path| {
+        let keep = entries < MAX_INVENTORY_ENTRIES
+            && bytes.saturating_add(path.len()) <= MAX_INVENTORY_PATH_BYTES;
+        if keep {
+            entries += 1;
+            bytes = bytes.saturating_add(path.len());
+        } else {
+            *truncated = true;
+        }
+        keep
+    });
+}
+
+fn inventory_output(root: &Path, args: &[&str], truncated: &mut bool) -> Result<Output> {
+    let mut output = run_limited(root, args, git_limits())?;
+    if output.timed_out {
+        bail!("git {} timed out", args.join(" "));
+    }
+    if !output.status.success() {
+        bail!("{}", clean_stderr(&output));
+    }
+    if output.stdout_truncated {
+        *truncated = true;
+        if let Some(end) = output.stdout.iter().rposition(|byte| *byte == 0) {
+            output.stdout.truncate(end + 1);
+        } else {
+            output.stdout.clear();
+        }
+    }
+    Ok(output)
 }

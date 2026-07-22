@@ -66,7 +66,7 @@ pub struct ChangesState {
     pending_hunk_selection: Option<PendingHunkSelection>,
     pub(crate) history_focused: bool,
     pub(crate) collapsed_directories: HashSet<String>,
-    pub(crate) collapsed_explorer_directories: HashSet<String>,
+    pub(crate) expanded_explorer_directories: HashSet<String>,
     worktree_rows_cache: Vec<WorktreeRow>,
     worktree_rows_generation: u64,
     explorer_rows_cache: Vec<ExplorerRow>,
@@ -96,9 +96,6 @@ pub(super) struct ChangesSelection {
 impl ChangesState {
     pub(super) fn new(repo: Option<&RepositoryData>) -> Self {
         let file_tree = repo.map(|repo| FileTree::new(&repo.files, &repo.directories));
-        let collapsed_explorer_directories = file_tree
-            .as_ref()
-            .map_or_else(HashSet::new, FileTree::default_collapsed_directories);
         let mut state = Self {
             pane: if repo.is_some_and(RepositoryData::is_local) {
                 LeftPane::Files
@@ -121,7 +118,7 @@ impl ChangesState {
             pending_hunk_selection: None,
             history_focused: false,
             collapsed_directories: HashSet::new(),
-            collapsed_explorer_directories,
+            expanded_explorer_directories: HashSet::new(),
             worktree_rows_cache: Vec::new(),
             worktree_rows_generation: 0,
             explorer_rows_cache: Vec::new(),
@@ -164,22 +161,15 @@ impl ChangesState {
         self.pending_hunk_selection = None;
         self.history_focused = false;
         self.collapsed_directories.clear();
+        self.expanded_explorer_directories.clear();
         if let Some(prepared) = prepared_file_tree {
-            let (tree, collapsed) = prepared.into_parts();
+            let tree = prepared.into_tree();
             if let Some(previous) = self.file_tree.replace(tree) {
                 crate::diagnostics::drop_in_background("file-tree", previous);
             }
             self.file_tree_fingerprint = repo.map(|repo| repo.files_fingerprint);
-            let previous = std::mem::replace(&mut self.collapsed_explorer_directories, collapsed);
-            if previous.len() >= 10_000 {
-                crate::diagnostics::drop_in_background("collapsed-directories", previous);
-            }
         } else {
             self.sync_repository_caches(repo);
-            self.collapsed_explorer_directories = self
-                .file_tree
-                .as_ref()
-                .map_or_else(HashSet::new, FileTree::default_collapsed_directories);
         }
         self.rebuild_worktree_rows(repo);
         self.rebuild_explorer_rows(repo);
@@ -356,11 +346,7 @@ impl ChangesState {
         path: &str,
         viewport: usize,
     ) -> bool {
-        self.collapsed_explorer_directories.retain(|directory| {
-            !path
-                .strip_prefix(directory)
-                .is_some_and(|rest| rest.starts_with('/'))
-        });
+        expand_ancestors(&mut self.expanded_explorer_directories, path);
         self.rebuild_explorer_rows(Some(repo));
         let row = self.explorer_rows().iter().position(|row| {
             row.directory_path.as_deref() == Some(path)
@@ -527,11 +513,7 @@ impl ChangesState {
         let Some(path) = repo.files.get(file_index) else {
             return false;
         };
-        self.collapsed_explorer_directories.retain(|directory| {
-            !path
-                .strip_prefix(directory)
-                .is_some_and(|rest| rest.starts_with('/'))
-        });
+        expand_ancestors(&mut self.expanded_explorer_directories, path);
         self.rebuild_explorer_rows(Some(repo));
         let Some(row) = self.row_for_explorer_file(file_index) else {
             return false;
@@ -821,8 +803,8 @@ impl ChangesState {
         let Some(path) = self.selected_explorer_directory_path() else {
             return;
         };
-        if !self.collapsed_explorer_directories.remove(&path) {
-            self.collapsed_explorer_directories.insert(path.clone());
+        if !self.expanded_explorer_directories.remove(&path) {
+            self.expanded_explorer_directories.insert(path.clone());
         }
         self.rebuild_explorer_rows(repo);
         self.select_explorer_directory(&path);
@@ -842,7 +824,7 @@ impl ChangesState {
         let expanded = row.directory_expanded;
         let depth = row.depth;
         if expanded == Some(false) {
-            self.collapsed_explorer_directories.remove(&path);
+            self.expanded_explorer_directories.insert(path.clone());
             self.rebuild_explorer_rows(repo);
             self.select_explorer_directory(&path);
         } else if self
@@ -867,7 +849,7 @@ impl ChangesState {
         if row.directory_expanded == Some(true)
             && let Some(path) = directory
         {
-            self.collapsed_explorer_directories.insert(path.clone());
+            self.expanded_explorer_directories.remove(&path);
             self.rebuild_explorer_rows(repo);
             self.select_explorer_directory(&path);
             self.refresh_diff(repo);
@@ -1047,7 +1029,7 @@ impl ChangesState {
     fn rebuild_explorer_rows(&mut self, repo: Option<&RepositoryData>) {
         self.sync_repository_caches(repo);
         let rows = self.file_tree.as_ref().map_or_else(Vec::new, |tree| {
-            tree.rows(&self.collapsed_explorer_directories)
+            tree.rows_expanded(&self.expanded_explorer_directories)
         });
         let previous = std::mem::replace(&mut self.explorer_rows_cache, rows);
         if previous.len() >= 10_000 {
@@ -1177,6 +1159,14 @@ fn change_codes(changes: &[Change]) -> HashMap<String, char> {
     codes
 }
 
+fn expand_ancestors(expanded: &mut HashSet<String>, path: &str) {
+    let mut ancestor = path.rsplit_once('/').map(|(parent, _)| parent);
+    while let Some(parent) = ancestor {
+        expanded.insert(parent.to_owned());
+        ancestor = parent.rsplit_once('/').map(|(next, _)| next);
+    }
+}
+
 fn change_code_priority(code: char) -> u8 {
     match code {
         'D' | 'U' => 0,
@@ -1285,6 +1275,7 @@ mod tests {
             history: Vec::new(),
             commits: Vec::new(),
             files_fingerprint: 1,
+            inventory_truncated: false,
             changes_fingerprint: 1,
             change_counts: (0, 1),
             graph_width: 0,
@@ -1298,10 +1289,7 @@ mod tests {
 
         let mut state = ChangesState::new(Some(&repo));
         assert!(state.collapsed_directories.is_empty());
-        assert_eq!(
-            state.collapsed_explorer_directories,
-            HashSet::from(["src".to_owned(), "src/app".to_owned()])
-        );
+        assert!(state.expanded_explorer_directories.is_empty());
         assert_eq!(
             state
                 .explorer_rows()

@@ -46,18 +46,17 @@ pub(crate) struct FileTree {
 
 pub(crate) struct PreparedFileTree {
     tree: FileTree,
-    collapsed: HashSet<String>,
 }
 
 impl PreparedFileTree {
     pub(crate) fn new(files: &[String], directories: &[String]) -> Self {
-        let tree = FileTree::new(files, directories);
-        let collapsed = tree.default_collapsed_directories();
-        Self { tree, collapsed }
+        Self {
+            tree: FileTree::new(files, directories),
+        }
     }
 
-    pub(crate) fn into_parts(self) -> (FileTree, HashSet<String>) {
-        (self.tree, self.collapsed)
+    pub(crate) fn into_tree(self) -> FileTree {
+        self.tree
     }
 }
 
@@ -77,17 +76,31 @@ impl FileTree {
         Self { root }
     }
 
-    pub(crate) fn rows(&self, collapsed: &HashSet<String>) -> Vec<ExplorerRow> {
+    #[cfg(test)]
+    fn rows(&self, collapsed: &HashSet<String>) -> Vec<ExplorerRow> {
         let mut rows = Vec::new();
-        flatten_file_tree(&self.root, "", &[], true, collapsed, &mut rows);
+        flatten_file_tree(
+            &self.root,
+            "",
+            &[],
+            true,
+            &|path| !collapsed.contains(path),
+            &mut rows,
+        );
         rows
     }
 
-    pub(crate) fn default_collapsed_directories(&self) -> HashSet<String> {
-        let _activity = crate::diagnostics::activity("collapse-file-tree", String::new());
-        let mut directories = HashSet::new();
-        collect_directory_paths(&self.root, "", &mut directories);
-        directories
+    pub(crate) fn rows_expanded(&self, expanded: &HashSet<String>) -> Vec<ExplorerRow> {
+        let mut rows = Vec::new();
+        flatten_file_tree(
+            &self.root,
+            "",
+            &[],
+            true,
+            &|path| expanded.contains(path),
+            &mut rows,
+        );
+        rows
     }
 }
 
@@ -192,29 +205,6 @@ fn insert_directory(root: &mut Node, path: &str) {
     node.explicit_directory = true;
 }
 
-fn collect_directory_paths(node: &Node, parent_path: &str, paths: &mut HashSet<String>) {
-    for (name, child) in sorted_children(node) {
-        if child.children.is_empty() && !child.explicit_directory {
-            continue;
-        }
-        let mut path = join_path(parent_path, name);
-        let mut directory = child;
-        while !directory.explicit_directory
-            && directory.entries.is_empty()
-            && directory.children.len() == 1
-        {
-            let (next_name, next) = directory.children.first_key_value().expect("one child");
-            if next.children.is_empty() {
-                break;
-            }
-            path = join_path(&path, next_name);
-            directory = next;
-        }
-        paths.insert(path.clone());
-        collect_directory_paths(directory, &path, paths);
-    }
-}
-
 fn sorted_children(node: &Node) -> Vec<(&String, &Node)> {
     let mut children: Vec<_> = node.children.iter().collect();
     children.sort_by_key(|(name, child)| {
@@ -231,7 +221,7 @@ fn flatten_file_tree(
     parent_path: &str,
     lineage: &[bool],
     top_level: bool,
-    collapsed: &HashSet<String>,
+    is_expanded: &impl Fn(&str) -> bool,
     rows: &mut Vec<ExplorerRow>,
 ) {
     let children = sorted_children(node);
@@ -271,7 +261,7 @@ fn flatten_file_tree(
             path = join_path(&path, next_name);
             directory = next;
         }
-        let expanded = !collapsed.contains(&path);
+        let expanded = is_expanded(&path);
         rows.push(ExplorerRow {
             prefix,
             label,
@@ -284,7 +274,7 @@ fn flatten_file_tree(
         if expanded {
             let mut child_lineage = lineage.to_vec();
             child_lineage.push(is_last);
-            flatten_file_tree(directory, &path, &child_lineage, false, collapsed, rows);
+            flatten_file_tree(directory, &path, &child_lineage, false, is_expanded, rows);
         }
     }
 }

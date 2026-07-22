@@ -11,6 +11,7 @@ use super::text::{
 };
 
 const MAX_CACHED_PREVIEW_LINES: usize = 30_000;
+const MAX_CACHED_PREVIEW_BYTES: usize = 512 * 1024;
 const MARKDOWN_LINE_GUTTER_WIDTH: usize = 7;
 const MIN_NUMBERED_MARKDOWN_WIDTH: usize = 12;
 
@@ -65,18 +66,19 @@ impl PreviewPresentation {
         input: PreviewInput<'_>,
         scroll: &mut usize,
     ) -> PreparedPreview {
+        let render_markdown = input.markdown && input.content.len() <= MAX_CACHED_PREVIEW_BYTES;
         let cache_matches = self.cache.as_ref().is_some_and(|cache| {
-            let markdown_wrapped = input.markdown && input.wrapped;
+            let markdown_wrapped = render_markdown && input.wrapped;
             cache.generation == input.generation
                 && cache.path == input.path
                 && cache.is_diff == input.is_diff
-                && cache.markdown == input.markdown
+                && cache.markdown == render_markdown
                 && cache.markdown_wrapped == markdown_wrapped
                 && cache.show_initial_diff_header == input.show_initial_diff_header
                 && cache.width == input.width
         });
         if !cache_matches {
-            let (display_count, fully_styled, lines) = if input.markdown {
+            let (display_count, fully_styled, lines) = if render_markdown {
                 let content_width = markdown_content_width(input.width);
                 let lines = numbered_markdown_lines(
                     styled_markdown(input.content, content_width, input.wrapped),
@@ -89,7 +91,8 @@ impl PreviewPresentation {
                 } else {
                     input.content.lines().count()
                 };
-                let fully_styled = display_count <= MAX_CACHED_PREVIEW_LINES;
+                let fully_styled = display_count <= MAX_CACHED_PREVIEW_LINES
+                    && input.content.len() <= MAX_CACHED_PREVIEW_BYTES;
                 let lines = if fully_styled {
                     if input.is_diff {
                         styled_diff(
@@ -110,8 +113,8 @@ impl PreviewPresentation {
                 generation: input.generation,
                 path: input.path.to_owned(),
                 is_diff: input.is_diff,
-                markdown: input.markdown,
-                markdown_wrapped: input.markdown && input.wrapped,
+                markdown: render_markdown,
+                markdown_wrapped: render_markdown && input.wrapped,
                 show_initial_diff_header: input.show_initial_diff_header,
                 width: input.width,
                 lines,
@@ -130,7 +133,7 @@ impl PreviewPresentation {
                 .as_ref()
                 .is_some_and(|cache| cache.wrapped_line_starts.is_none())
             {
-                let starts = if input.markdown {
+                let starts = if render_markdown {
                     wrapped_styled_line_starts(
                         &self
                             .cache
@@ -188,7 +191,7 @@ impl PreviewPresentation {
                     local_scroll,
                     input.viewport_height,
                     input.is_diff,
-                    input.markdown,
+                    render_markdown,
                 ),
                 rendered_height,
                 wrapped: true,
@@ -349,8 +352,13 @@ fn numbered_markdown_lines(mut lines: Vec<Line<'static>>, width: usize) -> Vec<L
     lines
 }
 
-type StyledGrapheme = (String, Style, usize);
-type WrapToken = (bool, Vec<StyledGrapheme>);
+struct StyledChunk {
+    content: String,
+    style: Style,
+    width: usize,
+}
+
+type WrapToken = (bool, Vec<StyledChunk>);
 
 fn hard_wrap_lines(
     lines: Vec<Line<'static>>,
@@ -379,11 +387,19 @@ fn hard_wrap_lines(
                 if tokens.last().is_none_or(|token| token.0 != whitespace) {
                     tokens.push((whitespace, Vec::new()));
                 }
-                tokens.last_mut().expect("token was inserted").1.push((
-                    grapheme.to_owned(),
-                    span.style,
-                    grapheme_width,
-                ));
+                let chunks = &mut tokens.last_mut().expect("token was inserted").1;
+                if let Some(chunk) = chunks.last_mut()
+                    && chunk.style == span.style
+                {
+                    chunk.content.push_str(grapheme);
+                    chunk.width = chunk.width.saturating_add(grapheme_width);
+                } else {
+                    chunks.push(StyledChunk {
+                        content: grapheme.to_owned(),
+                        style: span.style,
+                        width: grapheme_width,
+                    });
+                }
             }
         }
 
@@ -394,11 +410,11 @@ fn hard_wrap_lines(
                 pending_whitespace = Some(token);
                 continue;
             }
-            let token_width = token.iter().map(|grapheme| grapheme.2).sum::<usize>();
+            let token_width = token.iter().map(|chunk| chunk.width).sum::<usize>();
             let whitespace_width = pending_whitespace
                 .as_ref()
-                .map_or(0, |token: &Vec<StyledGrapheme>| {
-                    token.iter().map(|grapheme| grapheme.2).sum()
+                .map_or(0, |token: &Vec<StyledChunk>| {
+                    token.iter().map(|chunk| chunk.width).sum()
                 });
             if !whitespace
                 && has_word
@@ -468,7 +484,7 @@ fn hard_wrap_lines(
 
 #[allow(clippy::too_many_arguments)]
 fn append_wrap_token(
-    token: Vec<StyledGrapheme>,
+    token: Vec<StyledChunk>,
     output_spans: &mut Vec<Span<'static>>,
     output_width: &mut usize,
     gutter: &WrapGutter,
@@ -479,21 +495,24 @@ fn append_wrap_token(
     skip: usize,
     take: usize,
 ) -> bool {
-    for (content, style, grapheme_width) in token {
-        if *output_width > gutter.width && output_width.saturating_add(grapheme_width) > width {
-            if emit_wrapped_row(wrapped, rendered, skip, take, output_spans, line_style) {
-                return true;
+    for chunk in token {
+        for grapheme in chunk.content.graphemes(true) {
+            let grapheme_width = UnicodeWidthStr::width(grapheme);
+            if *output_width > gutter.width && output_width.saturating_add(grapheme_width) > width {
+                if emit_wrapped_row(wrapped, rendered, skip, take, output_spans, line_style) {
+                    return true;
+                }
+                start_continuation(output_spans, output_width, gutter);
             }
-            start_continuation(output_spans, output_width, gutter);
+            if let Some(last) = output_spans.last_mut()
+                && last.style == chunk.style
+            {
+                last.content.to_mut().push_str(grapheme);
+            } else {
+                output_spans.push(Span::styled(grapheme.to_owned(), chunk.style));
+            }
+            *output_width = output_width.saturating_add(grapheme_width);
         }
-        if let Some(last) = output_spans.last_mut()
-            && last.style == style
-        {
-            last.content.to_mut().push_str(&content);
-        } else {
-            output_spans.push(Span::styled(content, style));
-        }
-        *output_width = output_width.saturating_add(grapheme_width);
     }
     false
 }
@@ -735,6 +754,33 @@ mod tests {
         assert!(preview.wrapped);
         assert!(preview.rendered_height > 3);
         assert!(!preview.lines.is_empty());
+    }
+
+    #[test]
+    fn oversized_markdown_uses_the_windowed_source_cache() {
+        let content = "x".repeat(MAX_CACHED_PREVIEW_BYTES + 1);
+        let mut presentation = PreviewPresentation::default();
+        let mut scroll = 0;
+
+        presentation.prepare(
+            PreviewInput {
+                content: &content,
+                generation: 1,
+                path: "README.md",
+                is_diff: false,
+                markdown: true,
+                show_initial_diff_header: false,
+                width: 80,
+                viewport_height: 8,
+                wrapped: false,
+                hunk_selected: false,
+            },
+            &mut scroll,
+        );
+
+        let cache = presentation.cache.as_ref().unwrap();
+        assert!(!cache.markdown);
+        assert!(!cache.fully_styled);
     }
 
     #[test]

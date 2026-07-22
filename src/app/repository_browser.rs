@@ -11,7 +11,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
 use serde_json::Value;
 
-use crate::git::{Branch, branch_delete_protection};
+use crate::{
+    git::{Branch, branch_delete_protection},
+    process::{self, Limits},
+};
 
 const REMOTE_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 
@@ -652,12 +655,20 @@ fn author_login(item: &Value) -> String {
 }
 
 fn run_gh(root: &Path, args: &[&str]) -> Result<Value, String> {
-    let output = Command::new("gh")
-        .args(args)
-        .current_dir(root)
-        .env("GH_PROMPT_DISABLED", "1")
-        .output()
-        .map_err(|error| format!("GitHub CLI unavailable: {error}"))?;
+    let output = process::run(
+        Command::new("gh")
+            .args(args)
+            .current_dir(root)
+            .env("GH_PROMPT_DISABLED", "1"),
+        Limits::new(4 * 1024 * 1024, 256 * 1024, Duration::from_secs(60)),
+    )
+    .map_err(|error| format!("GitHub CLI unavailable: {error}"))?;
+    if output.timed_out {
+        return Err("GitHub CLI timed out".to_owned());
+    }
+    if output.stdout_truncated {
+        return Err("GitHub CLI returned more than 4 MiB".to_owned());
+    }
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr)
             .lines()

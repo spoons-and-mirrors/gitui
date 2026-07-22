@@ -3,6 +3,7 @@ mod diagnostics;
 mod filesystem;
 mod formatter;
 mod git;
+mod process;
 mod repository_session;
 mod selection;
 mod theme;
