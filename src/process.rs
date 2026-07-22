@@ -220,9 +220,9 @@ fn read_bounded(mut reader: impl Read, limit: usize) -> io::Result<(Vec<u8>, boo
 
 #[cfg(test)]
 mod tests {
-    use std::{io::Cursor, process::Command, time::Duration};
+    use std::io::Cursor;
 
-    use super::{Limits, read_bounded, run};
+    use super::read_bounded;
 
     #[test]
     fn drains_input_while_retaining_only_the_limit() {
@@ -235,6 +235,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn timeout_kills_descendants_that_keep_output_open() {
+        use std::{process::Command, time::Duration};
+
+        use super::{Limits, run};
+
         let started = std::time::Instant::now();
         let output = run(
             Command::new("sh").args(["-c", "sleep 10 &"]),

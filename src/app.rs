@@ -2628,6 +2628,7 @@ mod tests {
     fn creates_renames_drags_and_deletes_files_from_the_files_pane() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
+        let renamed = " renamed.txt";
         fs::write(root.join("old.txt"), "content\n").unwrap();
         fs::create_dir(root.join("destination")).unwrap();
         let mut app = App::new(root.to_path_buf());
@@ -2636,16 +2637,16 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
         assert_eq!(app.mode, Mode::Files);
-        app.handle_paste(" renamed.txt ");
+        app.handle_paste(renamed);
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         wait_for_state(&mut app, |app| {
             app.repository()
-                .is_some_and(|repo| repo.files.iter().any(|path| path == " renamed.txt "))
+                .is_some_and(|repo| repo.files.iter().any(|path| path == renamed))
         });
-        assert!(root.join(" renamed.txt ").is_file());
+        assert!(root.join(renamed).is_file());
         assert_eq!(
             app.selected_explorer_file_path().map(RepoPath::display),
-            Some(" renamed.txt ".to_owned())
+            Some(renamed.to_owned())
         );
 
         app.open_add_dialog();
@@ -2662,7 +2663,7 @@ mod tests {
         let repo = app.session.data().unwrap();
         assert!(
             app.changes
-                .select_explorer_path(repo, &RepoPath::from(" renamed.txt "), 20)
+                .select_explorer_path(repo, &RepoPath::from(renamed), 20)
         );
         app.regions.explorer_list = Some(Rect::new(0, 10, 30, 20));
         let source = app
@@ -2672,7 +2673,7 @@ mod tests {
             .position(|row| {
                 row.file_index
                     .and_then(|index| app.repository().unwrap().files.get(index))
-                    .is_some_and(|path| path == " renamed.txt ")
+                    .is_some_and(|path| path == renamed)
             })
             .unwrap();
         let target = app
@@ -2689,13 +2690,10 @@ mod tests {
         app.update_file_drag(Position::new(1, 10 + target as u16));
         app.finish_file_drag(Position::new(1, 10 + target as u16));
         wait_for_state(&mut app, |app| {
-            app.repository().is_some_and(|repo| {
-                repo.files
-                    .iter()
-                    .any(|path| path == "created/ renamed.txt ")
-            })
+            app.repository()
+                .is_some_and(|repo| repo.files.iter().any(|path| path == "created/ renamed.txt"))
         });
-        assert!(root.join("created/ renamed.txt ").is_file());
+        assert!(root.join("created/ renamed.txt").is_file());
 
         app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::CONTROL));
         assert!(matches!(
@@ -2703,10 +2701,10 @@ mod tests {
             Some(FileDialogKind::Delete { .. })
         ));
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(root.join("created/ renamed.txt ").is_file());
+        assert!(root.join("created/ renamed.txt").is_file());
         app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::CONTROL));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        wait_for_state(&mut app, |_| !root.join("created/ renamed.txt ").exists());
+        wait_for_state(&mut app, |_| !root.join("created/ renamed.txt").exists());
     }
 
     #[test]
@@ -3229,8 +3227,11 @@ mod tests {
 
         let request = app.take_editor_request().unwrap();
         assert_eq!(request.command, ["code", "--wait"]);
-        assert_eq!(request.file, root.join("tracked.txt"));
-        assert_eq!(request.repository, root);
+        assert_eq!(
+            request.file,
+            fs::canonicalize(root.join("tracked.txt")).unwrap()
+        );
+        assert_eq!(request.repository, fs::canonicalize(root).unwrap());
         assert_eq!(app.settings.editor_command.as_deref(), Some("code --wait"));
         assert!(
             fs::read_to_string(settings_path)
@@ -3402,7 +3403,7 @@ mod tests {
         }
         assert!(app.changes.diff.contains("first"));
 
-        fs::write(&tracked, "later\n").unwrap();
+        fs::write(&tracked, "later content\n").unwrap();
         app.session.schedule_status_check_now();
         for _ in 0..100 {
             let _ = app.poll_worker();
@@ -3417,6 +3418,7 @@ mod tests {
     fn initialize_repository(root: &Path) {
         for args in [
             &["init", "-b", "main"][..],
+            &["config", "core.autocrlf", "false"][..],
             &["config", "user.name", "App Test"][..],
             &["config", "user.email", "app@example.com"][..],
         ] {

@@ -1151,7 +1151,11 @@ mod tests {
         );
 
         picker.accept_completion();
-        assert!(picker.path_input.ends_with(".config/"));
+        assert!(
+            picker
+                .path_input
+                .ends_with(&format!(".config{}", std::path::MAIN_SEPARATOR))
+        );
         assert!(picker.matches.iter().any(|entry| entry.path == opencode));
 
         assert!(matches!(picker.confirm_path(), PickerCommand::None));

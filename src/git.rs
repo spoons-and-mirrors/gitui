@@ -1860,7 +1860,12 @@ mod tests {
         fs::write(root.join("tracked.txt"), "changed\n").unwrap();
         fs::write(root.join("new.txt"), "new\n").unwrap();
 
-        let update = refresh_repository(root, RepositoryKind::Git, RefreshScope::WORKTREE).unwrap();
+        let update = refresh_repository(
+            &repository.root,
+            RepositoryKind::Git,
+            RefreshScope::WORKTREE,
+        )
+        .unwrap();
         assert!(update.worktree.is_some());
         assert!(update.inventory.is_none());
         assert!(update.history.is_none());
@@ -1877,7 +1882,7 @@ mod tests {
         );
 
         let update = refresh_repository(
-            root,
+            &repository.root,
             RepositoryKind::Git,
             RefreshScope::WORKTREE_AND_INVENTORY,
         )
@@ -2258,5 +2263,8 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        if args.first() == Some(&"init") {
+            git(root, &["config", "core.autocrlf", "false"]);
+        }
     }
 }

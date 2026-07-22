@@ -989,7 +989,10 @@ fn renders_every_primary_surface() {
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
     app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
-    assert_eq!(app.workspace_explorer.directory, root);
+    assert_eq!(
+        app.workspace_explorer.directory,
+        fs::canonicalize(root).unwrap()
+    );
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_black_underlay(&terminal);
     let explorer_screen: String = terminal
