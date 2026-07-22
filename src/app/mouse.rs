@@ -827,8 +827,24 @@ impl App {
     fn handle_explorer_mouse(&mut self, mouse: MouseEvent) {
         let point = Position::new(mouse.column, mouse.row);
         match mouse.kind {
-            MouseEventKind::ScrollDown => self.workspace_explorer.move_selection(1),
-            MouseEventKind::ScrollUp => self.workspace_explorer.move_selection(-1),
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                let delta = if mouse.kind == MouseEventKind::ScrollDown {
+                    1
+                } else {
+                    -1
+                };
+                if self.workspace_explorer.editing_path {
+                    self.workspace_explorer.move_match_selection(delta);
+                } else if self
+                    .regions
+                    .workspace_explorer_surroundings
+                    .is_some_and(|rect| rect.contains(point))
+                {
+                    self.workspace_explorer.move_surrounding_selection(delta);
+                } else {
+                    self.workspace_explorer.move_selection(delta);
+                }
+            }
             MouseEventKind::Down(MouseButton::Left) => {
                 if self
                     .regions
@@ -845,6 +861,27 @@ impl App {
                     .is_some_and(|rect| rect.contains(point))
                 {
                     self.workspace_explorer.begin_search(None);
+                    return;
+                }
+                if let Some(rect) = self
+                    .regions
+                    .workspace_explorer_surroundings
+                    .filter(|rect| rect.contains(point))
+                {
+                    let index = self.workspace_explorer.surroundings_state.offset()
+                        + usize::from(mouse.row - rect.y);
+                    if index < self.workspace_explorer.surroundings.len() {
+                        self.workspace_explorer.activate_surrounding(index);
+                    }
+                    return;
+                }
+                if let Some(rect) = self
+                    .regions
+                    .workspace_explorer_preview
+                    .filter(|rect| rect.contains(point))
+                {
+                    self.workspace_explorer
+                        .accept_preview(usize::from(mouse.row - rect.y));
                     return;
                 }
                 let Some(rect) = self

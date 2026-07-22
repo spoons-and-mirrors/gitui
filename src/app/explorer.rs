@@ -11,6 +11,10 @@ use ratatui::widgets::ListState;
 
 use super::fuzzy::{fuzzy_text_score, fuzzy_text_score_lower};
 
+const MAX_COMPLETION_SCAN: usize = 5_000;
+const MAX_PREVIEW_ENTRIES: usize = 200;
+const MAX_SURROUNDING_SIBLINGS: usize = 200;
+
 #[derive(Debug, Clone)]
 pub struct PickerEntry {
     pub(crate) label: String,
@@ -37,9 +41,27 @@ pub struct Explorer {
     pub(crate) searching: bool,
     pub(crate) loading: bool,
     pub(crate) error: Option<String>,
+    pub(crate) surroundings: Vec<SurroundingEntry>,
+    pub(crate) surroundings_state: ListState,
+    pub(crate) surroundings_focused: bool,
+    pub(crate) preview_entries: Vec<PickerEntry>,
     directory_index: Vec<IndexedDirectory>,
     index_rx: Option<Receiver<Vec<IndexedDirectory>>>,
-    browse_rx: Option<Receiver<Result<Vec<PickerEntry>, String>>>,
+    browse_rx: Option<Receiver<Result<BrowseResult, String>>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SurroundingEntry {
+    pub(crate) label: String,
+    pub(crate) path: PathBuf,
+    pub(crate) depth: usize,
+    pub(crate) current: bool,
+}
+
+struct BrowseResult {
+    entries: Vec<PickerEntry>,
+    surroundings: Vec<SurroundingEntry>,
+    selected_surrounding: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,7 +82,7 @@ pub(super) enum PickerCommand {
 impl Explorer {
     pub(super) fn new(directory: PathBuf) -> Self {
         let mut picker = Self {
-            path_input: directory.display().to_string(),
+            path_input: display_search_path(&directory),
             directory,
             editing_path: false,
             entries: Vec::new(),
@@ -70,6 +92,10 @@ impl Explorer {
             searching: false,
             loading: false,
             error: None,
+            surroundings: Vec::new(),
+            surroundings_state: ListState::default(),
+            surroundings_focused: false,
+            preview_entries: Vec::new(),
             directory_index: Vec::new(),
             index_rx: None,
             browse_rx: None,
@@ -107,20 +133,31 @@ impl Explorer {
         }
         match key.code {
             KeyCode::Esc if can_close => PickerCommand::Close,
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.surroundings_focused = !self.surroundings_focused;
+                PickerCommand::None
+            }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.move_selection(1);
+                self.move_active_selection(1);
                 PickerCommand::None
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                self.move_selection(-1);
+                self.move_active_selection(-1);
                 PickerCommand::None
             }
             KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
                 self.go_parent();
                 PickerCommand::None
             }
-            KeyCode::Enter => self.activate_selected(true),
-            KeyCode::Right | KeyCode::Char('l') => self.activate_selected(false),
+            KeyCode::Enter => self.activate_active(true),
+            KeyCode::Right | KeyCode::Char('l') => {
+                if self.surroundings_focused {
+                    self.surroundings_focused = false;
+                    PickerCommand::None
+                } else {
+                    self.activate_selected(false)
+                }
+            }
             KeyCode::Char('p') => {
                 self.begin_search(Some(""));
                 PickerCommand::None
@@ -172,7 +209,12 @@ impl Explorer {
     }
 
     pub(super) fn confirm_path(&mut self) -> PickerCommand {
-        let path = self.selected_match_path();
+        let exact_input = expand_search_path(self.path_input.trim());
+        let path = if self.path_input.ends_with(['/', '\\']) && exact_input.is_dir() {
+            exact_input
+        } else {
+            self.selected_match_path()
+        };
         if !path.is_dir() {
             self.error = Some(format!("Directory not found: {}", path.display()));
             return PickerCommand::None;
@@ -192,6 +234,8 @@ impl Explorer {
         self.loading = true;
         self.entries.clear();
         self.state.select(None);
+        self.surroundings.clear();
+        self.surroundings_state.select(None);
         let directory = self.directory.clone();
         let (sender, receiver) = mpsc::channel();
         self.browse_rx = Some(receiver);
@@ -202,6 +246,18 @@ impl Explorer {
 
     pub(super) fn move_selection(&mut self, delta: isize) {
         move_list(&mut self.state, self.entries.len(), delta);
+    }
+
+    pub(super) fn move_surrounding_selection(&mut self, delta: isize) {
+        move_list(&mut self.surroundings_state, self.surroundings.len(), delta);
+    }
+
+    fn move_active_selection(&mut self, delta: isize) {
+        if self.surroundings_focused {
+            self.move_surrounding_selection(delta);
+        } else {
+            self.move_selection(delta);
+        }
     }
 
     pub(super) fn begin_search(&mut self, initial: Option<&str>) {
@@ -234,8 +290,10 @@ impl Explorer {
             self.browse_rx = None;
             self.loading = false;
             match result {
-                Ok(entries) => {
-                    self.entries = entries;
+                Ok(result) => {
+                    self.entries = result.entries;
+                    self.surroundings = result.surroundings;
+                    self.surroundings_state.select(result.selected_surrounding);
                     self.state.select((!self.entries.is_empty()).then_some(0));
                 }
                 Err(error) => self.error = Some(error),
@@ -247,8 +305,27 @@ impl Explorer {
 
     pub(super) fn navigate(&mut self, path: PathBuf) {
         self.directory = path;
-        self.path_input = self.directory.display().to_string();
+        self.path_input = display_search_path(&self.directory);
+        self.surroundings_focused = false;
         self.reload();
+    }
+
+    pub(super) fn activate_surrounding(&mut self, index: usize) {
+        if let Some(path) = self.surroundings.get(index).map(|entry| entry.path.clone()) {
+            self.navigate(path);
+        }
+    }
+
+    pub(super) fn accept_preview(&mut self, index: usize) {
+        let Some(path) = self
+            .preview_entries
+            .get(index)
+            .map(|entry| entry.path.clone())
+        else {
+            return;
+        };
+        self.path_input = completion_path(&path);
+        self.refresh_matches();
     }
 
     fn selected(&self) -> Option<&PickerEntry> {
@@ -257,8 +334,25 @@ impl Explorer {
             .and_then(|index| self.entries.get(index))
     }
 
-    fn move_match_selection(&mut self, delta: isize) {
+    pub(super) fn move_match_selection(&mut self, delta: isize) {
         move_list(&mut self.match_state, self.matches.len(), delta);
+        self.refresh_preview();
+    }
+
+    fn activate_active(&mut self, open_repositories: bool) -> PickerCommand {
+        if self.surroundings_focused {
+            if let Some(path) = self
+                .surroundings_state
+                .selected()
+                .and_then(|index| self.surroundings.get(index))
+                .map(|entry| entry.path.clone())
+            {
+                self.navigate(path);
+            }
+            PickerCommand::None
+        } else {
+            self.activate_selected(open_repositories)
+        }
     }
 
     fn refresh_matches(&mut self) {
@@ -266,7 +360,15 @@ impl Explorer {
         let query = self.path_input.trim();
         if query.is_empty() {
             self.matches.clear();
+            self.preview_entries.clear();
             self.match_state.select(None);
+            return;
+        }
+        if query.contains(['/', '\\']) || query.starts_with('~') {
+            self.matches = path_completion_candidates(query, &self.directory);
+            self.match_state
+                .select((!self.matches.is_empty()).then_some(0));
+            self.refresh_preview();
             return;
         }
         if !query.contains(['/', '\\'])
@@ -282,7 +384,7 @@ impl Explorer {
             });
         }
 
-        let query_lower = query.trim_matches(['/', '\\']).to_lowercase();
+        let query_lower = query.to_lowercase();
         let mut candidates = Vec::with_capacity(12);
         let compare =
             |(left_score, left_depth, left_index): &(u32, usize, usize),
@@ -326,23 +428,9 @@ impl Explorer {
                 action: PickerAction::Navigate,
             })
             .collect();
-        if query.contains(['/', '\\'])
-            && let Some(path) = resolve_fuzzy_path(query, &self.directory)
-            && !self.matches.iter().any(|entry| entry.path == path)
-        {
-            self.matches.insert(
-                0,
-                PickerEntry {
-                    label: display_search_path(&path),
-                    is_repo: is_repository_directory(&path),
-                    path,
-                    action: PickerAction::Navigate,
-                },
-            );
-            self.matches.truncate(12);
-        }
         self.match_state
             .select((!self.matches.is_empty()).then_some(0));
+        self.refresh_preview();
     }
 
     fn accept_completion(&mut self) {
@@ -354,8 +442,17 @@ impl Explorer {
         else {
             return;
         };
-        self.path_input = path.display().to_string();
+        self.path_input = completion_path(&path);
         self.refresh_matches();
+    }
+
+    fn refresh_preview(&mut self) {
+        self.preview_entries = self
+            .match_state
+            .selected()
+            .and_then(|index| self.matches.get(index))
+            .map(|entry| load_child_directories(&entry.path, MAX_PREVIEW_ENTRIES))
+            .unwrap_or_default();
     }
 
     fn selected_match_path(&self) -> PathBuf {
@@ -382,7 +479,7 @@ impl Explorer {
     }
 }
 
-fn load_directory_entries(directory: &Path) -> Result<Vec<PickerEntry>, String> {
+fn load_directory_entries(directory: &Path) -> Result<BrowseResult, String> {
     let current_is_repo = is_repository_directory(directory);
     let mut entries = vec![PickerEntry {
         label: if current_is_repo {
@@ -402,14 +499,28 @@ fn load_directory_entries(directory: &Path) -> Result<Vec<PickerEntry>, String> 
             is_repo: false,
         });
     }
-    let read_dir = fs::read_dir(directory).map_err(|error| error.to_string())?;
+    fs::read_dir(directory).map_err(|error| error.to_string())?;
+    entries.extend(load_child_directories(directory, usize::MAX));
+    let (surroundings, selected_surrounding) = load_surroundings(directory);
+    Ok(BrowseResult {
+        entries,
+        surroundings,
+        selected_surrounding,
+    })
+}
+
+fn load_child_directories(directory: &Path, limit: usize) -> Vec<PickerEntry> {
+    let Ok(read_dir) = fs::read_dir(directory) else {
+        return Vec::new();
+    };
     let mut directories: Vec<_> = read_dir
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let file_type = entry.file_type().ok()?;
             (file_type.is_dir() || file_type.is_symlink()).then_some(entry)
         })
-        .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+        .filter(|entry| entry.file_name() != ".git")
+        .take(limit)
         .map(|entry| {
             let path = entry.path();
             let is_repo = path.join(".git").exists();
@@ -422,8 +533,46 @@ fn load_directory_entries(directory: &Path) -> Result<Vec<PickerEntry>, String> 
         })
         .collect();
     directories.sort_by_cached_key(|entry| entry.label.to_lowercase());
-    entries.extend(directories);
-    Ok(entries)
+    directories
+}
+
+fn load_surroundings(directory: &Path) -> (Vec<SurroundingEntry>, Option<usize>) {
+    let mut surroundings = Vec::new();
+    let mut ancestors: Vec<_> = directory.ancestors().map(Path::to_path_buf).collect();
+    ancestors.reverse();
+    ancestors.pop();
+    for (depth, path) in ancestors.into_iter().enumerate() {
+        surroundings.push(SurroundingEntry {
+            label: path_label(&path),
+            path,
+            depth,
+            current: false,
+        });
+    }
+
+    let sibling_depth = surroundings.len();
+    let mut siblings = directory
+        .parent()
+        .map(|parent| load_child_directories(parent, MAX_SURROUNDING_SIBLINGS))
+        .unwrap_or_default();
+    if !siblings.iter().any(|entry| entry.path == directory) {
+        siblings.push(PickerEntry {
+            label: path_label(directory),
+            path: directory.to_path_buf(),
+            action: PickerAction::Navigate,
+            is_repo: is_repository_directory(directory),
+        });
+    }
+    for sibling in siblings {
+        surroundings.push(SurroundingEntry {
+            label: sibling.label,
+            current: sibling.path == directory,
+            path: sibling.path,
+            depth: sibling_depth,
+        });
+    }
+    let selected = surroundings.iter().position(|entry| entry.current);
+    (surroundings, selected)
 }
 
 fn search_roots(current: &Path) -> Vec<PathBuf> {
@@ -489,7 +638,7 @@ fn index_directories(roots: &[PathBuf]) -> Vec<IndexedDirectory> {
 }
 
 fn should_skip_index_directory(name: &str) -> bool {
-    name.starts_with('.')
+    (name.starts_with('.') && name != ".config")
         || matches!(
             name,
             "node_modules" | "target" | "vendor" | "dist" | "build" | "__pycache__"
@@ -509,6 +658,63 @@ fn expand_search_path(input: &str) -> PathBuf {
     } else {
         PathBuf::from(input)
     }
+}
+
+fn path_completion_candidates(input: &str, base: &Path) -> Vec<PickerEntry> {
+    let expanded = expand_search_path(input);
+    let trailing_separator = input.ends_with(['/', '\\']);
+    let (parent, fragment) = if trailing_separator {
+        (expanded, String::new())
+    } else {
+        (
+            expanded.parent().map(Path::to_path_buf).unwrap_or_default(),
+            expanded
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        )
+    };
+    let parent = if parent.as_os_str().is_empty() {
+        base.to_path_buf()
+    } else {
+        let parent_input = parent.to_string_lossy();
+        let Some(parent) = resolve_fuzzy_path(&parent_input, base) else {
+            return Vec::new();
+        };
+        parent
+    };
+    let fragment_lower = fragment.to_lowercase();
+    let mut candidates: Vec<_> = load_child_directories(&parent, MAX_COMPLETION_SCAN)
+        .into_iter()
+        .filter_map(|mut entry| {
+            let name = entry.path.file_name().unwrap_or_default().to_string_lossy();
+            let score = if fragment_lower.is_empty() {
+                0
+            } else {
+                fuzzy_text_score_lower(&fragment_lower, &name.to_lowercase())?
+            };
+            entry.label = display_search_path(&entry.path);
+            Some((score, entry))
+        })
+        .collect();
+    candidates.sort_by(|(left_score, left), (right_score, right)| {
+        right_score
+            .cmp(left_score)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    candidates
+        .into_iter()
+        .take(12)
+        .map(|(_, entry)| entry)
+        .collect()
+}
+
+fn completion_path(path: &Path) -> String {
+    let mut path = display_search_path(path);
+    if !path.ends_with(std::path::MAIN_SEPARATOR) {
+        path.push(std::path::MAIN_SEPARATOR);
+    }
+    path
 }
 
 fn resolve_fuzzy_path(input: &str, base: &Path) -> Option<PathBuf> {
@@ -574,6 +780,12 @@ fn display_search_path(path: &Path) -> String {
     path.display().to_string()
 }
 
+fn path_label(path: &Path) -> String {
+    path.file_name()
+        .map(|name| format!("{}/", name.to_string_lossy()))
+        .unwrap_or_else(|| path.display().to_string())
+}
+
 fn path_depth(path: &Path) -> usize {
     path.components().count()
 }
@@ -617,8 +829,10 @@ mod tests {
         assert!(picker.matches[0].is_repo);
         assert!(fuzzy_text_score("hunkle", "go-genai-streamed-function-args").is_none());
 
+        let completed = picker.matches[0].path.clone();
         picker.accept_completion();
-        assert_eq!(PathBuf::from(&picker.path_input), picker.matches[0].path);
+        assert_eq!(PathBuf::from(&picker.path_input), completed);
+        assert!(picker.path_input.ends_with(std::path::MAIN_SEPARATOR));
     }
 
     #[test]
@@ -637,6 +851,67 @@ mod tests {
         assert!(!paths.contains(&&root.join("target")));
         assert!(paths.contains(&&root.join("archive.git")));
         assert!(!paths.contains(&&root.join("archive.git/objects")));
+    }
+
+    #[test]
+    fn includes_config_directories_in_browsing_and_global_search() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let opencode = root.join(".config/opencode");
+        fs::create_dir_all(opencode.join("themes")).unwrap();
+        fs::create_dir_all(root.join(".cache/ignored")).unwrap();
+        fs::create_dir_all(root.join(".git/objects")).unwrap();
+
+        let browse = load_directory_entries(root).unwrap();
+        assert!(
+            browse
+                .entries
+                .iter()
+                .any(|entry| entry.path == root.join(".config"))
+        );
+        assert!(
+            !browse
+                .entries
+                .iter()
+                .any(|entry| entry.path == root.join(".git"))
+        );
+
+        let index = index_directories(&[root.to_path_buf()]);
+        let paths: Vec<_> = index.iter().map(|entry| &entry.path).collect();
+        assert!(paths.contains(&&opencode));
+        assert!(!paths.contains(&&root.join(".cache")));
+
+        let mut picker = Explorer::new(root.to_path_buf());
+        picker.directory_index = index;
+        picker.begin_search(Some("opencode"));
+        assert_eq!(picker.matches[0].path, opencode);
+    }
+
+    #[test]
+    fn path_completion_adds_a_separator_and_immediately_lists_children() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let config = root.join(".config");
+        let opencode = config.join("opencode");
+        fs::create_dir_all(opencode.join("themes")).unwrap();
+        fs::create_dir_all(config.join("other")).unwrap();
+
+        let mut picker = Explorer::new(root.to_path_buf());
+        picker.begin_search(Some(&format!("{}/.conf", root.display())));
+        assert_eq!(picker.matches[0].path, config);
+        assert!(
+            picker
+                .preview_entries
+                .iter()
+                .any(|entry| entry.path == opencode)
+        );
+
+        picker.accept_completion();
+        assert!(picker.path_input.ends_with(".config/"));
+        assert!(picker.matches.iter().any(|entry| entry.path == opencode));
+
+        assert!(matches!(picker.confirm_path(), PickerCommand::None));
+        assert_eq!(picker.directory, config);
     }
 
     #[test]

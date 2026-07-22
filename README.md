@@ -62,7 +62,7 @@ hunkle opens exactly the current or requested directory. When that directory is 
 | `?` | Help |
 | `q` | Quit |
 
-In Explorer, start typing a folder name, press `p` to search from an empty field, or `/` to start an absolute path. Search accepts fuzzy directory names, relative paths, absolute paths, and `~/...`; `Tab` accepts the best completion and `Enter` opens a repository or navigates into a directory. hunkle indexes directories under your home folder and common workspace mounts in the background.
+In Explorer, **Around Here** shows ancestors and neighboring directories while **Contents** shows what is inside the current location; `Tab` switches panes. Start typing a folder name, press `p` to search from an empty field, or `/` to start an absolute path. Search accepts fuzzy directory names, relative paths, absolute paths, and `~/...`; path matches include a live child preview. `Tab` accepts the best completion with a trailing `/`, and `Enter` opens a repository or navigates into a directory. Hidden directories are browseable, `.config` participates in background search, and only Git metadata and expensive generated trees are omitted from indexing.
 
 When hunkle runs inside Herdr, it can show a Workspaces and Agents rail backed by Herdr's session snapshot. Single-click a workspace to open its repository immediately in the current hunkle without switching Herdr workspaces. Press `Enter` or double-click to switch the active Herdr workspace; after a successful switch, the hidden hunkle restores the repository it showed before the first click. Use `j`/`k` to navigate or `Esc` to return to hunkle. The rail refreshes in the background and hides automatically on narrow terminals or outside Herdr.
 
@@ -88,7 +88,7 @@ The rail starts on the left. Press `w` to cycle it through the right side, off, 
 - Click the Changes `Stage all` checkbox to stage everything; click it again when checked to unstage everything.
 - Click the commit editor inside Changes, type a message, use the mouse wheel to scroll longer messages, and press `Ctrl+Enter` to commit.
 - When `opencode` is installed, click `✦` below the commit editor to generate a message from the staged diff, or from the unstaged diff when nothing is staged. Hunkle streams the complete diff directly to OpenCode without file-attachment or tool-output truncation, deletes the one-shot OpenCode session after generation, uses `openai/gpt-5.6-sol` with low reasoning, and never overwrites a message edited while generation is running.
-- Click the Explorer path field to type, or click a directory/repository entry to navigate or open it.
+- Click the Explorer path field to type, a surrounding location to jump there, a preview to continue completing, or a directory/repository entry to navigate or open it.
 - Drag across visible text to select it and automatically copy it to the clipboard. In Files, hold `Shift` while dragging to select text instead of moving an entry. Selection stays within the panel where the drag starts.
 
 ## Settings

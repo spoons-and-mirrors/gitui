@@ -11,8 +11,8 @@ use crate::app::{
     ACTION_ITEMS, ActionsState, BranchDeleteDialog, BrowserTab, CommandStatus, Explorer,
     FileDialog, FileDialogKind, FileNameAction, FileSearch, HitTarget, PickerAction, PickerEntry,
     PullRequest, RemoteItems, RepositoryBrowser, RepositoryBrowserHitTarget, Settings,
-    SnapshotLoadDialog, WorkspaceDeleteDialog, WorkspaceDeleteKind, WorkspacePanel,
-    WorkspacePanelHitTarget,
+    SnapshotLoadDialog, SurroundingEntry, WorkspaceDeleteDialog, WorkspaceDeleteKind,
+    WorkspacePanel, WorkspacePanelHitTarget,
 };
 
 use super::{fill, palette, truncate_width};
@@ -25,7 +25,9 @@ pub(super) struct FileSearchRegions {
 pub(super) struct ExplorerRegions {
     pub(super) overlay: Rect,
     pub(super) path: Rect,
+    pub(super) surroundings: Option<Rect>,
     pub(super) list: Rect,
+    pub(super) preview: Option<Rect>,
 }
 
 pub(super) struct SettingsRegions {
@@ -1384,13 +1386,7 @@ fn rendered_height(lines: &[Line<'_>], width: usize) -> usize {
 }
 
 pub(super) fn draw_explorer(frame: &mut Frame<'_>, explorer: &mut Explorer) -> ExplorerRegions {
-    let row_count = if explorer.editing_path {
-        explorer.matches.len()
-    } else {
-        explorer.entries.len()
-    };
-    let desired_height = (11 + row_count.min(11) as u16).clamp(14, 22);
-    let area = centered_min(frame.area(), 82, 0, 56, desired_height);
+    let area = centered_min(frame.area(), 88, 78, 68, 20);
     frame.render_widget(Clear, area);
     fill(frame, area, palette().panel);
     fill(
@@ -1500,58 +1496,132 @@ pub(super) fn draw_explorer(frame: &mut Frame<'_>, explorer: &mut Explorer) -> E
         ),
     );
 
-    let section_title = if explorer.editing_path {
-        "MATCHES"
-    } else {
-        "BROWSE"
-    };
-    let section_detail = if !explorer.editing_path && explorer.loading {
-        "loading…".to_owned()
-    } else if explorer.editing_path && explorer.searching {
-        "indexing…".to_owned()
-    } else {
-        format!("{} entries", row_count)
-    };
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                section_title,
-                Style::default()
-                    .fg(palette().muted)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("  {section_detail}"),
-                Style::default().fg(palette().faint),
-            ),
-        ])),
-        Rect::new(inner_x, area.y.saturating_add(8), inner_width, 1),
-    );
     let list_y = area.y.saturating_add(10);
-    let list_area = Rect::new(
+    let panes = Layout::horizontal([
+        Constraint::Percentage(38),
+        Constraint::Length(2),
+        Constraint::Min(1),
+    ])
+    .split(Rect::new(
         inner_x,
-        list_y,
+        area.y.saturating_add(8),
         inner_width,
+        area.bottom().saturating_sub(1).saturating_sub(area.y + 8),
+    ));
+    let left_title = Rect::new(panes[0].x, panes[0].y, panes[0].width, 1);
+    let right_title = Rect::new(panes[2].x, panes[2].y, panes[2].width, 1);
+    let left_list = Rect::new(
+        panes[0].x,
+        list_y,
+        panes[0].width,
         area.bottom().saturating_sub(1).saturating_sub(list_y),
     );
+    let right_list = Rect::new(
+        panes[2].x,
+        list_y,
+        panes[2].width,
+        area.bottom().saturating_sub(1).saturating_sub(list_y),
+    );
+
+    let (left_label, left_count, right_label, right_count) = if explorer.editing_path {
+        (
+            "PATH MATCHES",
+            if explorer.searching {
+                "indexing…".to_owned()
+            } else {
+                format!("{} found", explorer.matches.len())
+            },
+            "LIVE PREVIEW",
+            format!("{} inside", explorer.preview_entries.len()),
+        )
+    } else {
+        (
+            "AROUND HERE",
+            format!("{} places", explorer.surroundings.len()),
+            "CONTENTS",
+            if explorer.loading {
+                "loading…".to_owned()
+            } else {
+                format!("{} entries", explorer.entries.len())
+            },
+        )
+    };
+    for (title_area, label, count, active) in [
+        (
+            left_title,
+            left_label,
+            left_count,
+            explorer.editing_path || explorer.surroundings_focused,
+        ),
+        (
+            right_title,
+            right_label,
+            right_count,
+            !explorer.editing_path && !explorer.surroundings_focused,
+        ),
+    ] {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    label,
+                    Style::default()
+                        .fg(if active {
+                            palette().orange
+                        } else {
+                            palette().muted
+                        })
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!("  {count}"), Style::default().fg(palette().faint)),
+            ])),
+            title_area,
+        );
+    }
+
     if explorer.editing_path {
         let items = explorer
             .matches
             .iter()
-            .map(|entry| explorer_item(entry, usize::from(list_area.width)));
+            .map(|entry| explorer_item(entry, usize::from(left_list.width)));
         frame.render_stateful_widget(
             List::new(items).highlight_style(Style::default().bg(palette().selected)),
-            list_area,
+            left_list,
             &mut explorer.match_state,
         );
+        let preview = explorer
+            .preview_entries
+            .iter()
+            .map(|entry| explorer_item(entry, usize::from(right_list.width)));
+        frame.render_widget(List::new(preview), right_list);
     } else {
+        let surroundings = explorer
+            .surroundings
+            .iter()
+            .map(|entry| surrounding_item(entry, usize::from(left_list.width)));
+        frame.render_stateful_widget(
+            List::new(surroundings).highlight_style(Style::default().bg(
+                if explorer.surroundings_focused {
+                    palette().selected
+                } else {
+                    palette().surface_alt
+                },
+            )),
+            left_list,
+            &mut explorer.surroundings_state,
+        );
         let items = explorer
             .entries
             .iter()
-            .map(|entry| explorer_item(entry, usize::from(list_area.width)));
+            .map(|entry| explorer_item(entry, usize::from(right_list.width)));
         frame.render_stateful_widget(
-            List::new(items).highlight_style(Style::default().bg(palette().selected)),
-            list_area,
+            List::new(items).highlight_style(Style::default().bg(
+                if explorer.surroundings_focused {
+                    palette().surface_alt
+                } else {
+                    palette().selected
+                },
+            )),
+            right_list,
             &mut explorer.state,
         );
     }
@@ -1565,9 +1635,9 @@ pub(super) fn draw_explorer(frame: &mut Frame<'_>, explorer: &mut Explorer) -> E
         );
     } else {
         let hint = if explorer.editing_path {
-            "Tab complete   Enter open   ↑↓ matches   Esc browse"
+            "Tab complete   ↑↓ choose   Enter open   Esc browse"
         } else {
-            "Enter open   h parent   / search   Esc close"
+            "Tab pane   ↑↓ choose   Enter open   h parent   / type a path   Esc close"
         };
         frame.render_widget(
             Paragraph::new(hint)
@@ -1580,7 +1650,13 @@ pub(super) fn draw_explorer(frame: &mut Frame<'_>, explorer: &mut Explorer) -> E
     ExplorerRegions {
         overlay: area,
         path: path_area,
-        list: list_area,
+        surroundings: (!explorer.editing_path).then_some(left_list),
+        list: if explorer.editing_path {
+            left_list
+        } else {
+            right_list
+        },
+        preview: explorer.editing_path.then_some(right_list),
     }
 }
 
@@ -1802,6 +1878,40 @@ fn explorer_item(entry: &PickerEntry, width: usize) -> ListItem<'static> {
         ));
     }
     ListItem::new(Line::from(spans))
+}
+
+fn surrounding_item(entry: &SurroundingEntry, width: usize) -> ListItem<'static> {
+    let indent = "  ".repeat(entry.depth.min(4));
+    let marker = if entry.current { "● " } else { "├ " };
+    let detail = if entry.current { "here" } else { "" };
+    let detail_width = UnicodeWidthStr::width(detail);
+    let label_width = width.saturating_sub(
+        UnicodeWidthStr::width(indent.as_str())
+            + 2
+            + detail_width
+            + usize::from(!detail.is_empty()),
+    );
+    let label = truncate_width(&entry.label, label_width);
+    let padding = width.saturating_sub(
+        UnicodeWidthStr::width(indent.as_str())
+            + 2
+            + UnicodeWidthStr::width(label.as_str())
+            + detail_width,
+    );
+    ListItem::new(Line::from(vec![
+        Span::raw(indent),
+        Span::styled(
+            marker,
+            Style::default().fg(if entry.current {
+                palette().orange
+            } else {
+                palette().faint
+            }),
+        ),
+        Span::styled(label, Style::default().fg(palette().ink)),
+        Span::raw(" ".repeat(padding)),
+        Span::styled(detail, Style::default().fg(palette().orange)),
+    ]))
 }
 
 pub(super) fn draw_settings(

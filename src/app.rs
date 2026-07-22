@@ -17,6 +17,7 @@ pub(crate) use author_filter::{AuthorFilter, AuthorFilterEffect};
 pub use changes::{ChangesState, LeftPane};
 pub(crate) use commit_message::CommitMessageGenerator;
 pub(crate) use commit_summary::CommitSummaryCache;
+pub(crate) use explorer::SurroundingEntry;
 pub use explorer::{Explorer, PickerAction, PickerEntry};
 pub(crate) use file_search::FileSearch;
 pub(crate) use files::{FileDialog, FileDialogKind, FileDrag, FileNameAction};
@@ -196,7 +197,9 @@ pub struct Regions {
     pub commit_scroll_max: usize,
     pub graph_table: Option<Rect>,
     pub workspace_explorer_path: Option<Rect>,
+    pub workspace_explorer_surroundings: Option<Rect>,
     pub workspace_explorer_list: Option<Rect>,
+    pub workspace_explorer_preview: Option<Rect>,
     pub workspace_explorer_overlay: Option<Rect>,
     pub settings_overlay: Option<Rect>,
     pub action_menu: Option<Rect>,

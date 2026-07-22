@@ -953,13 +953,26 @@ fn renders_every_primary_surface() {
         .collect();
     assert!(explorer_screen.contains("EXPLORER"));
     assert!(explorer_screen.contains("Switch working directory"));
-    assert!(explorer_screen.contains("BROWSE"));
+    assert!(explorer_screen.contains("AROUND HERE"));
+    assert!(explorer_screen.contains("CONTENTS"));
     assert!(!explorer_screen.contains("OPEN REPOSITORY"));
     assert!(!explorer_screen.contains('┌'));
+    assert!(app.regions.workspace_explorer_surroundings.is_some());
     assert!(app.regions.workspace_explorer_list.is_some());
     let path = app.regions.workspace_explorer_path.unwrap();
     click(&mut app, path.x + 2, path.y + 1);
     assert!(app.workspace_explorer.editing_path);
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let explorer_search_screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(explorer_search_screen.contains("PATH MATCHES"));
+    assert!(explorer_search_screen.contains("LIVE PREVIEW"));
+    assert!(app.regions.workspace_explorer_preview.is_some());
 
     app.mode = Mode::Normal;
     app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
@@ -1938,6 +1951,7 @@ fn renders_markdown_files_and_toggles_back_to_source() {
     fs::write(root.join("README.md"), markdown).unwrap();
 
     let mut app = App::new(root.to_path_buf());
+    app.settings.worktree_width = 48;
     app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
     wait_for_preview(&mut app);
     assert_eq!(app.changes.pane, LeftPane::Files);
