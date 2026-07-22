@@ -4,7 +4,10 @@ use std::{
     thread,
 };
 
-use crate::git::{self, Change};
+use crate::{
+    git::{self, Change},
+    repo_path::RepoPath,
+};
 
 pub(super) struct PreviewLoader {
     generation: u64,
@@ -50,7 +53,7 @@ impl PreviewLoader {
         self.generation = self.generation.wrapping_add(1);
     }
 
-    pub(super) fn request_file(&mut self, root: &Path, path: String) {
+    pub(super) fn request_file(&mut self, root: &Path, path: RepoPath) {
         self.request(root, Task::File(path));
     }
 
@@ -91,7 +94,7 @@ struct Request {
 }
 
 enum Task {
-    File(String),
+    File(RepoPath),
     Commit(String),
     Diff(Change),
 }

@@ -1,11 +1,10 @@
-use std::path::Path;
-
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Position;
 
 use crate::{
     filesystem::{FileOperation, validate_name},
     git::Change,
+    repo_path::{RepoPath, display_os_str},
 };
 
 use super::{App, LeftPane, Mode, TextInput, View};
@@ -13,15 +12,15 @@ use super::{App, LeftPane, Mode, TextInput, View};
 #[derive(Debug, Clone)]
 pub(crate) enum FileDialogKind {
     Add {
-        parent: String,
+        parent: RepoPath,
     },
     Name {
         action: FileNameAction,
-        parent: String,
-        source: Option<String>,
+        parent: RepoPath,
+        source: Option<RepoPath>,
     },
     Delete {
-        path: String,
+        path: RepoPath,
         is_directory: bool,
     },
     DiscardUnstaged {
@@ -47,7 +46,7 @@ pub(crate) struct FileDrag {
     pub(super) source: super::changes::ExplorerEntry,
     pub(super) start: Position,
     pub(super) active: bool,
-    pub(super) target: Option<String>,
+    pub(super) target: Option<RepoPath>,
 }
 
 impl App {
@@ -137,7 +136,7 @@ impl App {
             .session
             .data()
             .and_then(|repo| self.changes.selected_explorer_entry(repo))
-            .map_or_else(String::new, |entry| {
+            .map_or_else(RepoPath::default, |entry| {
                 if entry.is_directory {
                     entry.path
                 } else {
@@ -162,11 +161,11 @@ impl App {
             self.notice = Some("Select a file or folder to rename".to_owned());
             return;
         };
-        let name = Path::new(&entry.path)
+        let name = entry
+            .path
             .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(&entry.path)
-            .to_owned();
+            .map(display_os_str)
+            .unwrap_or_else(|| entry.path.display());
         self.open_name_dialog(
             FileNameAction::Rename,
             relative_parent(&entry.path),
@@ -229,7 +228,12 @@ impl App {
         self.mode = Mode::Files;
     }
 
-    fn open_name_dialog(&mut self, action: FileNameAction, parent: String, source: Option<String>) {
+    fn open_name_dialog(
+        &mut self,
+        action: FileNameAction,
+        parent: RepoPath,
+        source: Option<RepoPath>,
+    ) {
         let mut input = TextInput::default();
         input.focus();
         self.file_dialog = Some(FileDialog {
@@ -264,7 +268,18 @@ impl App {
             }
             return;
         }
-        let destination = join_relative(&parent, &name);
+        if action == FileNameAction::Rename
+            && source.as_ref().is_some_and(|source| {
+                source.file_name().is_some_and(|file_name| {
+                    display_os_str(file_name) == name
+                        && source.parent().unwrap_or_default() == parent
+                })
+            })
+        {
+            self.close_file_dialog();
+            return;
+        }
+        let destination = parent.join(name.as_ref());
         let operation = match action {
             FileNameAction::CreateFile => FileOperation::CreateFile { path: destination },
             FileNameAction::CreateDirectory => FileOperation::CreateDirectory { path: destination },
@@ -389,7 +404,7 @@ impl App {
         let mut target = self.file_drop_target_at(point);
         if let Some(drag) = &mut self.file_drag {
             drag.active |= drag.start != point;
-            if drag.source.is_directory && target.as_deref() == Some(&drag.source.path) {
+            if drag.source.is_directory && target.as_ref() == Some(&drag.source.path) {
                 target = None;
             }
             drag.target = target;
@@ -408,14 +423,11 @@ impl App {
         let Some(target) = drag.target else {
             return;
         };
-        let Some(name) = Path::new(&drag.source.path)
-            .file_name()
-            .and_then(|name| name.to_str())
-        else {
+        let Some(name) = drag.source.path.file_name() else {
             self.notice = Some("Could not determine the entry name".to_owned());
             return;
         };
-        let destination = join_relative(&target, name);
+        let destination = target.join(name);
         if destination == drag.source.path {
             return;
         }
@@ -425,13 +437,13 @@ impl App {
         });
     }
 
-    fn file_drop_target_at(&self, point: Position) -> Option<String> {
+    fn file_drop_target_at(&self, point: Position) -> Option<RepoPath> {
         if self
             .regions
             .files_root
             .is_some_and(|rect| rect.contains(point))
         {
-            return Some(String::new());
+            return Some(RepoPath::default());
         }
         let rect = self
             .regions
@@ -443,26 +455,14 @@ impl App {
         entry.is_directory.then_some(entry.path)
     }
 
-    pub(crate) fn file_drop_target(&self) -> Option<&str> {
+    pub(crate) fn file_drop_target(&self) -> Option<&RepoPath> {
         self.file_drag
             .as_ref()
             .filter(|drag| drag.active)
-            .and_then(|drag| drag.target.as_deref())
+            .and_then(|drag| drag.target.as_ref())
     }
 }
 
-fn relative_parent(path: &str) -> String {
-    Path::new(path)
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map(|parent| parent.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_default()
-}
-
-fn join_relative(parent: &str, name: &str) -> String {
-    if parent.is_empty() {
-        name.to_owned()
-    } else {
-        format!("{parent}/{name}")
-    }
+fn relative_parent(path: &RepoPath) -> RepoPath {
+    path.parent().unwrap_or_default()
 }

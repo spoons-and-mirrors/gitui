@@ -5,17 +5,19 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 
+use crate::repo_path::RepoPath;
+
 #[derive(Debug, Clone)]
 pub(crate) enum FileOperation {
-    CreateFile { path: String },
-    CreateDirectory { path: String },
-    Rename { from: String, to: String },
-    Move { from: String, to: String },
-    Delete { path: String },
+    CreateFile { path: RepoPath },
+    CreateDirectory { path: RepoPath },
+    Rename { from: RepoPath, to: RepoPath },
+    Move { from: RepoPath, to: RepoPath },
+    Delete { path: RepoPath },
 }
 
 impl FileOperation {
-    pub(crate) fn selection_after(&self) -> Option<String> {
+    pub(crate) fn selection_after(&self) -> Option<RepoPath> {
         match self {
             Self::CreateFile { path } | Self::CreateDirectory { path } => Some(path.clone()),
             Self::Rename { to, .. } | Self::Move { to, .. } => Some(to.clone()),
@@ -109,7 +111,7 @@ pub(crate) fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn safe_regular_file(root: &Path, relative: &str) -> Result<PathBuf> {
+pub(crate) fn safe_regular_file(root: &Path, relative: &RepoPath) -> Result<PathBuf> {
     let path = safe_path(root, relative)?;
     let metadata = fs::symlink_metadata(&path)
         .with_context(|| format!("could not inspect {}", path.display()))?;
@@ -119,13 +121,13 @@ pub(crate) fn safe_regular_file(root: &Path, relative: &str) -> Result<PathBuf> 
     Ok(path)
 }
 
-fn safe_path(root: &Path, relative: &str) -> Result<PathBuf> {
+fn safe_path(root: &Path, relative: &RepoPath) -> Result<PathBuf> {
     let root_metadata = fs::symlink_metadata(root)
         .with_context(|| format!("could not inspect workspace {}", root.display()))?;
     if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
         bail!("the workspace root is no longer a safe directory");
     }
-    let path = Path::new(relative);
+    let path = relative.as_path();
     if relative.is_empty() || path.is_absolute() {
         bail!("Invalid workspace path");
     }
@@ -173,30 +175,30 @@ mod tests {
         perform(
             root,
             &FileOperation::CreateDirectory {
-                path: "docs".to_owned(),
+                path: "docs".into(),
             },
         )
         .unwrap();
         perform(
             root,
             &FileOperation::CreateFile {
-                path: "readme.md".to_owned(),
+                path: "readme.md".into(),
             },
         )
         .unwrap();
         perform(
             root,
             &FileOperation::Move {
-                from: "readme.md".to_owned(),
-                to: "docs/readme.md".to_owned(),
+                from: "readme.md".into(),
+                to: "docs/readme.md".into(),
             },
         )
         .unwrap();
         perform(
             root,
             &FileOperation::Rename {
-                from: "docs/readme.md".to_owned(),
-                to: "docs/guide.md".to_owned(),
+                from: "docs/readme.md".into(),
+                to: "docs/guide.md".into(),
             },
         )
         .unwrap();
@@ -205,7 +207,7 @@ mod tests {
         perform(
             root,
             &FileOperation::Delete {
-                path: "docs".to_owned(),
+                path: "docs".into(),
             },
         )
         .unwrap();
@@ -225,7 +227,7 @@ mod tests {
             perform(
                 root,
                 &FileOperation::Delete {
-                    path: "../outside".to_owned()
+                    path: "../outside".into()
                 }
             )
             .is_err()
@@ -234,8 +236,8 @@ mod tests {
             perform(
                 root,
                 &FileOperation::Move {
-                    from: "nested-repository".to_owned(),
-                    to: "moved-repository".to_owned(),
+                    from: "nested-repository".into(),
+                    to: "moved-repository".into(),
                 },
             )
             .is_err()
@@ -244,7 +246,7 @@ mod tests {
             perform(
                 root,
                 &FileOperation::Delete {
-                    path: ".git/config".to_owned()
+                    path: ".git/config".into()
                 }
             )
             .is_err()
@@ -253,8 +255,8 @@ mod tests {
             perform(
                 root,
                 &FileOperation::Rename {
-                    from: "source/file".to_owned(),
-                    to: "existing".to_owned(),
+                    from: "source/file".into(),
+                    to: "existing".into(),
                 },
             )
             .is_err()
@@ -263,8 +265,8 @@ mod tests {
             perform(
                 root,
                 &FileOperation::Move {
-                    from: "source".to_owned(),
-                    to: "source/nested/source".to_owned(),
+                    from: "source".into(),
+                    to: "source/nested/source".into(),
                 },
             )
             .is_err()
@@ -279,11 +281,11 @@ mod tests {
         fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
 
         assert_eq!(
-            safe_regular_file(root, "src/main.rs").unwrap(),
+            safe_regular_file(root, &RepoPath::from("src/main.rs")).unwrap(),
             root.join("src/main.rs")
         );
-        assert!(safe_regular_file(root, "../outside").is_err());
-        assert!(safe_regular_file(root, "src").is_err());
+        assert!(safe_regular_file(root, &RepoPath::from("../outside")).is_err());
+        assert!(safe_regular_file(root, &RepoPath::from("src")).is_err());
     }
 
     #[cfg(unix)]
@@ -300,12 +302,39 @@ mod tests {
         perform(
             root,
             &FileOperation::Delete {
-                path: "link".to_owned(),
+                path: "link".into(),
             },
         )
         .unwrap();
         assert!(root.join("target/keep").exists());
         assert!(!root.join("link").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_operations_preserve_invalid_utf8_paths() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let first = OsString::from_vec(b"entry-\x80".to_vec());
+        let second = OsString::from_vec(b"entry-\x81".to_vec());
+        let renamed = OsString::from_vec(b"renamed-\x80".to_vec());
+        fs::write(root.join(&first), "first").unwrap();
+        fs::write(root.join(&second), "second").unwrap();
+
+        perform(
+            root,
+            &FileOperation::Rename {
+                from: RepoPath::from(PathBuf::from(&first)),
+                to: RepoPath::from(PathBuf::from(&renamed)),
+            },
+        )
+        .unwrap();
+
+        assert!(!root.join(&first).exists());
+        assert_eq!(fs::read(root.join(&renamed)).unwrap(), b"first");
+        assert_eq!(fs::read(root.join(&second)).unwrap(), b"second");
     }
 
     #[cfg(unix)]
@@ -322,7 +351,7 @@ mod tests {
             perform(
                 workspace.path(),
                 &FileOperation::Delete {
-                    path: "link/keep".to_owned(),
+                    path: "link/keep".into(),
                 },
             )
             .is_err()
@@ -331,7 +360,7 @@ mod tests {
             perform(
                 workspace.path(),
                 &FileOperation::CreateFile {
-                    path: "link/new".to_owned(),
+                    path: "link/new".into(),
                 },
             )
             .is_err()
@@ -349,13 +378,13 @@ mod tests {
             perform(
                 &root,
                 &FileOperation::Delete {
-                    path: "keep".to_owned(),
+                    path: "keep".into(),
                 },
             )
             .is_err()
         );
         assert!(outside.path().join("keep").exists());
 
-        assert!(safe_regular_file(workspace.path(), "link/keep").is_err());
+        assert!(safe_regular_file(workspace.path(), &RepoPath::from("link/keep")).is_err());
     }
 }

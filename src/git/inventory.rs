@@ -8,12 +8,15 @@ use std::{
 use anyhow::{Context, Result, bail};
 
 use super::{base_command, clean_stderr, git_limits, run_limited};
-use crate::process::{self, Output};
+use crate::{
+    process::{self, Output},
+    repo_path::RepoPath,
+};
 
 pub(super) const MAX_INVENTORY_ENTRIES: usize = 100_000;
 const MAX_INVENTORY_PATH_BYTES: usize = 64 * 1024 * 1024;
 
-pub(super) fn git_entries(root: &Path) -> Result<(Vec<String>, Vec<String>, bool)> {
+pub(super) fn git_entries(root: &Path) -> Result<(Vec<RepoPath>, Vec<RepoPath>, bool)> {
     let mut truncated = false;
     let output = inventory_output(
         root,
@@ -31,7 +34,7 @@ pub(super) fn git_entries(root: &Path) -> Result<(Vec<String>, Vec<String>, bool
     if !output.status.success() {
         bail!("{}", clean_stderr(&output));
     }
-    let mut states = HashMap::<String, (bool, bool)>::new();
+    let mut states = HashMap::<RepoPath, (bool, bool)>::new();
     for entry in output.stdout.split(|byte| *byte == 0) {
         let Some((&tag, path)) = entry.split_first() else {
             continue;
@@ -40,7 +43,7 @@ pub(super) fn git_entries(root: &Path) -> Result<(Vec<String>, Vec<String>, bool
         if path.is_empty() {
             continue;
         }
-        let path = String::from_utf8_lossy(path).into_owned();
+        let path = RepoPath::from_git_bytes(path)?;
         if states.len() >= MAX_INVENTORY_ENTRIES && !states.contains_key(&path) {
             truncated = true;
             continue;
@@ -53,7 +56,7 @@ pub(super) fn git_entries(root: &Path) -> Result<(Vec<String>, Vec<String>, bool
             state.0 = true;
         }
     }
-    let mut files: Vec<String> = states
+    let mut files: Vec<RepoPath> = states
         .into_iter()
         .filter_map(|(path, (present, deleted))| (present && !deleted).then_some(path))
         .collect();
@@ -90,7 +93,9 @@ pub(super) fn git_entries(root: &Path) -> Result<(Vec<String>, Vec<String>, bool
         .stdout
         .split(|byte| *byte == 0)
         .filter_map(|path| path.strip_suffix(b"/"))
-        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .map(RepoPath::from_git_bytes)
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
         .filter(|path| !path.is_empty())
         .take(MAX_INVENTORY_ENTRIES + 1)
         .collect();
@@ -110,7 +115,7 @@ pub(super) fn git_entries(root: &Path) -> Result<(Vec<String>, Vec<String>, bool
     if !output.status.success() {
         bail!("{}", clean_stderr(&output));
     }
-    let submodules: HashSet<String> = output
+    let submodules: HashSet<RepoPath> = output
         .stdout
         .split(|byte| *byte == 0)
         .filter_map(|entry| {
@@ -119,8 +124,10 @@ pub(super) fn git_entries(root: &Path) -> Result<(Vec<String>, Vec<String>, bool
             let path = path.get(1..)?;
             metadata
                 .starts_with(b"160000 ")
-                .then(|| String::from_utf8_lossy(path).into_owned())
+                .then(|| RepoPath::from_git_bytes(path))
         })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
         .filter(|path| {
             root.join(path)
                 .symlink_metadata()
@@ -133,7 +140,7 @@ pub(super) fn git_entries(root: &Path) -> Result<(Vec<String>, Vec<String>, bool
     Ok((files, directories, truncated))
 }
 
-fn ignored_entries(root: &Path) -> Result<(Vec<String>, Vec<String>, bool)> {
+fn ignored_entries(root: &Path) -> Result<(Vec<RepoPath>, Vec<RepoPath>, bool)> {
     let mut truncated = false;
     let output = inventory_output(
         root,
@@ -153,7 +160,9 @@ fn ignored_entries(root: &Path) -> Result<(Vec<String>, Vec<String>, bool)> {
         .stdout
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
-        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .map(RepoPath::from_git_bytes)
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
         .take(MAX_INVENTORY_ENTRIES + 1)
         .collect();
     if files.len() > MAX_INVENTORY_ENTRIES {
@@ -179,7 +188,9 @@ fn ignored_entries(root: &Path) -> Result<(Vec<String>, Vec<String>, bool)> {
         .stdout
         .split(|byte| *byte == 0)
         .filter_map(|path| path.strip_suffix(b"/"))
-        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .map(RepoPath::from_git_bytes)
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
         .filter(|path| !path.is_empty())
         .take(MAX_INVENTORY_ENTRIES.saturating_sub(files.len()) + 1)
         .collect();
@@ -193,14 +204,14 @@ fn ignored_entries(root: &Path) -> Result<(Vec<String>, Vec<String>, bool)> {
 
 fn expand_directories(
     root: &Path,
-    mut roots: Vec<String>,
+    mut roots: Vec<RepoPath>,
     limit: usize,
-) -> Result<(Vec<String>, bool)> {
+) -> Result<(Vec<RepoPath>, bool)> {
     roots.sort_unstable();
     roots.dedup();
     let mut truncated = roots.len() > limit;
     roots.truncate(limit);
-    let mut directories: HashSet<String> = roots.iter().cloned().collect();
+    let mut directories: HashSet<RepoPath> = roots.iter().cloned().collect();
     let mut frontier = roots;
     while !frontier.is_empty() {
         if directories.len() >= limit {
@@ -227,20 +238,15 @@ fn expand_directories(
                     continue;
                 }
                 if let Ok(path) = path.strip_prefix(root) {
-                    let path = path.to_string_lossy();
-                    let candidate = if cfg!(windows) {
-                        path.replace('\\', "/")
-                    } else {
-                        path.into_owned()
-                    };
+                    let candidate = RepoPath::from(path);
                     if candidates.len() >= limit
-                        || candidate_bytes.saturating_add(candidate.len())
+                        || candidate_bytes.saturating_add(candidate.byte_len())
                             > MAX_INVENTORY_PATH_BYTES / 2
                     {
                         candidate_limit_reached = true;
                         break 'frontier;
                     }
-                    candidate_bytes = candidate_bytes.saturating_add(candidate.len());
+                    candidate_bytes = candidate_bytes.saturating_add(candidate.byte_len());
                     candidates.push(candidate);
                 }
             }
@@ -268,13 +274,13 @@ fn expand_directories(
     Ok((directories.into_iter().collect(), truncated))
 }
 
-fn ignored_paths(root: &Path, paths: &[String]) -> Result<HashSet<String>> {
+fn ignored_paths(root: &Path, paths: &[RepoPath]) -> Result<HashSet<RepoPath>> {
     if paths.is_empty() {
         return Ok(HashSet::new());
     }
     let mut input = Vec::new();
     for path in paths {
-        input.extend_from_slice(path.as_bytes());
+        input.extend_from_slice(&path.git_bytes()?);
         input.push(0);
     }
     let output = process::run_with_input(
@@ -289,15 +295,15 @@ fn ignored_paths(root: &Path, paths: &[String]) -> Result<HashSet<String>> {
     if !output.status.success() && output.status.code() != Some(1) {
         bail!("{}", clean_stderr(&output));
     }
-    Ok(output
+    output
         .stdout
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
-        .map(|path| String::from_utf8_lossy(path).into_owned())
-        .collect())
+        .map(RepoPath::from_git_bytes)
+        .collect()
 }
 
-pub(super) fn local_entries(root: &Path) -> Result<(Vec<String>, Vec<String>, bool)> {
+pub(super) fn local_entries(root: &Path) -> Result<(Vec<RepoPath>, Vec<RepoPath>, bool)> {
     let started = Instant::now();
     crate::diagnostics::event(format!("local inventory started root={}", root.display()));
     let mut files = Vec::new();
@@ -321,26 +327,26 @@ pub(super) fn local_entries(root: &Path) -> Result<(Vec<String>, Vec<String>, bo
             };
             if metadata.is_dir() {
                 if let Ok(relative) = path.strip_prefix(root) {
-                    let relative = relative.to_string_lossy().into_owned();
+                    let relative = RepoPath::from(relative);
                     if files.len().saturating_add(directory_paths.len()) >= MAX_INVENTORY_ENTRIES
-                        || path_bytes.saturating_add(relative.len()) > MAX_INVENTORY_PATH_BYTES
+                        || path_bytes.saturating_add(relative.byte_len()) > MAX_INVENTORY_PATH_BYTES
                     {
                         truncated = true;
                         break;
                     }
-                    path_bytes = path_bytes.saturating_add(relative.len());
+                    path_bytes = path_bytes.saturating_add(relative.byte_len());
                     directory_paths.push(relative);
                 }
                 directories.push(path);
             } else if let Ok(relative) = path.strip_prefix(root) {
-                let relative = relative.to_string_lossy().into_owned();
+                let relative = RepoPath::from(relative);
                 if files.len().saturating_add(directory_paths.len()) >= MAX_INVENTORY_ENTRIES
-                    || path_bytes.saturating_add(relative.len()) > MAX_INVENTORY_PATH_BYTES
+                    || path_bytes.saturating_add(relative.byte_len()) > MAX_INVENTORY_PATH_BYTES
                 {
                     truncated = true;
                     break;
                 }
-                path_bytes = path_bytes.saturating_add(relative.len());
+                path_bytes = path_bytes.saturating_add(relative.byte_len());
                 files.push(relative);
             }
         }
@@ -363,8 +369,8 @@ pub(super) fn local_entries(root: &Path) -> Result<(Vec<String>, Vec<String>, bo
 }
 
 fn normalize_inventory(
-    files: &mut Vec<String>,
-    directories: &mut Vec<String>,
+    files: &mut Vec<RepoPath>,
+    directories: &mut Vec<RepoPath>,
     truncated: &mut bool,
 ) {
     files.sort_unstable();
@@ -375,10 +381,10 @@ fn normalize_inventory(
     let mut bytes = 0_usize;
     files.retain(|path| {
         let keep = entries < MAX_INVENTORY_ENTRIES
-            && bytes.saturating_add(path.len()) <= MAX_INVENTORY_PATH_BYTES;
+            && bytes.saturating_add(path.byte_len()) <= MAX_INVENTORY_PATH_BYTES;
         if keep {
             entries += 1;
-            bytes = bytes.saturating_add(path.len());
+            bytes = bytes.saturating_add(path.byte_len());
         } else {
             *truncated = true;
         }
@@ -386,10 +392,10 @@ fn normalize_inventory(
     });
     directories.retain(|path| {
         let keep = entries < MAX_INVENTORY_ENTRIES
-            && bytes.saturating_add(path.len()) <= MAX_INVENTORY_PATH_BYTES;
+            && bytes.saturating_add(path.byte_len()) <= MAX_INVENTORY_PATH_BYTES;
         if keep {
             entries += 1;
-            bytes = bytes.saturating_add(path.len());
+            bytes = bytes.saturating_add(path.byte_len());
         } else {
             *truncated = true;
         }

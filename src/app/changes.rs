@@ -9,6 +9,7 @@ use ratatui::widgets::ListState;
 
 use crate::{
     git::{Change, Commit, RepositoryData},
+    repo_path::RepoPath,
     tree::{ExplorerRow, FileTree, PreparedFileTree, WorktreeRow, WorktreeSection, WorktreeTree},
     ui::preview::PreviewPresentation,
 };
@@ -39,12 +40,12 @@ pub(super) enum ChangesEffect {
     ToggleAllStaging,
     ToggleSelectedStage,
     StageHunk(usize),
-    WorktreeFileSelected { path: String, staged: bool },
+    WorktreeFileSelected { path: RepoPath, staged: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ExplorerEntry {
-    pub(super) path: String,
+    pub(super) path: RepoPath,
     pub(super) is_directory: bool,
 }
 
@@ -65,8 +66,8 @@ pub struct ChangesState {
     hunk_pin_pending: bool,
     pending_hunk_selection: Option<PendingHunkSelection>,
     pub(crate) history_focused: bool,
-    pub(crate) collapsed_directories: HashSet<String>,
-    pub(crate) expanded_explorer_directories: HashSet<String>,
+    pub(crate) collapsed_directories: HashSet<RepoPath>,
+    pub(crate) expanded_explorer_directories: HashSet<RepoPath>,
     worktree_rows_cache: Vec<WorktreeRow>,
     worktree_rows_generation: u64,
     explorer_rows_cache: Vec<ExplorerRow>,
@@ -74,22 +75,22 @@ pub struct ChangesState {
     file_tree_fingerprint: Option<u64>,
     worktree_tree: Option<WorktreeTree>,
     worktree_tree_fingerprint: Option<u64>,
-    change_codes: HashMap<String, char>,
+    change_codes: HashMap<RepoPath, char>,
     pub(crate) preview_content_generation: u64,
     pub(crate) preview_presentation: PreviewPresentation,
     preview_loader: PreviewLoader,
 }
 
 struct PendingHunkSelection {
-    path: String,
+    path: RepoPath,
     index: usize,
 }
 
 pub(super) struct ChangesSelection {
-    change: Option<(String, bool)>,
-    directory: Option<(String, WorktreeSection)>,
-    explorer_file: Option<String>,
-    explorer_directory: Option<String>,
+    change: Option<(RepoPath, bool)>,
+    directory: Option<(RepoPath, WorktreeSection)>,
+    explorer_file: Option<RepoPath>,
+    explorer_directory: Option<RepoPath>,
     history_oid: Option<String>,
 }
 
@@ -187,7 +188,7 @@ impl ChangesState {
                 let section = self.selected_worktree_section()?;
                 Some((path, section))
             }),
-            explorer_file: self.selected_explorer_file_path(repo).map(str::to_owned),
+            explorer_file: self.selected_explorer_file_path(repo).cloned(),
             explorer_directory: self.selected_explorer_directory_path(),
             history_oid: self
                 .history_state
@@ -256,10 +257,10 @@ impl ChangesState {
     pub(crate) fn selected_explorer_file_path<'a>(
         &self,
         repo: &'a RepositoryData,
-    ) -> Option<&'a str> {
+    ) -> Option<&'a RepoPath> {
         let selected = self.explorer_state.selected()?;
         let file_index = self.explorer_rows().get(selected)?.file_index?;
-        repo.files.get(file_index).map(String::as_str)
+        repo.files.get(file_index)
     }
 
     pub(super) fn selected_change_index(&self, repo: &RepositoryData) -> Option<usize> {
@@ -291,7 +292,7 @@ impl ChangesState {
         }
     }
 
-    pub(super) fn selected_directory_path(&self, repo: &RepositoryData) -> Option<String> {
+    pub(super) fn selected_directory_path(&self, repo: &RepositoryData) -> Option<RepoPath> {
         let selected = self.worktree_state.selected()?;
         self.worktree_rows(repo)
             .get(selected)?
@@ -312,7 +313,7 @@ impl ChangesState {
             .find_map(|row| row.section)
     }
 
-    pub(super) fn selected_explorer_directory_path(&self) -> Option<String> {
+    pub(super) fn selected_explorer_directory_path(&self) -> Option<RepoPath> {
         let selected = self.explorer_state.selected()?;
         self.explorer_rows().get(selected)?.directory_path.clone()
     }
@@ -343,13 +344,13 @@ impl ChangesState {
     pub(super) fn select_explorer_path(
         &mut self,
         repo: &RepositoryData,
-        path: &str,
+        path: &RepoPath,
         viewport: usize,
     ) -> bool {
         expand_ancestors(&mut self.expanded_explorer_directories, path);
         self.rebuild_explorer_rows(Some(repo));
         let row = self.explorer_rows().iter().position(|row| {
-            row.directory_path.as_deref() == Some(path)
+            row.directory_path.as_ref() == Some(path)
                 || row
                     .file_index
                     .and_then(|index| repo.files.get(index))
@@ -781,7 +782,7 @@ impl ChangesState {
         self.pending_hunk_selection = None;
     }
 
-    pub(super) fn preserve_hunk_selection_after_stage(&mut self, path: String, index: usize) {
+    pub(super) fn preserve_hunk_selection_after_stage(&mut self, path: RepoPath, index: usize) {
         self.hunk_selection = Some(index);
         self.pending_hunk_selection = Some(PendingHunkSelection { path, index });
     }
@@ -1064,7 +1065,7 @@ impl ChangesState {
         }
     }
 
-    pub(crate) fn explorer_change_code(&self, path: &str) -> Option<char> {
+    pub(crate) fn explorer_change_code(&self, path: &RepoPath) -> Option<char> {
         self.change_codes.get(path).copied()
     }
 
@@ -1081,11 +1082,11 @@ impl ChangesState {
         self.explorer_state.select(self.initial_explorer_row());
     }
 
-    fn select_explorer_directory(&mut self, path: &str) {
+    fn select_explorer_directory(&mut self, path: &RepoPath) {
         let row = self
             .explorer_rows()
             .iter()
-            .position(|row| row.directory_path.as_deref() == Some(path));
+            .position(|row| row.directory_path.as_ref() == Some(path));
         self.explorer_state.select(row);
     }
 
@@ -1106,13 +1107,18 @@ impl ChangesState {
             .or_else(|| (!self.explorer_rows().is_empty()).then_some(0))
     }
 
-    fn select_directory(&mut self, repo: &RepositoryData, path: &str, section: WorktreeSection) {
+    fn select_directory(
+        &mut self,
+        repo: &RepositoryData,
+        path: &RepoPath,
+        section: WorktreeSection,
+    ) {
         let mut current_section = None;
         let row = self.worktree_rows(repo).iter().position(|row| {
             if let Some(row_section) = row.section {
                 current_section = Some(row_section);
             }
-            row.directory_path.as_deref() == Some(path) && current_section == Some(section)
+            row.directory_path.as_ref() == Some(path) && current_section == Some(section)
         });
         self.worktree_state.select(row);
     }
@@ -1140,30 +1146,30 @@ fn hunk_count(diff: &str) -> usize {
     diff.lines().filter(|line| line.starts_with("@@")).count()
 }
 
-fn change_codes(changes: &[Change]) -> HashMap<String, char> {
+fn change_codes(changes: &[Change]) -> HashMap<RepoPath, char> {
     let mut codes = HashMap::new();
     for change in changes {
-        let mut path = Some(change.path.as_str());
+        let mut path = Some(change.path.clone());
         while let Some(current) = path {
             codes
-                .entry(current.to_owned())
+                .entry(current.clone())
                 .and_modify(|code| {
                     if change_code_priority(change.code) < change_code_priority(*code) {
                         *code = change.code;
                     }
                 })
                 .or_insert(change.code);
-            path = current.rsplit_once('/').map(|(parent, _)| parent);
+            path = current.parent();
         }
     }
     codes
 }
 
-fn expand_ancestors(expanded: &mut HashSet<String>, path: &str) {
-    let mut ancestor = path.rsplit_once('/').map(|(parent, _)| parent);
+fn expand_ancestors(expanded: &mut HashSet<RepoPath>, path: &RepoPath) {
+    let mut ancestor = path.parent();
     while let Some(parent) = ancestor {
-        expanded.insert(parent.to_owned());
-        ancestor = parent.rsplit_once('/').map(|(next, _)| next);
+        ancestor = parent.parent();
+        expanded.insert(parent);
     }
 }
 
@@ -1259,7 +1265,7 @@ mod tests {
             branches: Vec::new(),
             github_remote: false,
             changes: vec![Change {
-                path: "src/main.rs".to_owned(),
+                path: "src/main.rs".into(),
                 original_path: None,
                 code: 'M',
                 staged: false,
@@ -1267,9 +1273,9 @@ mod tests {
                 deletions: 0,
             }],
             files: vec![
-                "src/app/mod.rs".to_owned(),
-                "src/main.rs".to_owned(),
-                "README.md".to_owned(),
+                "src/app/mod.rs".into(),
+                "src/main.rs".into(),
+                "README.md".into(),
             ],
             directories: Vec::new(),
             history: Vec::new(),
@@ -1326,7 +1332,7 @@ mod tests {
         assert_eq!(
             state.activate_target(state.worktree_row_target(file_row), &repo),
             Some(ChangesEffect::WorktreeFileSelected {
-                path: "src/main.rs".to_owned(),
+                path: "src/main.rs".into(),
                 staged: false,
             })
         );

@@ -10,6 +10,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     app::{App, ChangesHitTarget, DiffHunkRegion, HitTarget, LeftPane, Mode, TextInput, View},
     git::{Change, DiffSummary},
+    repo_path::{RepoPath, display_os_str},
     tree::{ExplorerRow, WorktreeRow, WorktreeSection},
 };
 
@@ -336,13 +337,14 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     };
     let selected_label = selected_commit.map_or_else(
         || {
-            selected_change
-                .map_or("No file selected", |change| change.path.as_str())
-                .to_owned()
+            selected_change.map_or_else(
+                || "No file selected".to_owned(),
+                |change| change.path.display(),
+            )
         },
         |commit| commit.oid.chars().take(7).collect(),
     );
-    let syntax_path = selected_change.map_or_else(String::new, |change| change.path.clone());
+    let syntax_path = selected_change.map_or_else(String::new, |change| change.path.display());
     let diff_header = Rect::new(
         columns[1].x.saturating_add(1),
         columns[1].y.saturating_add(1),
@@ -767,7 +769,7 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
         header.width.saturating_sub(add_width),
         1,
     );
-    let drop_target = app.file_drop_target().map(str::to_owned);
+    let drop_target = app.file_drop_target().cloned();
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("CHANGES", Style::default().fg(palette().faint)),
@@ -787,7 +789,7 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
             .style(Style::default().fg(palette().accent).bg(palette().raised)),
         add_button,
     );
-    if drop_target.as_deref() == Some("") {
+    if drop_target.as_ref().is_some_and(RepoPath::is_empty) {
         frame.render_widget(
             Block::default().style(Style::default().bg(palette().inactive_selected)),
             root_target,
@@ -837,15 +839,14 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
                 let path = row
                     .file_index
                     .and_then(|file_index| repo.files.get(file_index))
-                    .map(String::as_str)
-                    .or(row.directory_path.as_deref());
+                    .or(row.directory_path.as_ref());
                 let code = path.and_then(|path| app.changes.explorer_change_code(path));
                 let item = explorer_item(row, code, usize::from(list_area.width));
                 if app.changes.explorer_state.selected() == Some(index) {
                     item.style(Style::default().bg(palette().selected))
-                } else if drop_target.as_deref().is_some_and(|target| {
+                } else if drop_target.as_ref().is_some_and(|target| {
                     row.directory_path
-                        .as_deref()
+                        .as_ref()
                         .is_some_and(|path| path == target)
                 }) {
                     item.style(Style::default().bg(palette().inactive_selected))
@@ -859,8 +860,7 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
 
     let selected_path = app
         .selected_explorer_file_path()
-        .unwrap_or("No file selected")
-        .to_owned();
+        .map_or_else(|| "No file selected".to_owned(), RepoPath::display);
     let preview_header = Rect::new(
         columns[1].x.saturating_add(1),
         columns[1].y.saturating_add(1),
@@ -960,8 +960,7 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
     }
     let path = app
         .selected_explorer_file_path()
-        .unwrap_or_default()
-        .to_owned();
+        .map_or_else(String::new, RepoPath::display);
     let preview = prepare_preview_lines(app, preview_body, &path, false, false, markdown_rendered);
     render_scrollable_content(frame, app, columns[1], preview_body, preview);
 }
@@ -1189,7 +1188,15 @@ fn draw_diff_summary(
     let file_lines = if wrapped {
         wrapped_file_summary(&summary.files, available, usize::from(files_area.height))
     } else {
-        vec![truncate_width(&summary.files.join("  "), available)]
+        vec![truncate_width(
+            &summary
+                .files
+                .iter()
+                .map(RepoPath::display)
+                .collect::<Vec<_>>()
+                .join("  "),
+            available,
+        )]
     };
     let lines = file_lines
         .into_iter()
@@ -1227,7 +1234,7 @@ fn diff_summary_height(
     (rows as u16).saturating_add(2).min(maximum)
 }
 
-fn wrapped_file_summary(files: &[String], width: usize, maximum_lines: usize) -> Vec<String> {
+fn wrapped_file_summary(files: &[RepoPath], width: usize, maximum_lines: usize) -> Vec<String> {
     if width == 0 || maximum_lines == 0 {
         return Vec::new();
     }
@@ -1235,6 +1242,7 @@ fn wrapped_file_summary(files: &[String], width: usize, maximum_lines: usize) ->
     let mut line = String::new();
     let mut line_width = 0usize;
     for file in files {
+        let file = file.display();
         let file_width = UnicodeWidthStr::width(file.as_str());
         if file_width <= width {
             let separator_width = usize::from(!line.is_empty()) * 2;
@@ -1246,7 +1254,7 @@ fn wrapped_file_summary(files: &[String], width: usize, maximum_lines: usize) ->
                 if separator_width > 0 {
                     line.push_str("  ");
                 }
-                line.push_str(file);
+                line.push_str(&file);
                 line_width = line_width
                     .saturating_add(separator_width)
                     .saturating_add(file_width);
@@ -1448,7 +1456,10 @@ fn worktree_item<'a>(row: &'a WorktreeRow, changes: &'a [Change], width: usize) 
     let label = change.original_path.as_ref().map_or_else(
         || row.label.clone(),
         |original| {
-            let original_name = original.rsplit('/').next().unwrap_or(original);
+            let original_name = original
+                .file_name()
+                .map(display_os_str)
+                .unwrap_or_else(|| original.display());
             format!("{original_name} → {}", row.label)
         },
     );
@@ -1664,7 +1675,7 @@ mod summary_tests {
 
     #[test]
     fn wraps_file_summaries_with_a_bounded_height() {
-        let files = ["src/one.rs", "src/two.rs", "src/three.rs", "src/four.rs"].map(str::to_owned);
+        let files = ["src/one.rs", "src/two.rs", "src/three.rs", "src/four.rs"].map(RepoPath::from);
         let lines = wrapped_file_summary(&files, 12, 3);
         assert_eq!(lines.len(), 3);
         assert!(lines.last().unwrap().ends_with('…'));

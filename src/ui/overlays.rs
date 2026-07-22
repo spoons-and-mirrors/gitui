@@ -7,6 +7,8 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::repo_path::RepoPath;
+
 use crate::app::{
     ACTION_ITEMS, ActionsState, BranchDeleteDialog, BrowserTab, CommandStatus, Explorer,
     ExplorerHitTarget, FileDialog, FileDialogKind, FileNameAction, FileSearch, HitTarget,
@@ -994,7 +996,10 @@ pub(super) fn draw_file_dialog(frame: &mut Frame<'_>, dialog: &FileDialog) -> Fi
                 '?' => format!("Permanently delete untracked file {}?", change.path),
                 'R' => format!(
                     "Discard rename {} → {} and restore the original file?",
-                    change.original_path.as_deref().unwrap_or("unknown"),
+                    change
+                        .original_path
+                        .as_ref()
+                        .map_or_else(|| "unknown".to_owned(), |path| path.display()),
                     change.path
                 ),
                 'C' => format!("Permanently delete untracked copy {}?", change.path),
@@ -1855,7 +1860,7 @@ pub(super) fn draw_explorer(
 pub(super) fn draw_file_search(
     frame: &mut Frame<'_>,
     search: &mut FileSearch,
-    files: &[String],
+    files: &[RepoPath],
 ) -> FileSearchRegions {
     let desired_height = (11 + search.results.len().clamp(1, 13) as u16).clamp(15, 24);
     let area = centered_min(frame.area(), 78, 0, 56, desired_height);
@@ -1996,7 +2001,7 @@ pub(super) fn draw_file_search(
         let items = search.results.iter().filter_map(|result| {
             files
                 .get(result.file_index)
-                .map(|path| file_search_item(path, usize::from(list.width)))
+                .map(|path| file_search_item(&path.display(), usize::from(list.width)))
         });
         frame.render_stateful_widget(
             List::new(items).highlight_style(Style::default().bg(palette().selected)),

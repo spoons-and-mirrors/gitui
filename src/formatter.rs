@@ -11,6 +11,7 @@ use crate::{
     filesystem,
     git::CommandOutput,
     process::{self, Limits},
+    repo_path::RepoPath,
 };
 
 const FORMATTER_OUTPUT_LIMIT: usize = 1024 * 1024;
@@ -160,7 +161,11 @@ pub(crate) fn detect(root: &Path, relative: &Path) -> Result<FormatCommand> {
     bail!("Formatter unavailable; install one of: {names}")
 }
 
-pub(crate) fn run(root: &Path, relative: &str, command: &FormatCommand) -> Result<CommandOutput> {
+pub(crate) fn run(
+    root: &Path,
+    relative: &RepoPath,
+    command: &FormatCommand,
+) -> Result<CommandOutput> {
     let file = filesystem::safe_regular_file(root, relative)?;
     let output = process::run(
         Command::new(&command.program)

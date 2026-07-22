@@ -14,6 +14,7 @@ use crate::{
     git::{
         self, Change, CommandOutput, RefreshScope, RepositoryData, RepositoryKind, RepositoryUpdate,
     },
+    repo_path::RepoPath,
     tree::PreparedFileTree,
 };
 
@@ -112,17 +113,17 @@ pub(crate) struct CommandCompletion {
 }
 
 pub(crate) struct FileOperationCompletion {
-    pub(crate) result: Result<Option<String>, String>,
+    pub(crate) result: Result<Option<RepoPath>, String>,
     pub(crate) message: String,
 }
 
 pub(crate) struct DiscardUnstagedCompletion {
-    pub(crate) path: String,
+    pub(crate) path: RepoPath,
     pub(crate) result: Result<(), String>,
 }
 
 pub(crate) struct FormatCompletion {
-    pub(crate) path: String,
+    pub(crate) path: RepoPath,
     pub(crate) formatter: &'static str,
     pub(crate) result: Result<CommandOutput, String>,
 }
@@ -163,14 +164,14 @@ enum WorkerKind {
     },
     Mutation,
     FileOperation {
-        selection: Option<String>,
+        selection: Option<RepoPath>,
         message: String,
     },
     DiscardUnstaged {
-        path: String,
+        path: RepoPath,
     },
     Format {
-        path: String,
+        path: RepoPath,
         formatter: &'static str,
     },
     BranchDelete {
@@ -624,7 +625,7 @@ impl RepositorySession {
         true
     }
 
-    pub(crate) fn start_format(&mut self, path: String, command: FormatCommand) -> bool {
+    pub(crate) fn start_format(&mut self, path: RepoPath, command: FormatCommand) -> bool {
         if !self.operations.can_start(Operation::Format) {
             return false;
         }
@@ -959,7 +960,7 @@ mod tests {
         );
         assert_eq!(
             WorkerCompletion::new(WorkerOutcome::DiscardUnstaged(DiscardUnstagedCompletion {
-                path: "file".to_owned(),
+                path: "file".into(),
                 result: Err("failed".to_owned()),
             }))
             .invalidation(),

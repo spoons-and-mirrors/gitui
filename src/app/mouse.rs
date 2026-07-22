@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::layout::{Position, Rect};
 use std::time::{Duration, Instant};
 
-use crate::selection::SelectionOutcome;
+use crate::{repo_path::RepoPath, selection::SelectionOutcome};
 
 use super::{
     ACTION_ITEMS, App, ExplorerHitTarget, GraphHitTarget, HitTarget, LeftPane,
@@ -506,7 +506,7 @@ impl App {
         }
     }
 
-    fn register_worktree_file_click(&mut self, path: &str, staged: bool) -> bool {
+    fn register_worktree_file_click(&mut self, path: &RepoPath, staged: bool) -> bool {
         let double_click = self.last_worktree_file_click.as_ref().is_some_and(
             |(previous_path, previous_staged, at)| {
                 previous_path == path
@@ -515,11 +515,11 @@ impl App {
             },
         );
         self.last_worktree_file_click =
-            (!double_click).then(|| (path.to_owned(), staged, Instant::now()));
+            (!double_click).then(|| (path.clone(), staged, Instant::now()));
         double_click
     }
 
-    fn open_worktree_file_in_files(&mut self, path: &str) -> bool {
+    fn open_worktree_file_in_files(&mut self, path: &RepoPath) -> bool {
         let viewport = self
             .regions
             .worktree_list

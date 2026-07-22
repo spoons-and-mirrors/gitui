@@ -39,6 +39,7 @@ pub(crate) use workspace_panel::{
 use std::{
     collections::HashMap,
     fs,
+    io::Write,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -54,6 +55,7 @@ use ratatui::{
 use crate::{
     diagnostics, formatter,
     git::{self, RefreshScope, RepositoryData},
+    repo_path::RepoPath,
     repository_session::{LoadKind, Mutation, RepositorySession, WorkerOutcome},
     selection::SelectionState,
 };
@@ -269,8 +271,8 @@ pub struct App {
     editor_request: Option<EditorRequest>,
     pub(crate) file_dialog: Option<FileDialog>,
     file_drag: Option<FileDrag>,
-    last_worktree_file_click: Option<(String, bool, Instant)>,
-    pending_file_selection: Option<String>,
+    last_worktree_file_click: Option<(RepoPath, bool, Instant)>,
+    pending_file_selection: Option<RepoPath>,
     workspace_focus_restore_path: Option<PathBuf>,
     pending_workspace_restore: Option<PathBuf>,
     recent_fetches: HashMap<PathBuf, Instant>,
@@ -1077,9 +1079,20 @@ impl App {
                     && self.changes.pane == LeftPane::Worktree
                     && !self.changes.history_focused =>
             {
-                let repo = self.session.data();
-                if !repo.is_some_and(|repo| self.changes.enter_hunk_selection(repo)) {
-                    self.changes.expand_or_descend_worktree(repo);
+                let invalid_path = self.session.data().and_then(|repo| {
+                    let index = self.changes.selected_change_index(repo)?;
+                    (!repo.changes.get(index)?.path.is_utf8()).then_some(())
+                });
+                if invalid_path.is_some() {
+                    self.notice = Some(
+                        "Hunk actions are unavailable for paths that are not valid UTF-8"
+                            .to_owned(),
+                    );
+                } else {
+                    let repo = self.session.data();
+                    if !repo.is_some_and(|repo| self.changes.enter_hunk_selection(repo)) {
+                        self.changes.expand_or_descend_worktree(repo);
+                    }
                 }
             }
             KeyCode::Left | KeyCode::Char('h')
@@ -1533,9 +1546,9 @@ impl App {
         let path = match self.changes.pane {
             LeftPane::Worktree => {
                 let index = self.changes.selected_change_index(repo)?;
-                repo.changes.get(index)?.path.as_str()
+                repo.changes.get(index)?.path.as_path()
             }
-            LeftPane::Files => self.changes.selected_explorer_file_path(repo)?,
+            LeftPane::Files => self.changes.selected_explorer_file_path(repo)?.as_path(),
         };
         Some((repo.root.clone(), PathBuf::from(path)))
     }
@@ -1545,16 +1558,12 @@ impl App {
             self.notice = Some("Open a workspace first".to_owned());
             return;
         };
-        let Some(path) = self
-            .changes
-            .selected_explorer_file_path(repo)
-            .map(str::to_owned)
-        else {
+        let Some(path) = self.changes.selected_explorer_file_path(repo).cloned() else {
             self.notice = Some("Select a file to format".to_owned());
             return;
         };
         let root = repo.root.clone();
-        let command = match formatter::detect(&root, Path::new(&path)) {
+        let command = match formatter::detect(&root, path.as_path()) {
             Ok(command) => command,
             Err(error) => {
                 self.notice = Some(error.to_string());
@@ -1852,17 +1861,25 @@ impl App {
         }
         let path = self
             .pending_workspace_restore
-            .take()
-            .expect("checked pending workspace restore");
-        self.start_repository_open(path, false);
+            .as_ref()
+            .expect("checked pending workspace restore")
+            .clone();
+        if self.start_repository_open(path, false) {
+            self.pending_workspace_restore = None;
+        }
     }
 
-    fn start_repository_open(&mut self, path: PathBuf, fetch_if_stale: bool) {
+    fn start_repository_open(&mut self, path: PathBuf, fetch_if_stale: bool) -> bool {
         diagnostics::event(format!(
             "workspace open requested path={} fetch_if_stale={fetch_if_stale}",
             path.display()
         ));
         self.flush_commit_draft();
+        if self.commit_draft_due.is_some() {
+            self.workspace_explorer.error =
+                Some("Could not open workspace until the commit draft is saved".to_owned());
+            return false;
+        }
         if self
             .session
             .start_open(path, self.settings.fetch_interval())
@@ -1870,11 +1887,14 @@ impl App {
             self.workspace_fetch_pending = fetch_if_stale;
             self.workspace_explorer.error = None;
             self.notice = Some("Opening workspace…".to_owned());
+            true
         } else if self.session.open_running() {
             self.notice = Some("A workspace is already opening".to_owned());
+            false
         } else {
             self.workspace_explorer.error =
                 Some("Another workspace operation is running".to_owned());
+            false
         }
     }
 
@@ -2012,10 +2032,11 @@ impl App {
     }
 
     pub(crate) fn flush_commit_draft(&mut self) -> bool {
-        if self.commit_draft_due.take().is_none() {
+        if self.commit_draft_due.is_none() {
             return false;
         }
         let Some(path) = &self.commit_draft_path else {
+            self.commit_draft_due = None;
             return false;
         };
         let result = if self.commit_input.is_empty() {
@@ -2025,13 +2046,22 @@ impl App {
                 Err(error) => Err(error),
             }
         } else {
-            fs::write(path, self.commit_input.text())
+            atomic_write_file::AtomicWriteFile::open(path).and_then(|mut file| {
+                file.write_all(self.commit_input.text().as_bytes())?;
+                file.commit()
+            })
         };
         if let Err(error) = result {
+            self.commit_draft_due = Some(Instant::now() + Duration::from_secs(1));
             self.notice = Some(format!("Could not save commit draft: {error}"));
             return true;
         }
+        self.commit_draft_due = None;
         false
+    }
+
+    pub(crate) fn commit_draft_pending(&self) -> bool {
+        self.commit_draft_due.is_some()
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -2126,6 +2156,17 @@ impl App {
     }
 
     fn stage_hunk(&mut self, index: usize, preserve_selection: bool) {
+        let path_is_invalid = self.repository().is_some_and(|repo| {
+            self.changes
+                .selected_change_index(repo)
+                .and_then(|index| repo.changes.get(index))
+                .is_some_and(|change| !change.path.is_utf8())
+        });
+        if path_is_invalid {
+            self.notice =
+                Some("Hunk actions are unavailable for paths that are not valid UTF-8".to_owned());
+            return;
+        }
         let patch = self.changes.diff.clone();
         let path = preserve_selection
             .then(|| {
@@ -2190,7 +2231,7 @@ impl App {
         }
     }
 
-    pub fn selected_explorer_file_path(&self) -> Option<&str> {
+    pub(crate) fn selected_explorer_file_path(&self) -> Option<&RepoPath> {
         self.changes
             .selected_explorer_file_path(self.session.data()?)
     }
@@ -2330,8 +2371,8 @@ fn first_error(stderr: &str, fallback: &str) -> String {
         .to_owned()
 }
 
-fn is_markdown_path(path: &str) -> bool {
-    Path::new(path)
+fn is_markdown_path(path: &RepoPath) -> bool {
+    path.as_path()
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {
@@ -2602,7 +2643,10 @@ mod tests {
                 .is_some_and(|repo| repo.files.iter().any(|path| path == " renamed.txt "))
         });
         assert!(root.join(" renamed.txt ").is_file());
-        assert_eq!(app.selected_explorer_file_path(), Some(" renamed.txt "));
+        assert_eq!(
+            app.selected_explorer_file_path().map(RepoPath::display),
+            Some(" renamed.txt ".to_owned())
+        );
 
         app.open_add_dialog();
         app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
@@ -2616,7 +2660,10 @@ mod tests {
         assert!(root.join("created").is_dir());
 
         let repo = app.session.data().unwrap();
-        assert!(app.changes.select_explorer_path(repo, " renamed.txt ", 20));
+        assert!(
+            app.changes
+                .select_explorer_path(repo, &RepoPath::from(" renamed.txt "), 20)
+        );
         app.regions.explorer_list = Some(Rect::new(0, 10, 30, 20));
         let source = app
             .changes
@@ -2632,7 +2679,11 @@ mod tests {
             .changes
             .explorer_rows()
             .iter()
-            .position(|row| row.directory_path.as_deref() == Some("created"))
+            .position(|row| {
+                row.directory_path
+                    .as_ref()
+                    .is_some_and(|path| path == "created")
+            })
             .unwrap();
         assert!(app.begin_file_drag(Position::new(1, 10 + source as u16)));
         app.update_file_drag(Position::new(1, 10 + target as u16));
@@ -2726,8 +2777,8 @@ mod tests {
             app.repository()
                 .and_then(|repo| app.changes.selected_change_index(repo))
                 .and_then(|index| app.repository()?.changes.get(index))
-                .map(|change| (change.path.as_str(), change.staged)),
-            Some(("tracked.txt", true))
+                .map(|change| (change.path.display(), change.staged)),
+            Some(("tracked.txt".to_owned(), true))
         );
         app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
         assert!(app.file_dialog.is_none());
@@ -2738,6 +2789,52 @@ mod tests {
         assert_eq!(
             fs::read_to_string(root.join("tracked.txt")).unwrap(),
             "staged\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_hunk_actions_for_non_utf8_paths() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        initialize_repository(root);
+        let name = OsString::from_vec(b"invalid-\x80.txt".to_vec());
+        fs::write(root.join(&name), "original\n").unwrap();
+        run_git(root, &["add", "."]);
+        run_git(root, &["commit", "-m", "add invalid path"]);
+        fs::write(root.join(&name), "changed\n").unwrap();
+
+        let mut app = App::new(root.to_path_buf());
+        let change_index = app
+            .repository()
+            .unwrap()
+            .changes
+            .iter()
+            .position(|change| change.path.as_path() == Path::new(&name) && !change.staged)
+            .unwrap();
+        let row = app
+            .changes
+            .worktree_rows(app.repository().unwrap())
+            .iter()
+            .position(|row| row.change_index == Some(change_index))
+            .unwrap();
+        let repo = app.repository().unwrap().clone();
+        assert!(app.changes.select_worktree_row(&repo, row));
+
+        app.stage_hunk(0, false);
+
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("Hunk actions are unavailable for paths that are not valid UTF-8")
+        );
+        assert!(
+            app.repository()
+                .unwrap()
+                .changes
+                .iter()
+                .any(|change| change.path.as_path() == Path::new(&name) && !change.staged)
         );
     }
 
@@ -3005,6 +3102,29 @@ mod tests {
     }
 
     #[test]
+    fn failed_draft_save_blocks_workspace_switch_and_keeps_retry_pending() {
+        let current = tempfile::tempdir().unwrap();
+        initialize_repository(current.path());
+        let next = tempfile::tempdir().unwrap();
+        initialize_repository(next.path());
+        let mut app = App::new(current.path().to_path_buf());
+        app.commit_input.set("unsaved draft");
+        app.commit_draft_path = Some(current.path().join("missing/draft"));
+        app.commit_draft_due = Some(Instant::now());
+        app.pending_workspace_restore = Some(next.path().to_path_buf());
+
+        app.try_start_workspace_restore();
+
+        assert_eq!(app.commit_input.text(), "unsaved draft");
+        assert!(app.commit_draft_due.is_some());
+        assert_eq!(
+            app.pending_workspace_restore,
+            Some(next.path().to_path_buf())
+        );
+        assert!(!app.session.open_running());
+    }
+
+    #[test]
     fn commit_action_submits_an_existing_message() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
@@ -3145,7 +3265,10 @@ mod tests {
         let mut app = App::new(root.to_path_buf());
         let repo = app.repository().unwrap().clone();
         app.changes.set_pane(LeftPane::Files, Some(&repo));
-        assert!(app.changes.select_explorer_path(&repo, "config.jsonc", 20));
+        assert!(
+            app.changes
+                .select_explorer_path(&repo, &RepoPath::from("config.jsonc"), 20)
+        );
 
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
 
@@ -3170,7 +3293,10 @@ mod tests {
         let mut app = App::new(root.to_path_buf());
         let repo = app.repository().unwrap().clone();
         app.changes.set_pane(LeftPane::Files, Some(&repo));
-        assert!(app.changes.select_explorer_path(&repo, "notes.txt", 20));
+        assert!(
+            app.changes
+                .select_explorer_path(&repo, &RepoPath::from("notes.txt"), 20)
+        );
 
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
 

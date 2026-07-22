@@ -2,6 +2,8 @@ use std::cmp::Ordering;
 
 use ratatui::widgets::ListState;
 
+use crate::repo_path::RepoPath;
+
 use super::fuzzy::fuzzy_text_score_lower;
 
 const MAX_RESULTS: usize = 20;
@@ -29,13 +31,13 @@ pub(crate) struct FileSearch {
 }
 
 impl FileSearch {
-    pub(crate) fn new(files: &[String], files_fingerprint: Option<u64>) -> Self {
+    pub(crate) fn new(files: &[RepoPath], files_fingerprint: Option<u64>) -> Self {
         let mut search = Self::default();
         search.reindex(files, files_fingerprint);
         search
     }
 
-    pub(crate) fn reindex(&mut self, files: &[String], files_fingerprint: Option<u64>) {
+    pub(crate) fn reindex(&mut self, files: &[RepoPath], files_fingerprint: Option<u64>) {
         if self.files_fingerprint == files_fingerprint {
             return;
         }
@@ -44,7 +46,7 @@ impl FileSearch {
         let index = files
             .iter()
             .map(|path| {
-                let path_lower = path.to_lowercase();
+                let path_lower = path.display().to_lowercase();
                 let name_start = path_lower.rfind('/').map_or(0, |index| index + 1);
                 IndexedFile {
                     path_lower,
@@ -76,12 +78,12 @@ impl FileSearch {
         self.state = ListState::default();
     }
 
-    pub(crate) fn push(&mut self, character: char, files: &[String]) {
+    pub(crate) fn push(&mut self, character: char, files: &[RepoPath]) {
         self.query.push(character);
         self.refresh(files);
     }
 
-    pub(crate) fn paste(&mut self, text: &str, files: &[String]) {
+    pub(crate) fn paste(&mut self, text: &str, files: &[RepoPath]) {
         self.query.extend(
             text.chars()
                 .filter(|character| !matches!(character, '\r' | '\n')),
@@ -89,12 +91,12 @@ impl FileSearch {
         self.refresh(files);
     }
 
-    pub(crate) fn backspace(&mut self, files: &[String]) {
+    pub(crate) fn backspace(&mut self, files: &[RepoPath]) {
         self.query.pop();
         self.refresh(files);
     }
 
-    pub(crate) fn clear(&mut self, files: &[String]) {
+    pub(crate) fn clear(&mut self, files: &[RepoPath]) {
         self.query.clear();
         self.refresh(files);
     }
@@ -127,7 +129,7 @@ impl FileSearch {
             .map(|result| result.file_index)
     }
 
-    fn refresh(&mut self, files: &[String]) {
+    fn refresh(&mut self, files: &[RepoPath]) {
         self.results.clear();
         self.match_count = 0;
         let query = self.query.trim().to_lowercase();
@@ -174,7 +176,7 @@ fn file_score(terms: &[&str], file: &IndexedFile) -> Option<u32> {
     })
 }
 
-fn result_order(left: FileSearchResult, right: FileSearchResult, files: &[String]) -> Ordering {
+fn result_order(left: FileSearchResult, right: FileSearchResult, files: &[RepoPath]) -> Ordering {
     right
         .score
         .cmp(&left.score)
@@ -183,14 +185,16 @@ fn result_order(left: FileSearchResult, right: FileSearchResult, files: &[String
 
 #[cfg(test)]
 mod tests {
+    use crate::repo_path::RepoPath;
+
     use super::{FileSearch, MAX_RESULTS};
 
     #[test]
     fn favors_basenames_and_matches_multiple_terms() {
         let files = vec![
-            "src/application.rs".to_owned(),
-            "docs/app-notes.md".to_owned(),
-            "src/ui/app_view.rs".to_owned(),
+            RepoPath::from("src/application.rs"),
+            RepoPath::from("docs/app-notes.md"),
+            RepoPath::from("src/ui/app_view.rs"),
         ];
         let mut search = FileSearch::new(&files, Some(1));
 
@@ -205,7 +209,7 @@ mod tests {
     #[test]
     fn keeps_only_the_best_results() {
         let files = (0..100)
-            .map(|index| format!("src/file-{index:03}.rs"))
+            .map(|index| RepoPath::from(format!("src/file-{index:03}.rs")))
             .collect::<Vec<_>>();
         let mut search = FileSearch::new(&files, Some(1));
 

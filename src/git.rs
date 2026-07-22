@@ -3,7 +3,7 @@ mod inventory;
 
 use std::{
     collections::{HashMap, hash_map::DefaultHasher},
-    fs,
+    fs::{self, OpenOptions},
     hash::{Hash, Hasher},
     io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
@@ -14,7 +14,10 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::process::{self, Limits, Output};
+use crate::{
+    process::{self, Limits, Output},
+    repo_path::RepoPath,
+};
 
 const GIT_STDOUT_LIMIT: usize = 64 * 1024 * 1024;
 const GIT_STDERR_LIMIT: usize = 1024 * 1024;
@@ -35,8 +38,8 @@ pub struct RepositoryData {
     pub kind: RepositoryKind,
     pub branch: String,
     pub changes: Vec<Change>,
-    pub files: Vec<String>,
-    pub directories: Vec<String>,
+    pub files: Vec<RepoPath>,
+    pub directories: Vec<RepoPath>,
     pub history: Vec<Commit>,
     pub commits: Vec<Commit>,
     pub files_fingerprint: u64,
@@ -92,8 +95,8 @@ struct WorktreeData {
 
 #[derive(Debug)]
 struct InventoryData {
-    files: Vec<String>,
-    directories: Vec<String>,
+    files: Vec<RepoPath>,
+    directories: Vec<RepoPath>,
     fingerprint: u64,
     truncated: bool,
 }
@@ -180,8 +183,8 @@ impl RepositoryData {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Change {
-    pub path: String,
-    pub original_path: Option<String>,
+    pub path: RepoPath,
+    pub original_path: Option<RepoPath>,
     pub code: char,
     pub staged: bool,
     pub additions: u64,
@@ -192,8 +195,8 @@ pub(crate) fn discard_unstaged(root: &Path, change: &Change) -> Result<()> {
     if change.staged {
         bail!("Cannot discard a staged change");
     }
-    for path in std::iter::once(change.path.as_str()).chain(change.original_path.as_deref()) {
-        let unmerged = run(root, &["ls-files", "--unmerged", "--", path])?;
+    for path in std::iter::once(&change.path).chain(change.original_path.iter()) {
+        let unmerged = run_path_command(root, &["ls-files", "--unmerged", "--"], &[path])?;
         if !unmerged.status.success() {
             bail!("{}", clean_stderr(&unmerged));
         }
@@ -207,17 +210,17 @@ pub(crate) fn discard_unstaged(root: &Path, change: &Change) -> Result<()> {
         'R' => {
             let original_path = change
                 .original_path
-                .as_deref()
+                .as_ref()
                 .ok_or_else(|| anyhow!("Cannot restore rename without its original path"))?;
-            run_ok(root, &["restore", "--worktree", "--", original_path])?;
+            run_path_command_ok(root, &["restore", "--worktree", "--"], &[original_path])?;
             clean_untracked_path(root, &change.path)
         }
-        _ => run_ok(root, &["restore", "--worktree", "--", &change.path]),
+        _ => run_path_command_ok(root, &["restore", "--worktree", "--"], &[&change.path]),
     }
 }
 
-fn clean_untracked_path(root: &Path, path: &str) -> Result<()> {
-    run_ok(root, &["clean", "-f", "--", path])?;
+fn clean_untracked_path(root: &Path, path: &RepoPath) -> Result<()> {
+    run_path_command_ok(root, &["clean", "-f", "--"], &[path])?;
     if fs::symlink_metadata(root.join(path)).is_ok() {
         bail!("Git did not remove untracked path {path}");
     }
@@ -238,7 +241,7 @@ pub struct Commit {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DiffSummary {
-    pub files: Vec<String>,
+    pub files: Vec<RepoPath>,
     pub files_truncated: bool,
     pub additions: u64,
     pub deletions: u64,
@@ -664,7 +667,7 @@ fn change_counts(changes: &[Change]) -> (usize, usize) {
     })
 }
 
-pub fn file_content(root: &Path, relative_path: &str) -> Result<String> {
+pub fn file_content(root: &Path, relative_path: &RepoPath) -> Result<String> {
     const MAX_PREVIEW_BYTES: u64 = 1_048_576;
 
     let path = root.join(relative_path);
@@ -678,6 +681,11 @@ pub fn file_content(root: &Path, relative_path: &str) -> Result<String> {
     if metadata.is_dir() {
         return Ok("Directory\n\nThis path may be a Git submodule.".to_owned());
     }
+    if !metadata.is_file() {
+        return Ok("Preview unavailable for this special file type.".to_owned());
+    }
+    let (file, metadata) = open_regular_file(&path)
+        .with_context(|| format!("could not safely read {}", path.display()))?;
     if metadata.len() > MAX_PREVIEW_BYTES {
         return Ok(format!(
             "File is too large to preview\n\n{} bytes",
@@ -685,9 +693,7 @@ pub fn file_content(root: &Path, relative_path: &str) -> Result<String> {
         ));
     }
     let mut bytes = Vec::with_capacity(metadata.len().min(MAX_PREVIEW_BYTES + 1) as usize);
-    fs::File::open(&path)
-        .with_context(|| format!("could not read {}", path.display()))?
-        .take(MAX_PREVIEW_BYTES + 1)
+    file.take(MAX_PREVIEW_BYTES + 1)
         .read_to_end(&mut bytes)
         .with_context(|| format!("could not read {}", path.display()))?;
     if bytes.len() > MAX_PREVIEW_BYTES as usize {
@@ -702,32 +708,27 @@ pub fn file_content(root: &Path, relative_path: &str) -> Result<String> {
 }
 
 pub fn stage(root: &Path, change: &Change) -> Result<()> {
-    let mut args = vec!["add", "--"];
+    let mut paths = Vec::new();
     if let Some(original) = &change.original_path {
-        args.push(original);
+        paths.push(original);
     }
-    args.push(&change.path);
-    run_ok(root, &args)
+    paths.push(&change.path);
+    run_path_command_ok(root, &["add", "--"], &paths)
 }
 
 pub fn unstage(root: &Path, change: &Change) -> Result<()> {
-    let mut args = vec!["restore", "--staged", "--"];
+    let mut paths = Vec::new();
     if let Some(original) = &change.original_path {
-        args.push(original);
+        paths.push(original);
     }
-    args.push(&change.path);
-    let output = run(root, &args)?;
+    paths.push(&change.path);
+    let output = run_path_command(root, &["restore", "--staged", "--"], &paths)?;
     if output.status.success() {
         return Ok(());
     }
 
     // `restore --staged` cannot address an unborn HEAD, while reset can.
-    let mut args = vec!["reset", "--"];
-    if let Some(original) = &change.original_path {
-        args.push(original);
-    }
-    args.push(&change.path);
-    run_ok(root, &args)
+    run_path_command_ok(root, &["reset", "--"], &paths)
 }
 
 pub fn stage_all(root: &Path) -> Result<()> {
@@ -838,7 +839,8 @@ pub fn worktree_signature(root: &Path) -> Result<u64> {
             continue;
         };
         path.hash(&mut signature);
-        let path = root.join(String::from_utf8_lossy(path).as_ref());
+        let path = RepoPath::from_git_bytes(path)?;
+        let path = root.join(path);
         if let Ok(metadata) = fs::symlink_metadata(path) {
             metadata.len().hash(&mut signature);
             metadata
@@ -868,13 +870,28 @@ pub fn diff(root: &Path, change: &Change) -> Result<String> {
         const MAX_UNTRACKED_PREVIEW_LINES: usize = 500;
 
         let path = root.join(&change.path);
-        let metadata =
-            fs::metadata(&path).with_context(|| format!("could not inspect {}", path.display()))?;
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("could not inspect {}", path.display()))?;
+        if metadata.file_type().is_symlink() {
+            let target = fs::read_link(&path)
+                .with_context(|| format!("could not read link {}", path.display()))?;
+            return Ok(format!(
+                "Untracked symbolic link: {}\n\nTarget: {}",
+                change.path,
+                target.display()
+            ));
+        }
+        if !metadata.is_file() {
+            return Ok(format!(
+                "Untracked special file: {}\n\nPreview unavailable for this file type.",
+                change.path
+            ));
+        }
+        let (file, metadata) = open_regular_file(&path)
+            .with_context(|| format!("could not safely read {}", path.display()))?;
         let mut bytes =
             Vec::with_capacity(metadata.len().min(MAX_UNTRACKED_PREVIEW_BYTES + 1) as usize);
-        fs::File::open(&path)
-            .with_context(|| format!("could not read {}", path.display()))?
-            .take(MAX_UNTRACKED_PREVIEW_BYTES + 1)
+        file.take(MAX_UNTRACKED_PREVIEW_BYTES + 1)
             .read_to_end(&mut bytes)
             .with_context(|| format!("could not read {}", path.display()))?;
         if bytes.contains(&0) {
@@ -901,18 +918,20 @@ pub fn diff(root: &Path, change: &Change) -> Result<String> {
         ));
     }
 
-    let mut args = if change.staged {
-        vec!["diff", "--cached", "--no-ext-diff", "--unified=3", "--"]
+    let prefix = if change.staged {
+        &["diff", "--cached", "--no-ext-diff", "--unified=3", "--"][..]
     } else {
-        vec!["diff", "--no-ext-diff", "--unified=3", "--"]
+        &["diff", "--no-ext-diff", "--unified=3", "--"][..]
     };
+    let mut paths = Vec::new();
     if let Some(original) = &change.original_path {
-        args.push(original);
+        paths.push(original);
     }
-    args.push(&change.path);
-    let output = run_limited(
+    paths.push(&change.path);
+    let output = run_path_command_limited(
         root,
-        &args,
+        prefix,
+        &paths,
         Limits::new(DIFF_PREVIEW_LIMIT, GIT_STDERR_LIMIT, GIT_TIMEOUT),
     )?;
     if output.timed_out {
@@ -963,10 +982,10 @@ pub fn commit_summaries(root: &Path, oids: &[String]) -> Result<HashMap<String, 
     if !output.status.success() {
         bail!("{}", clean_stderr(&output));
     }
-    Ok(parse_commit_summaries(&output.stdout))
+    parse_commit_summaries(&output.stdout)
 }
 
-fn parse_commit_summaries(bytes: &[u8]) -> HashMap<String, DiffSummary> {
+fn parse_commit_summaries(bytes: &[u8]) -> Result<HashMap<String, DiffSummary>> {
     const MAX_FILES_PER_SUMMARY: usize = 2_000;
     let mut summaries = HashMap::new();
     for record in bytes.split(|byte| *byte == 0x1e) {
@@ -998,16 +1017,14 @@ fn parse_commit_summaries(bytes: &[u8]) -> HashMap<String, DiffSummary> {
                 .deletions
                 .saturating_add(String::from_utf8_lossy(deletions).parse().unwrap_or(0));
             if summary.files.len() < MAX_FILES_PER_SUMMARY {
-                summary
-                    .files
-                    .push(String::from_utf8_lossy(path).into_owned());
+                summary.files.push(RepoPath::from_git_bytes(path)?);
             } else {
                 summary.files_truncated = true;
             }
         }
         summaries.insert(oid, summary);
     }
-    summaries
+    Ok(summaries)
 }
 
 fn branch_name(root: &Path) -> Result<String> {
@@ -1035,10 +1052,10 @@ fn status(root: &Path) -> Result<Vec<Change>> {
     if !output.status.success() {
         bail!("{}", clean_stderr(&output));
     }
-    Ok(parse_status(&output.stdout))
+    parse_status(&output.stdout)
 }
 
-fn parse_status(bytes: &[u8]) -> Vec<Change> {
+fn parse_status(bytes: &[u8]) -> Result<Vec<Change>> {
     let fields: Vec<&[u8]> = bytes
         .split(|byte| *byte == 0)
         .filter(|field| !field.is_empty())
@@ -1055,12 +1072,13 @@ fn parse_status(bytes: &[u8]) -> Vec<Change> {
 
         let x = field[0] as char;
         let y = field[1] as char;
-        let path = String::from_utf8_lossy(&field[3..]).into_owned();
+        let path = RepoPath::from_git_bytes(&field[3..])?;
         let renamed = matches!(x, 'R' | 'C') || matches!(y, 'R' | 'C');
         let original_path = renamed
             .then(|| fields.get(index + 1))
             .flatten()
-            .map(|path| String::from_utf8_lossy(path).into_owned());
+            .map(|path| RepoPath::from_git_bytes(path))
+            .transpose()?;
 
         if x != ' ' && x != '?' && x != '!' {
             changes.push(Change {
@@ -1090,7 +1108,7 @@ fn parse_status(bytes: &[u8]) -> Vec<Change> {
     }
 
     changes.sort_by(|a, b| b.staged.cmp(&a.staged).then_with(|| a.path.cmp(&b.path)));
-    changes
+    Ok(changes)
 }
 
 fn populate_diff_stats(root: &Path, changes: &mut [Change]) -> Result<()> {
@@ -1114,7 +1132,7 @@ fn populate_diff_stats(root: &Path, changes: &mut [Change]) -> Result<()> {
     Ok(())
 }
 
-fn diff_stats(root: &Path, staged: bool) -> Result<HashMap<String, (u64, u64)>> {
+fn diff_stats(root: &Path, staged: bool) -> Result<HashMap<RepoPath, (u64, u64)>> {
     let args = if staged {
         ["diff", "--cached", "--no-renames", "--numstat", "-z"].as_slice()
     } else {
@@ -1134,16 +1152,14 @@ fn diff_stats(root: &Path, staged: bool) -> Result<HashMap<String, (u64, u64)>> 
         };
         let additions = String::from_utf8_lossy(additions).parse().unwrap_or(0);
         let deletions = String::from_utf8_lossy(deletions).parse().unwrap_or(0);
-        stats.insert(
-            String::from_utf8_lossy(path).into_owned(),
-            (additions, deletions),
-        );
+        stats.insert(RepoPath::from_git_bytes(path)?, (additions, deletions));
     }
     Ok(stats)
 }
 
 fn count_file_lines(path: &Path) -> Result<u64> {
-    let mut reader = BufReader::new(fs::File::open(path)?);
+    let (file, _) = open_regular_file(path)?;
+    let mut reader = BufReader::new(file);
     let mut lines = 0u64;
     let mut has_bytes = false;
     let mut ends_with_newline = true;
@@ -1162,6 +1178,22 @@ fn count_file_lines(path: &Path) -> Result<u64> {
         reader.consume(consumed);
     }
     Ok(lines + u64::from(has_bytes && !ends_with_newline))
+}
+
+fn open_regular_file(path: &Path) -> Result<(fs::File, fs::Metadata)> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        bail!("path is not a regular file");
+    }
+    Ok((file, metadata))
 }
 
 fn log(root: &Path) -> Result<Vec<Commit>> {
@@ -1262,6 +1294,27 @@ fn run_limited(root: &Path, args: &[&str], limits: Limits) -> Result<Output> {
         .with_context(|| format!("could not run git {}", args.join(" ")))
 }
 
+fn run_path_command(root: &Path, args: &[&str], paths: &[&RepoPath]) -> Result<Output> {
+    let output = run_path_command_limited(root, args, paths, git_limits())?;
+    ensure_complete(&output, &format!("git {}", args.join(" ")))?;
+    Ok(output)
+}
+
+fn run_path_command_limited(
+    root: &Path,
+    args: &[&str],
+    paths: &[&RepoPath],
+    limits: Limits,
+) -> Result<Output> {
+    process::run(
+        base_command(root)
+            .args(args)
+            .args(paths.iter().map(|path| path.as_os_str())),
+        limits,
+    )
+    .with_context(|| format!("could not run git {}", args.join(" ")))
+}
+
 fn git_limits() -> Limits {
     Limits::new(GIT_STDOUT_LIMIT, GIT_STDERR_LIMIT, GIT_TIMEOUT)
 }
@@ -1294,6 +1347,14 @@ fn base_command(root: &Path) -> Command {
 
 fn run_ok(root: &Path, args: &[&str]) -> Result<()> {
     let output = run(root, args)?;
+    if !output.status.success() {
+        bail!("{}", clean_stderr(&output));
+    }
+    Ok(())
+}
+
+fn run_path_command_ok(root: &Path, args: &[&str], paths: &[&RepoPath]) -> Result<()> {
+    let output = run_path_command(root, args, paths)?;
     if !output.status.success() {
         bail!("{}", clean_stderr(&output));
     }
@@ -1363,7 +1424,7 @@ mod tests {
 
     #[test]
     fn parses_staged_and_unstaged_status_entries() {
-        let parsed = parse_status(b"M  staged.rs\0 M changed.rs\0?? new.rs\0MM both.rs\0");
+        let parsed = parse_status(b"M  staged.rs\0 M changed.rs\0?? new.rs\0MM both.rs\0").unwrap();
         assert_eq!(parsed.len(), 5);
         assert!(
             parsed
@@ -1386,10 +1447,69 @@ mod tests {
 
     #[test]
     fn preserves_both_paths_for_renames() {
-        let parsed = parse_status(b"R  new.rs\0old.rs\0");
+        let parsed = parse_status(b"R  new.rs\0old.rs\0").unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].path, "new.rs");
-        assert_eq!(parsed[0].original_path.as_deref(), Some("old.rs"));
+        assert_eq!(parsed[0].original_path.as_ref().unwrap(), "old.rs");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn untracked_symlink_preview_does_not_read_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        fs::write(outside.path(), "outside secret").unwrap();
+        symlink(outside.path(), workspace.path().join("link")).unwrap();
+        let change = Change {
+            path: RepoPath::from("link"),
+            original_path: None,
+            code: '?',
+            staged: false,
+            additions: 0,
+            deletions: 0,
+        };
+
+        let preview = diff(workspace.path(), &change).unwrap();
+
+        assert!(preview.contains("Untracked symbolic link"));
+        assert!(!preview.contains("outside secret"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn special_files_are_rejected_before_opening() {
+        let workspace = tempfile::tempdir().unwrap();
+        let fifo = workspace.path().join("pipe");
+        assert!(
+            Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let path = RepoPath::from("pipe");
+        let change = Change {
+            path: path.clone(),
+            original_path: None,
+            code: '?',
+            staged: false,
+            additions: 0,
+            deletions: 0,
+        };
+
+        assert!(
+            file_content(workspace.path(), &path)
+                .unwrap()
+                .contains("special file")
+        );
+        assert!(
+            diff(workspace.path(), &change)
+                .unwrap()
+                .contains("Untracked special file")
+        );
+        assert!(count_file_lines(&fifo).is_err());
     }
 
     #[test]
@@ -1518,7 +1638,10 @@ mod tests {
                 .iter()
                 .any(|change| change.path == "ignored/cache.txt")
         );
-        assert_eq!(file_content(root, "main.txt").unwrap(), "changed\n");
+        assert_eq!(
+            file_content(root, &RepoPath::from("main.txt")).unwrap(),
+            "changed\n"
+        );
         let selected_commit_diff = commit_diff(root, &repo.history[0].oid).unwrap();
         assert!(selected_commit_diff.contains("diff --git"));
 
@@ -1544,6 +1667,89 @@ mod tests {
 
         let fetched = super::fetch(root).unwrap();
         assert!(fetched.success, "{}", fetched.stderr);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preserves_invalid_utf8_inventory_status_and_whole_file_operations() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "-b", "main"]);
+        git(root, &["config", "user.name", "Test Author"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+
+        let first_name = OsString::from_vec(b"collision-\x80.txt".to_vec());
+        let second_name = OsString::from_vec(b"collision-\x81.txt".to_vec());
+        let first_path = RepoPath::from(PathBuf::from(&first_name));
+        let second_path = RepoPath::from(PathBuf::from(&second_name));
+        assert_eq!(first_name.to_string_lossy(), second_name.to_string_lossy());
+
+        fs::write(root.join(&first_name), "first original\n").unwrap();
+        fs::write(root.join(&second_name), "second original\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-m", "invalid byte paths"]);
+        fs::write(root.join(&first_name), "first changed\n").unwrap();
+        fs::write(root.join(&second_name), "second changed\n").unwrap();
+
+        let repo = load(root).unwrap();
+        assert!(repo.files.contains(&first_path));
+        assert!(repo.files.contains(&second_path));
+        let first = repo
+            .changes
+            .iter()
+            .find(|change| change.path == first_path)
+            .unwrap()
+            .clone();
+        let second = repo
+            .changes
+            .iter()
+            .find(|change| change.path == second_path)
+            .unwrap();
+        assert_ne!(first.path, second.path);
+        let first_diff = diff(root, &first).unwrap();
+        assert!(first_diff.contains("first changed"));
+        assert!(!first_diff.contains("second changed"));
+
+        stage(root, &first).unwrap();
+        let staged = load(root).unwrap();
+        assert!(
+            staged
+                .changes
+                .iter()
+                .any(|change| change.path == first_path && change.staged)
+        );
+        assert!(
+            staged
+                .changes
+                .iter()
+                .any(|change| change.path == second_path && !change.staged)
+        );
+
+        let staged_first = staged
+            .changes
+            .iter()
+            .find(|change| change.path == first_path && change.staged)
+            .unwrap();
+        unstage(root, staged_first).unwrap();
+        let unstaged = load(root).unwrap();
+        let unstaged_first = unstaged
+            .changes
+            .iter()
+            .find(|change| change.path == first_path && !change.staged)
+            .unwrap()
+            .clone();
+        discard_unstaged(root, &unstaged_first).unwrap();
+
+        assert_eq!(
+            fs::read(root.join(&first_name)).unwrap(),
+            b"first original\n"
+        );
+        assert_eq!(
+            fs::read(root.join(&second_name)).unwrap(),
+            b"second changed\n"
+        );
     }
 
     #[test]
@@ -1624,7 +1830,7 @@ mod tests {
         let root = directory.path();
         fs::write(root.join("large.txt"), vec![b'x'; 256 * 1024]).unwrap();
         let change = Change {
-            path: "large.txt".to_owned(),
+            path: "large.txt".into(),
             original_path: None,
             code: '?',
             staged: false,
@@ -1687,12 +1893,13 @@ mod tests {
     fn parses_batched_commit_change_summaries() {
         let summaries = parse_commit_summaries(
             b"\x1eabc123\0\0\n12\t3\tsrc/app.rs\0-\t-\tassets/logo.png\0\x1edef456\0\0\n4\t0\tREADME.md\0",
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             summaries["abc123"],
             DiffSummary {
-                files: vec!["src/app.rs".to_owned(), "assets/logo.png".to_owned()],
+                files: vec!["src/app.rs".into(), "assets/logo.png".into()],
                 files_truncated: false,
                 additions: 12,
                 deletions: 3,
@@ -1701,7 +1908,7 @@ mod tests {
         assert_eq!(
             summaries["def456"],
             DiffSummary {
-                files: vec!["README.md".to_owned()],
+                files: vec!["README.md".into()],
                 files_truncated: false,
                 additions: 4,
                 deletions: 0,
@@ -1716,7 +1923,7 @@ mod tests {
             output.extend_from_slice(format!("1\t2\tfile-{index}\0").as_bytes());
         }
 
-        let summaries = parse_commit_summaries(&output);
+        let summaries = parse_commit_summaries(&output).unwrap();
         let summary = &summaries["abc123"];
         assert_eq!(summary.files.len(), 2_000);
         assert!(summary.files_truncated);
@@ -1874,8 +2081,8 @@ mod tests {
         git(root, &["commit", "-m", "base"]);
         fs::rename(root.join("old.txt"), root.join("new.txt")).unwrap();
         let change = Change {
-            path: "new.txt".to_owned(),
-            original_path: Some("old.txt".to_owned()),
+            path: "new.txt".into(),
+            original_path: Some("old.txt".into()),
             code: 'R',
             staged: false,
             additions: 0,

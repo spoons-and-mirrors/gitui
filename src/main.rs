@@ -4,13 +4,14 @@ mod filesystem;
 mod formatter;
 mod git;
 mod process;
+mod repo_path;
 mod repository_session;
 mod selection;
 mod theme;
 mod tree;
 mod ui;
 
-use std::{io, path::PathBuf, process::Command, time::Duration};
+use std::{io, path::PathBuf, process::Command, thread, time::Duration};
 
 use anyhow::Result;
 use app::{App, EditorRequest};
@@ -127,7 +128,13 @@ fn main() -> Result<()> {
         }
     }
 
-    app.flush_commit_draft();
+    for _ in 0..3 {
+        app.flush_commit_draft();
+        if !app.commit_draft_pending() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
     diagnostics::event("shutdown clean".to_owned());
 
     Ok(())

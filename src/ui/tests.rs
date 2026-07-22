@@ -14,6 +14,7 @@ use crate::app::{
     HitTarget, LeftPane, Mode, PullRequest, RemoteItems, RepositoryBrowserHitTarget, Settings,
     SettingsStore, View, WorkspaceDropTarget, WorkspacePanel, WorkspacePanelHitTarget,
 };
+use crate::repo_path::RepoPath;
 
 use super::draw;
 
@@ -174,7 +175,11 @@ fn renders_every_primary_surface() {
         .changes
         .explorer_rows()
         .iter()
-        .position(|row| row.directory_path.as_deref() == Some("fixtures"))
+        .position(|row| {
+            row.directory_path
+                .as_ref()
+                .is_some_and(|path| path == "fixtures")
+        })
         .unwrap();
     assert_eq!(
         app.changes.explorer_rows()[directory_row].directory_expanded,
@@ -200,10 +205,7 @@ fn renders_every_primary_surface() {
         explorer.y + selected_file_row as u16,
     );
     wait_for_preview(&mut app);
-    assert_eq!(
-        app.selected_explorer_file_path(),
-        Some(selected_file.as_str())
-    );
+    assert_eq!(app.selected_explorer_file_path(), Some(&selected_file));
     assert_eq!(
         app.changes.diff,
         fs::read_to_string(root.join(&selected_file)).unwrap()
@@ -1894,7 +1896,11 @@ fn keeps_file_tree_connectors_faint_and_folder_names_bright() {
         .changes
         .explorer_rows()
         .iter()
-        .position(|row| row.directory_path.as_deref() == Some("src"))
+        .position(|row| {
+            row.directory_path
+                .as_ref()
+                .is_some_and(|path| path == "src")
+        })
         .unwrap();
     app.changes.explorer_state.select(Some(src));
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -1902,7 +1908,11 @@ fn keeps_file_tree_connectors_faint_and_folder_names_bright() {
         .changes
         .explorer_rows()
         .iter()
-        .position(|row| row.directory_path.as_deref() == Some("src/nested"))
+        .position(|row| {
+            row.directory_path
+                .as_ref()
+                .is_some_and(|path| path == "src/nested")
+        })
         .unwrap();
     app.changes.explorer_state.select(Some(nested));
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -1915,7 +1925,11 @@ fn keeps_file_tree_connectors_faint_and_folder_names_bright() {
 
     let src = rows
         .iter()
-        .position(|row| row.directory_path.as_deref() == Some("src"))
+        .position(|row| {
+            row.directory_path
+                .as_ref()
+                .is_some_and(|path| path == "src")
+        })
         .unwrap();
     let src_y = list.y + src.saturating_sub(app.changes.explorer_scroll) as u16;
     assert_eq!(
@@ -2043,7 +2057,11 @@ fn colors_collapsed_folders_for_the_changes_they_contain() {
     ] {
         let row_index = rows
             .iter()
-            .position(|row| row.directory_path.as_deref() == Some(path))
+            .position(|row| {
+                row.directory_path
+                    .as_ref()
+                    .is_some_and(|directory| directory == path)
+            })
             .unwrap();
         assert_eq!(rows[row_index].directory_expanded, Some(false));
         let x = list.x + rows[row_index].prefix.chars().count() as u16;
@@ -2229,8 +2247,8 @@ fn fuzzy_searches_and_opens_repository_files() {
     assert_eq!(app.view, View::Changes);
     assert_eq!(app.changes.pane, LeftPane::Files);
     assert_eq!(
-        app.selected_explorer_file_path(),
-        Some("src/components/profile_card.rs")
+        app.selected_explorer_file_path().map(RepoPath::display),
+        Some("src/components/profile_card.rs".to_owned())
     );
     assert_eq!(app.changes.diff, "pub struct ProfileCard;\n");
     assert!(
@@ -2345,7 +2363,10 @@ fn double_clicking_worktree_files_opens_them_in_files() {
 
         assert_eq!(app.changes.pane, LeftPane::Files);
         assert_eq!(app.view, View::Changes);
-        assert_eq!(app.selected_explorer_file_path(), Some(path));
+        assert_eq!(
+            app.selected_explorer_file_path().map(RepoPath::display),
+            Some(path.to_owned())
+        );
         assert_eq!(app.changes.diff, content);
 
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
@@ -2371,7 +2392,10 @@ fn renders_markdown_files_and_toggles_back_to_source() {
     app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
     wait_for_preview(&mut app);
     assert_eq!(app.changes.pane, LeftPane::Files);
-    assert_eq!(app.selected_explorer_file_path(), Some("README.md"));
+    assert_eq!(
+        app.selected_explorer_file_path().map(RepoPath::display),
+        Some("README.md".to_owned())
+    );
 
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();

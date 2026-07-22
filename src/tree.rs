@@ -1,6 +1,13 @@
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    ffi::OsString,
+    path::Component,
+};
 
-use crate::git::Change;
+use crate::{
+    git::Change,
+    repo_path::{RepoPath, display_os_str},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorktreeRow {
@@ -8,7 +15,7 @@ pub(crate) struct WorktreeRow {
     pub(crate) label: String,
     pub(crate) depth: usize,
     pub(crate) change_index: Option<usize>,
-    pub(crate) directory_path: Option<String>,
+    pub(crate) directory_path: Option<RepoPath>,
     pub(crate) directory_expanded: Option<bool>,
     pub(crate) section: Option<WorktreeSection>,
     pub(crate) section_stats: Option<(u64, u64)>,
@@ -27,14 +34,14 @@ pub(crate) struct ExplorerRow {
     pub(crate) label: String,
     pub(crate) depth: usize,
     pub(crate) file_index: Option<usize>,
-    pub(crate) directory_path: Option<String>,
+    pub(crate) directory_path: Option<RepoPath>,
     pub(crate) directory_expanded: Option<bool>,
     pub(crate) descendant_count: usize,
 }
 
 #[derive(Default)]
 struct Node {
-    children: BTreeMap<String, Node>,
+    children: BTreeMap<OsString, Node>,
     entries: Vec<usize>,
     descendant_count: usize,
     explicit_directory: bool,
@@ -49,7 +56,7 @@ pub(crate) struct PreparedFileTree {
 }
 
 impl PreparedFileTree {
-    pub(crate) fn new(files: &[String], directories: &[String]) -> Self {
+    pub(crate) fn new(files: &[RepoPath], directories: &[RepoPath]) -> Self {
         Self {
             tree: FileTree::new(files, directories),
         }
@@ -61,7 +68,7 @@ impl PreparedFileTree {
 }
 
 impl FileTree {
-    pub(crate) fn new(files: &[String], directories: &[String]) -> Self {
+    pub(crate) fn new(files: &[RepoPath], directories: &[RepoPath]) -> Self {
         let _activity = crate::diagnostics::activity(
             "build-file-tree",
             format!("files={} directories={}", files.len(), directories.len()),
@@ -77,11 +84,11 @@ impl FileTree {
     }
 
     #[cfg(test)]
-    fn rows(&self, collapsed: &HashSet<String>) -> Vec<ExplorerRow> {
+    fn rows(&self, collapsed: &HashSet<RepoPath>) -> Vec<ExplorerRow> {
         let mut rows = Vec::new();
         flatten_file_tree(
             &self.root,
-            "",
+            &RepoPath::default(),
             &[],
             true,
             &|path| !collapsed.contains(path),
@@ -90,11 +97,11 @@ impl FileTree {
         rows
     }
 
-    pub(crate) fn rows_expanded(&self, expanded: &HashSet<String>) -> Vec<ExplorerRow> {
+    pub(crate) fn rows_expanded(&self, expanded: &HashSet<RepoPath>) -> Vec<ExplorerRow> {
         let mut rows = Vec::new();
         flatten_file_tree(
             &self.root,
-            "",
+            &RepoPath::default(),
             &[],
             true,
             &|path| expanded.contains(path),
@@ -145,7 +152,7 @@ impl WorktreeTree {
         Self { sections }
     }
 
-    pub(crate) fn rows(&self, collapsed: &HashSet<String>) -> Vec<WorktreeRow> {
+    pub(crate) fn rows(&self, collapsed: &HashSet<RepoPath>) -> Vec<WorktreeRow> {
         let mut rows = Vec::new();
         for tree in &self.sections {
             append_worktree_section(tree, collapsed, &mut rows);
@@ -156,7 +163,7 @@ impl WorktreeTree {
 
 fn append_worktree_section(
     tree: &WorktreeSectionTree,
-    collapsed: &HashSet<String>,
+    collapsed: &HashSet<RepoPath>,
     rows: &mut Vec<WorktreeRow>,
 ) {
     rows.push(WorktreeRow {
@@ -184,44 +191,49 @@ fn append_worktree_section(
         section_stats: Some((tree.additions, tree.deletions)),
         descendant_count: tree.root.descendant_count,
     });
-    flatten_worktree(&tree.root, "", &[], true, collapsed, rows);
+    flatten_worktree(&tree.root, &RepoPath::default(), &[], true, collapsed, rows);
 }
 
-fn insert_path(root: &mut Node, path: &str, entry_index: usize) {
+fn insert_path(root: &mut Node, path: &RepoPath, entry_index: usize) {
     let mut node = root;
     node.descendant_count += 1;
-    for component in path.split('/').filter(|component| !component.is_empty()) {
+    for component in path.as_path().components() {
+        let Component::Normal(component) = component else {
+            continue;
+        };
         node = node.children.entry(component.to_owned()).or_default();
         node.descendant_count += 1;
     }
     node.entries.push(entry_index);
 }
 
-fn insert_directory(root: &mut Node, path: &str) {
+fn insert_directory(root: &mut Node, path: &RepoPath) {
     let mut node = root;
-    for component in path.split('/').filter(|component| !component.is_empty()) {
+    for component in path.as_path().components() {
+        let Component::Normal(component) = component else {
+            continue;
+        };
         node = node.children.entry(component.to_owned()).or_default();
     }
     node.explicit_directory = true;
 }
 
-fn sorted_children(node: &Node) -> Vec<(&String, &Node)> {
+fn sorted_children(node: &Node) -> Vec<(&OsString, &Node)> {
     let mut children: Vec<_> = node.children.iter().collect();
-    children.sort_by_key(|(name, child)| {
-        (
-            child.children.is_empty() && !child.explicit_directory,
-            name.as_str(),
-        )
+    children.sort_by(|(left_name, left), (right_name, right)| {
+        (left.children.is_empty() && !left.explicit_directory)
+            .cmp(&(right.children.is_empty() && !right.explicit_directory))
+            .then_with(|| left_name.cmp(right_name))
     });
     children
 }
 
 fn flatten_file_tree(
     node: &Node,
-    parent_path: &str,
+    parent_path: &RepoPath,
     lineage: &[bool],
     top_level: bool,
-    is_expanded: &impl Fn(&str) -> bool,
+    is_expanded: &impl Fn(&RepoPath) -> bool,
     rows: &mut Vec<ExplorerRow>,
 ) {
     let children = sorted_children(node);
@@ -229,13 +241,13 @@ fn flatten_file_tree(
     for (position, (name, child)) in children.into_iter().enumerate() {
         let is_last = position + 1 == child_count;
         let first_root = top_level && position == 0;
-        let mut path = join_path(parent_path, name);
+        let mut path = parent_path.join(name);
         let prefix = tree_prefix(lineage, is_last, first_root);
         if child.children.is_empty() && !child.explicit_directory {
             if let Some(file_index) = child.entries.first() {
                 rows.push(ExplorerRow {
                     prefix,
-                    label: name.clone(),
+                    label: display_os_str(name),
                     depth: lineage.len(),
                     file_index: Some(*file_index),
                     directory_path: None,
@@ -246,7 +258,7 @@ fn flatten_file_tree(
             continue;
         }
 
-        let mut label = name.clone();
+        let mut label = display_os_str(name);
         let mut directory = child;
         while !directory.explicit_directory
             && directory.entries.is_empty()
@@ -257,8 +269,8 @@ fn flatten_file_tree(
                 break;
             }
             label.push('/');
-            label.push_str(next_name);
-            path = join_path(&path, next_name);
+            label.push_str(&display_os_str(next_name));
+            path = path.join(next_name);
             directory = next;
         }
         let expanded = is_expanded(&path);
@@ -281,10 +293,10 @@ fn flatten_file_tree(
 
 fn flatten_worktree(
     node: &Node,
-    parent_path: &str,
+    parent_path: &RepoPath,
     lineage: &[bool],
     top_level: bool,
-    collapsed: &HashSet<String>,
+    collapsed: &HashSet<RepoPath>,
     rows: &mut Vec<WorktreeRow>,
 ) {
     let children = sorted_children(node);
@@ -292,7 +304,7 @@ fn flatten_worktree(
     for (position, (name, child)) in children.into_iter().enumerate() {
         let is_last = position + 1 == child_count;
         let first_root = top_level && position == 0;
-        let mut path = join_path(parent_path, name);
+        let mut path = parent_path.join(name);
         let prefix = tree_prefix(lineage, is_last, first_root);
 
         if child.children.is_empty() {
@@ -303,7 +315,7 @@ fn flatten_worktree(
                     } else {
                         tree_prefix(lineage, is_last, first_root)
                     },
-                    label: name.clone(),
+                    label: display_os_str(name),
                     depth: lineage.len(),
                     change_index: Some(*change_index),
                     directory_path: None,
@@ -317,7 +329,7 @@ fn flatten_worktree(
             for change_index in &child.entries {
                 rows.push(WorktreeRow {
                     prefix: prefix.clone(),
-                    label: name.clone(),
+                    label: display_os_str(name),
                     depth: lineage.len(),
                     change_index: Some(*change_index),
                     directory_path: None,
@@ -327,7 +339,7 @@ fn flatten_worktree(
                     descendant_count: 1,
                 });
             }
-            let mut label = name.clone();
+            let mut label = display_os_str(name);
             let mut directory = child;
             while directory.entries.is_empty() && directory.children.len() == 1 {
                 let (next_name, next) = directory.children.first_key_value().expect("one child");
@@ -335,8 +347,8 @@ fn flatten_worktree(
                     break;
                 }
                 label.push('/');
-                label.push_str(next_name);
-                path = join_path(&path, next_name);
+                label.push_str(&display_os_str(next_name));
+                path = path.join(next_name);
                 directory = next;
             }
             let expanded = !collapsed.contains(&path);
@@ -363,21 +375,13 @@ fn flatten_worktree(
 }
 
 #[cfg(test)]
-fn build_worktree(changes: &[Change], collapsed: &HashSet<String>) -> Vec<WorktreeRow> {
+fn build_worktree(changes: &[Change], collapsed: &HashSet<RepoPath>) -> Vec<WorktreeRow> {
     WorktreeTree::new(changes).rows(collapsed)
 }
 
 #[cfg(test)]
-fn build_file_tree(files: &[String], collapsed: &HashSet<String>) -> Vec<ExplorerRow> {
+fn build_file_tree(files: &[RepoPath], collapsed: &HashSet<RepoPath>) -> Vec<ExplorerRow> {
     FileTree::new(files, &[]).rows(collapsed)
-}
-
-fn join_path(parent: &str, name: &str) -> String {
-    if parent.is_empty() {
-        name.to_owned()
-    } else {
-        format!("{parent}/{name}")
-    }
 }
 
 fn tree_prefix(lineage: &[bool], _is_last: bool, _first_root: bool) -> String {
@@ -424,7 +428,7 @@ mod tests {
         assert_eq!(rows[5].change_index, Some(1));
         assert_eq!(rows[8].change_index, Some(2));
 
-        let collapsed = HashSet::from(["cli/crates/sleev-tui".to_owned()]);
+        let collapsed = HashSet::from([RepoPath::from("cli/crates/sleev-tui")]);
         let rows = build_worktree(&changes, &collapsed);
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[2].directory_expanded, Some(false));
@@ -468,19 +472,25 @@ mod tests {
         assert!(rows.iter().any(|row| row.change_index == Some(3)));
         let directory = rows
             .iter()
-            .find(|row| row.directory_path.as_deref() == Some("foo"))
+            .find(|row| {
+                row.directory_path
+                    .as_ref()
+                    .is_some_and(|path| path == "foo")
+            })
             .unwrap();
         assert_eq!(directory.descendant_count, 1);
     }
 
     #[test]
     fn builds_a_collapsible_repository_file_tree() {
-        let files = vec![
-            "src/app/mod.rs".to_owned(),
-            "src/app/view.rs".to_owned(),
-            "src/main.rs".to_owned(),
-            "README.md".to_owned(),
-        ];
+        let files = [
+            "src/app/mod.rs",
+            "src/app/view.rs",
+            "src/main.rs",
+            "README.md",
+        ]
+        .map(RepoPath::from)
+        .to_vec();
         let rows = build_file_tree(&files, &HashSet::new());
         let labels: Vec<_> = rows.iter().map(|row| row.label.as_str()).collect();
         assert_eq!(
@@ -490,9 +500,11 @@ mod tests {
         assert_eq!(rows[2].file_index, Some(0));
         assert_eq!(rows[4].file_index, Some(2));
 
-        let rows = build_file_tree(&files, &HashSet::from(["src/app".to_owned()]));
+        let rows = build_file_tree(&files, &HashSet::from([RepoPath::from("src/app")]));
         assert!(rows.iter().any(|row| {
-            row.directory_path.as_deref() == Some("src/app")
+            row.directory_path
+                .as_ref()
+                .is_some_and(|path| path == "src/app")
                 && row.directory_expanded == Some(false)
         }));
         assert!(!rows.iter().any(|row| row.label == "mod.rs"));
@@ -501,33 +513,42 @@ mod tests {
     #[test]
     fn keeps_explicit_empty_directories_in_the_file_tree() {
         let tree = FileTree::new(
-            &["src/main.rs".to_owned()],
+            &[RepoPath::from("src/main.rs")],
             &[
-                "empty".to_owned(),
-                "src/nested/empty".to_owned(),
-                "a".to_owned(),
-                "a/b".to_owned(),
-                "a/b/c".to_owned(),
+                "empty".into(),
+                "src/nested/empty".into(),
+                "a".into(),
+                "a/b".into(),
+                "a/b/c".into(),
             ],
         );
         let rows = tree.rows(&HashSet::new());
 
         assert!(rows.iter().any(|row| {
-            row.directory_path.as_deref() == Some("empty") && row.file_index.is_none()
+            row.directory_path
+                .as_ref()
+                .is_some_and(|path| path == "empty")
+                && row.file_index.is_none()
         }));
         assert!(rows.iter().any(|row| {
-            row.directory_path.as_deref() == Some("src/nested/empty") && row.file_index.is_none()
+            row.directory_path
+                .as_ref()
+                .is_some_and(|path| path == "src/nested/empty")
+                && row.file_index.is_none()
         }));
         for path in ["a", "a/b", "a/b/c"] {
             assert!(rows.iter().any(|row| {
-                row.directory_path.as_deref() == Some(path) && row.file_index.is_none()
+                row.directory_path
+                    .as_ref()
+                    .is_some_and(|directory| directory == path)
+                    && row.file_index.is_none()
             }));
         }
     }
 
     fn change(path: &str) -> Change {
         Change {
-            path: path.to_owned(),
+            path: path.into(),
             original_path: None,
             code: 'M',
             staged: false,
