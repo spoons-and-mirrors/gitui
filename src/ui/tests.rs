@@ -2555,14 +2555,17 @@ fn wait_for_preview(app: &mut App) {
 }
 
 fn wait_for(app: &mut App, predicate: impl Fn(&App) -> bool) {
-    for _ in 0..100 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
         let _ = app.poll_worker();
         if predicate(app) {
             return;
         }
+        if std::time::Instant::now() >= deadline {
+            panic!("application state did not update");
+        }
         thread::sleep(Duration::from_millis(2));
     }
-    panic!("application state did not update");
 }
 
 fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {

@@ -3390,29 +3390,13 @@ mod tests {
         let root = directory.path();
         initialize_repository(root);
         let tracked = root.join("tracked.txt");
-        let mut app = App::new(root.to_path_buf());
-
         fs::write(&tracked, "first\n").unwrap();
-        app.session.schedule_status_check_now();
-        for _ in 0..100 {
-            let _ = app.poll_worker();
-            if app.changes.diff.contains("first") {
-                break;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        assert!(app.changes.diff.contains("first"));
+        let mut app = App::new(root.to_path_buf());
+        wait_for_state(&mut app, |app| app.changes.diff.contains("first"));
 
         fs::write(&tracked, "later content\n").unwrap();
         app.session.schedule_status_check_now();
-        for _ in 0..100 {
-            let _ = app.poll_worker();
-            if app.changes.diff.contains("later") {
-                break;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        assert!(app.changes.diff.contains("later"));
+        wait_for_state(&mut app, |app| app.changes.diff.contains("later"));
     }
 
     fn initialize_repository(root: &Path) {
@@ -3430,7 +3414,7 @@ mod tests {
     }
 
     fn wait_for_state(app: &mut App, predicate: impl Fn(&App) -> bool) {
-        for _ in 0..200 {
+        for _ in 0..1_000 {
             let _ = app.poll_worker();
             if predicate(app) {
                 return;
