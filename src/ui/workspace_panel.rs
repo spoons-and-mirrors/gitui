@@ -633,11 +633,7 @@ fn draw_entry(
         spinner_frame,
     } = presentation;
     let marker = if active { active_marker } else { "  " };
-    let status_marker = match status {
-        AgentStatus::Unknown => "○",
-        AgentStatus::Working => SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()],
-        _ => "●",
-    };
+    let status_marker = status_marker(status, spinner_frame);
     let available = usize::from(area.width).saturating_sub(4);
     let branch = branch
         .filter(|branch| !branch.is_empty())
@@ -682,9 +678,19 @@ fn draw_entry(
     );
 }
 
+fn status_marker(status: AgentStatus, spinner_frame: usize) -> &'static str {
+    match status {
+        AgentStatus::Idle => "I",
+        AgentStatus::Working => SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()],
+        AgentStatus::Blocked => "B",
+        AgentStatus::Done => "U",
+        AgentStatus::Unknown => "?",
+    }
+}
+
 fn status_color(status: AgentStatus) -> ratatui::style::Color {
     match status {
-        AgentStatus::Idle => palette().cyan,
+        AgentStatus::Idle => palette().muted,
         AgentStatus::Working => palette().yellow,
         AgentStatus::Blocked => palette().red,
         AgentStatus::Done => palette().green,
@@ -711,4 +717,23 @@ fn keep_section_visible(
         *scroll = selected.saturating_add(1).saturating_sub(viewport);
     }
     *scroll = (*scroll).min(row_count.saturating_sub(viewport));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_indicators_distinguish_attention_states() {
+        assert_eq!(status_marker(AgentStatus::Idle, 0), "I");
+        assert_eq!(status_color(AgentStatus::Idle), palette().muted);
+        assert_eq!(status_marker(AgentStatus::Working, 0), "⠋");
+        assert_eq!(status_color(AgentStatus::Working), palette().yellow);
+        assert_eq!(status_marker(AgentStatus::Blocked, 0), "B");
+        assert_eq!(status_color(AgentStatus::Blocked), palette().red);
+        assert_eq!(status_marker(AgentStatus::Done, 0), "U");
+        assert_eq!(status_color(AgentStatus::Done), palette().green);
+        assert_eq!(status_marker(AgentStatus::Unknown, 0), "?");
+        assert_eq!(status_color(AgentStatus::Unknown), palette().faint);
+    }
 }
