@@ -20,6 +20,7 @@ pub(super) fn draw(
     area: Rect,
     focused: bool,
     hovered: Option<WorkspacePanelHitTarget>,
+    show_agent_harness: bool,
 ) -> Vec<(HitTarget, Rect)> {
     fill(frame, area, palette().surface_alt);
     let mut targets = Vec::new();
@@ -253,8 +254,10 @@ pub(super) fn draw(
                     .map_or("", |workspace| workspace.label.as_str());
                 let label = if workspace.is_empty() {
                     agent.name.clone()
-                } else {
+                } else if show_agent_harness {
                     format!("{} / {workspace}", agent.name)
+                } else {
+                    workspace.to_owned()
                 };
                 draw_entry(
                     frame,

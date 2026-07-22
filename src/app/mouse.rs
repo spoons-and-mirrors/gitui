@@ -905,10 +905,17 @@ impl App {
             self.toggle_workspace_panel_enabled();
         } else if self
             .regions
-            .editor_setting
+            .agent_harness_setting
             .is_some_and(|rect| rect.contains(point))
         {
             self.settings_selection = 3;
+            self.toggle_agent_harness();
+        } else if self
+            .regions
+            .editor_setting
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.settings_selection = 4;
             self.open_editor_setting();
         }
     }

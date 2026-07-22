@@ -30,6 +30,7 @@ pub(super) struct SettingsRegions {
     pub(super) fetch_interval_down: Rect,
     pub(super) fetch_interval_up: Rect,
     pub(super) workspace_panel: Rect,
+    pub(super) agent_harness: Rect,
     pub(super) editor: Rect,
 }
 
@@ -2149,7 +2150,7 @@ pub(super) fn draw_settings(
     selection: usize,
     fetch_running: bool,
 ) -> SettingsRegions {
-    let area = centered_min(frame.area(), 58, 0, 48, 20);
+    let area = centered_min(frame.area(), 58, 0, 48, 22);
     frame.render_widget(Clear, area);
     fill(frame, area, palette().panel);
     fill(
@@ -2203,7 +2204,8 @@ pub(super) fn draw_settings(
     let auto_row = Rect::new(inner.x, area.y.saturating_add(7), inner.width, 1);
     let interval_row = Rect::new(inner.x, area.y.saturating_add(9), inner.width, 1);
     let workspace_panel_row = Rect::new(inner.x, area.y.saturating_add(14), inner.width, 1);
-    let editor_row = Rect::new(inner.x, area.y.saturating_add(16), inner.width, 1);
+    let agent_harness_row = Rect::new(inner.x, area.y.saturating_add(16), inner.width, 1);
+    let editor_row = Rect::new(inner.x, area.y.saturating_add(18), inner.width, 1);
     let interval_down = Rect::new(
         interval_row.right().saturating_sub(15),
         interval_row.y,
@@ -2329,6 +2331,31 @@ pub(super) fn draw_settings(
         workspace_panel_row,
     );
 
+    let (agent_harness_switch, agent_harness_switch_color) =
+        settings_toggle(settings.show_agent_harness);
+    let agent_harness_padding = usize::from(agent_harness_row.width)
+        .saturating_sub(14 + UnicodeWidthStr::width(agent_harness_switch));
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Agent harness", Style::default().fg(palette().ink)),
+            Span::raw(" ".repeat(agent_harness_padding)),
+            Span::styled(
+                agent_harness_switch,
+                Style::default()
+                    .fg(palette().canvas)
+                    .bg(agent_harness_switch_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+        ]))
+        .style(Style::default().bg(if selection == 3 {
+            palette().selected
+        } else {
+            palette().surface_alt
+        })),
+        agent_harness_row,
+    );
+
     let editor = settings
         .editor_command
         .as_deref()
@@ -2349,7 +2376,7 @@ pub(super) fn draw_settings(
                 }),
             ),
         ]))
-        .style(Style::default().bg(if selection == 3 {
+        .style(Style::default().bg(if selection == 4 {
             palette().selected
         } else {
             palette().surface_alt
@@ -2364,6 +2391,7 @@ pub(super) fn draw_settings(
         fetch_interval_down: interval_down,
         fetch_interval_up: interval_up,
         workspace_panel: workspace_panel_row,
+        agent_harness: agent_harness_row,
         editor: editor_row,
     }
 }

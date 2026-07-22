@@ -193,6 +193,7 @@ pub struct Regions {
     pub editor_setting: Option<Rect>,
     pub auto_fetch: Option<Rect>,
     pub workspace_panel_setting: Option<Rect>,
+    pub agent_harness_setting: Option<Rect>,
     pub fetch_interval: Option<Rect>,
     pub fetch_interval_down: Option<Rect>,
     pub fetch_interval_up: Option<Rect>,
@@ -1240,10 +1241,10 @@ impl App {
         match key.code {
             KeyCode::Esc | KeyCode::Char('s') => self.mode = Mode::Normal,
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
-                self.settings_selection = (self.settings_selection + 1) % 4;
+                self.settings_selection = (self.settings_selection + 1) % 5;
             }
             KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
-                self.settings_selection = (self.settings_selection + 3) % 4;
+                self.settings_selection = (self.settings_selection + 4) % 5;
             }
             KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 0 => {
                 self.toggle_auto_fetch();
@@ -1260,6 +1261,9 @@ impl App {
                 self.toggle_workspace_panel_enabled();
             }
             KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 3 => {
+                self.toggle_agent_harness();
+            }
+            KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 4 => {
                 self.open_editor_setting();
             }
             _ => {}
@@ -1949,6 +1953,11 @@ impl App {
     fn toggle_workspace_panel_enabled(&mut self) {
         self.settings.workspace_panel_enabled = !self.settings.workspace_panel_enabled;
         self.dragging_workspace_panel_splitter = false;
+        self.settings_changed();
+    }
+
+    fn toggle_agent_harness(&mut self) {
+        self.settings.show_agent_harness = !self.settings.show_agent_harness;
         self.settings_changed();
     }
 
@@ -2838,6 +2847,7 @@ mod tests {
                 fetch_interval_minutes: 6,
                 worktree_width: 38,
                 workspace_panel_enabled: true,
+                show_agent_harness: false,
                 workspace_panel_width: DEFAULT_WORKSPACE_PANEL_WIDTH,
                 history_height: 7,
                 editor_command: None,
@@ -2847,6 +2857,10 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(!app.settings.workspace_panel_enabled);
+        assert_eq!(app.settings_store.load(), app.settings);
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.settings.show_agent_harness);
         assert_eq!(app.settings_store.load(), app.settings);
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));

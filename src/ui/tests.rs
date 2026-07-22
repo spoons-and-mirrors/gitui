@@ -1194,6 +1194,7 @@ fn renders_every_primary_surface() {
     assert!(settings_screen.contains("Auto-fetch remotes"));
     assert!(settings_screen.contains("Fetch interval"));
     assert!(settings_screen.contains("Workspace pane"));
+    assert!(settings_screen.contains("Agent harness"));
     assert!(settings_screen.contains("Editor command"));
     assert!(!settings_screen.contains('┌'));
     let auto_fetch = app.regions.auto_fetch.unwrap();
@@ -1206,13 +1207,24 @@ fn renders_every_primary_surface() {
     );
     assert!(app.regions.fetch_interval_up.is_some());
     let workspace_setting = app.regions.workspace_panel_setting.unwrap();
+    let agent_harness_setting = app.regions.agent_harness_setting.unwrap();
     let editor_setting = app.regions.editor_setting.unwrap();
-    assert_eq!(editor_setting.y, workspace_setting.y + 2);
+    assert_eq!(agent_harness_setting.y, workspace_setting.y + 2);
+    assert_eq!(editor_setting.y, agent_harness_setting.y + 2);
     let switch_x = workspace_setting.right().saturating_sub(6);
     assert_eq!(buffer[(switch_x + 3, workspace_setting.y)].symbol(), "◼");
     assert!(
         (switch_x..switch_x + 5)
             .all(|x| buffer[(x, workspace_setting.y)].bg == super::palette().green)
+    );
+    let harness_switch_x = agent_harness_setting.right().saturating_sub(6);
+    assert_eq!(
+        buffer[(harness_switch_x + 1, agent_harness_setting.y)].symbol(),
+        "◼"
+    );
+    assert!(
+        (harness_switch_x..harness_switch_x + 5)
+            .all(|x| buffer[(x, agent_harness_setting.y)].bg == super::palette().faint)
     );
 
     app.settings.workspace_panel_enabled = false;
@@ -1334,8 +1346,18 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
     assert!(rendered.contains("HUNKLE"));
     assert!(rendered.contains("topic"));
     assert!(rendered.contains("AGENTS"));
-    assert!(rendered.contains("opencode / HUNKLE"));
+    assert!(!rendered.contains("opencode"));
     assert!(!rendered.contains('↻'));
+    app.settings.show_agent_harness = true;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let rendered_with_harness: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(rendered_with_harness.contains("opencode / HUNKLE"));
     for target in [
         WorkspacePanelHitTarget::Workspace(0),
         WorkspacePanelHitTarget::Agent(0),

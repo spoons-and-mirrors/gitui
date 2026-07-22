@@ -12,6 +12,7 @@ pub struct Settings {
     pub fetch_interval_minutes: u16,
     pub worktree_width: u16,
     pub workspace_panel_enabled: bool,
+    pub show_agent_harness: bool,
     pub workspace_panel_width: u16,
     pub history_height: u16,
     pub editor_command: Option<String>,
@@ -30,6 +31,7 @@ impl Default for Settings {
             fetch_interval_minutes: 5,
             worktree_width: 38,
             workspace_panel_enabled: true,
+            show_agent_harness: false,
             workspace_panel_width: DEFAULT_WORKSPACE_PANEL_WIDTH,
             history_height: 7,
             editor_command: None,
@@ -84,11 +86,12 @@ impl SettingsStore {
         fs::write(
             path,
             format!(
-                "auto_fetch={}\nfetch_interval_minutes={}\nworktree_width={}\nworkspace_panel_enabled={}\nworkspace_panel_width={}\nhistory_height={}\neditor_command={}\n",
+                "auto_fetch={}\nfetch_interval_minutes={}\nworktree_width={}\nworkspace_panel_enabled={}\nshow_agent_harness={}\nworkspace_panel_width={}\nhistory_height={}\neditor_command={}\n",
                 settings.auto_fetch,
                 settings.fetch_interval_minutes,
                 settings.worktree_width,
                 settings.workspace_panel_enabled,
+                settings.show_agent_harness,
                 settings.workspace_panel_width,
                 settings.history_height,
                 settings.editor_command.as_deref().unwrap_or_default()
@@ -137,6 +140,9 @@ fn load(path: &Path) -> Settings {
             "workspace_panel_enabled" => {
                 settings.workspace_panel_enabled = value.trim() == "true";
             }
+            "show_agent_harness" => {
+                settings.show_agent_harness = value.trim() == "true";
+            }
             "workspace_panel_width" => {
                 if let Ok(width) = value.trim().parse::<u16>() {
                     settings.workspace_panel_width =
@@ -172,6 +178,7 @@ mod tests {
             fetch_interval_minutes: 17,
             worktree_width: 61,
             workspace_panel_enabled: false,
+            show_agent_harness: true,
             workspace_panel_width: 33,
             history_height: 9,
             editor_command: Some("code --wait".to_owned()),

@@ -102,12 +102,14 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             Some(HitTarget::WorkspacePanel(target)) => Some(target),
             _ => None,
         };
+        let show_agent_harness = app.settings.show_agent_harness;
         for (target, rect) in workspace_panel::draw(
             frame,
             &mut app.workspace_panel,
             panel_area,
             app.mode == Mode::WorkspacePanel,
             workspace_panel_hover,
+            show_agent_harness,
         ) {
             app.regions.register_hit_target(target, rect);
         }
@@ -180,6 +182,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             app.regions.fetch_interval_down = Some(regions.fetch_interval_down);
             app.regions.fetch_interval_up = Some(regions.fetch_interval_up);
             app.regions.workspace_panel_setting = Some(regions.workspace_panel);
+            app.regions.agent_harness_setting = Some(regions.agent_harness);
             app.regions.editor_setting = Some(regions.editor);
         }
         Mode::RepositoryBrowser => {
