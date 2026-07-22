@@ -1333,6 +1333,13 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
     assert_eq!(branch_cell.symbol(), "t");
     assert_eq!(branch_cell.fg, super::palette().accent);
     assert_eq!(branch_cell.bg, super::palette().selected);
+    let workspace_marker = &terminal.backend().buffer()[(workspace_row.x, workspace_row.y)];
+    assert_eq!(workspace_marker.symbol(), "•");
+    assert_eq!(workspace_marker.fg, super::palette().yellow);
+    let workspace_label = &terminal.backend().buffer()[(workspace_row.x + 2, workspace_row.y)];
+    assert_eq!(workspace_label.symbol(), "H");
+    assert_eq!(workspace_label.fg, super::palette().yellow);
+    assert!(workspace_label.modifier.contains(Modifier::BOLD));
     let create_button = app
         .regions
         .hit_target_rect(HitTarget::WorkspacePanel(

@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Paragraph},
 };
@@ -152,6 +152,9 @@ pub(super) fn draw(
                         status: workspace.status,
                         active: state.active,
                         selected: state.selected || ungrouped_drop,
+                        active_marker: "• ",
+                        active_marker_color: palette().yellow,
+                        active_label_color: palette().yellow,
                         spinner_frame,
                     },
                 );
@@ -262,6 +265,9 @@ pub(super) fn draw(
                         status: agent.status,
                         active: state.active,
                         selected: state.selected,
+                        active_marker: "› ",
+                        active_marker_color: palette().accent,
+                        active_label_color: palette().ink,
                         spinner_frame,
                     },
                 );
@@ -604,6 +610,9 @@ struct EntryPresentation {
     status: AgentStatus,
     active: bool,
     selected: bool,
+    active_marker: &'static str,
+    active_marker_color: Color,
+    active_label_color: Color,
     spinner_frame: usize,
 }
 
@@ -618,9 +627,12 @@ fn draw_entry(
         status,
         active,
         selected,
+        active_marker,
+        active_marker_color,
+        active_label_color,
         spinner_frame,
     } = presentation;
-    let marker = if active { "› " } else { "  " };
+    let marker = if active { active_marker } else { "  " };
     let status_marker = match status {
         AgentStatus::Unknown => "○",
         AgentStatus::Working => SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()],
@@ -648,7 +660,7 @@ fn draw_entry(
             Span::styled(
                 marker,
                 base.fg(if active {
-                    palette().accent
+                    active_marker_color
                 } else {
                     palette().faint
                 }),
@@ -656,7 +668,7 @@ fn draw_entry(
             Span::styled(
                 label,
                 if active {
-                    base.fg(palette().ink).add_modifier(Modifier::BOLD)
+                    base.fg(active_label_color).add_modifier(Modifier::BOLD)
                 } else {
                     base.fg(palette().muted)
                 },
