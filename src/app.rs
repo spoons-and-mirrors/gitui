@@ -9,6 +9,7 @@ mod files;
 mod fuzzy;
 mod mouse;
 mod repository_browser;
+mod settings;
 mod text_input;
 mod workspace_panel;
 
@@ -18,14 +19,16 @@ pub(crate) use changes::ChangesHitTarget;
 pub use changes::{ChangesState, LeftPane};
 pub(crate) use commit_message::CommitMessageGenerator;
 pub(crate) use commit_summary::CommitSummaryCache;
-pub(crate) use explorer::SurroundingEntry;
 pub use explorer::{Explorer, PickerAction, PickerEntry};
+pub(crate) use explorer::{ExplorerHitTarget, SurroundingEntry};
 pub(crate) use file_search::FileSearch;
 pub(crate) use files::{FileDialog, FileDialogKind, FileDrag, FileNameAction};
 pub(crate) use repository_browser::{
     BranchDeleteDialog, BrowserTab, PullRequest, RemoteItems, RepositoryBrowser,
     RepositoryBrowserEffect,
 };
+pub use settings::Settings;
+pub(crate) use settings::SettingsStore;
 pub(crate) use workspace_panel::{
     AgentStatus, DEFAULT_WIDTH as DEFAULT_WORKSPACE_PANEL_WIDTH,
     MINIMUM_WIDTH as MINIMUM_WORKSPACE_PANEL_WIDTH, SPINNER_FRAMES, SnapshotLoadDialog,
@@ -51,7 +54,7 @@ use ratatui::{
 use crate::{
     diagnostics, formatter,
     git::{self, RefreshScope, RepositoryData},
-    repository_session::{LoadKind, Mutation, RepositorySession, WorkerCompletion},
+    repository_session::{LoadKind, Mutation, RepositorySession, WorkerOutcome},
     selection::SelectionState,
 };
 
@@ -83,29 +86,6 @@ pub enum Mode {
     WorkspacePresets,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Settings {
-    pub auto_fetch: bool,
-    pub fetch_interval_minutes: u16,
-    pub worktree_width: u16,
-    pub workspace_panel_width: u16,
-    pub history_height: u16,
-    pub editor_command: Option<String>,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            auto_fetch: false,
-            fetch_interval_minutes: 5,
-            worktree_width: 38,
-            workspace_panel_width: DEFAULT_WORKSPACE_PANEL_WIDTH,
-            history_height: 7,
-            editor_command: None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct DiffHunkRegion {
     pub rect: Rect,
@@ -122,6 +102,7 @@ pub(crate) enum HitTarget {
     CommitMessageGenerate,
     MarkdownPreviewToggle,
     Graph(GraphHitTarget),
+    Explorer(ExplorerHitTarget),
     RepositoryBrowser(RepositoryBrowserHitTarget),
     WorkspacePanel(WorkspacePanelHitTarget),
 }
@@ -194,11 +175,6 @@ pub struct Regions {
     pub commit_scroll: usize,
     pub commit_scroll_max: usize,
     pub graph_table: Option<Rect>,
-    pub workspace_explorer_path: Option<Rect>,
-    pub workspace_explorer_surroundings: Option<Rect>,
-    pub workspace_explorer_list: Option<Rect>,
-    pub workspace_explorer_preview: Option<Rect>,
-    pub workspace_explorer_overlay: Option<Rect>,
     pub settings_overlay: Option<Rect>,
     pub action_menu: Option<Rect>,
     pub action_list: Option<Rect>,
@@ -280,7 +256,7 @@ pub struct App {
     pub(crate) selection: SelectionState,
     copy_request: Option<String>,
     pub should_quit: bool,
-    pub(crate) settings_path: Option<PathBuf>,
+    pub(crate) settings_store: SettingsStore,
     pending_reload: Option<(changes::ChangesSelection, Option<String>)>,
     reload_queued: Option<RefreshScope>,
     pub(crate) editor_input: String,
@@ -314,26 +290,13 @@ impl App {
     }
 
     fn build(path: PathBuf, open_in_background: bool) -> Self {
-        let settings_path = settings_path();
-        let settings = settings_path
-            .as_deref()
-            .map(|path| {
-                if path.exists() {
-                    load_settings(path)
-                } else {
-                    legacy_settings_path()
-                        .as_deref()
-                        .map(load_settings)
-                        .unwrap_or_default()
-                }
-            })
-            .unwrap_or_default();
-        let workspace_config_dir = settings_path.as_ref().and_then(|path| path.parent());
+        let (settings_store, settings) = SettingsStore::discover();
+        let workspace_config_dir = settings_store.config_dir();
         let workspace_groups_path =
             workspace_config_dir.map(|path| path.join("workspace-groups.json"));
         let workspace_snapshots_path =
             workspace_config_dir.map(|path| path.join("workspace-snapshots.json"));
-        let interval = fetch_interval(&settings);
+        let interval = settings.fetch_interval();
         let session = if open_in_background {
             RepositorySession::opening(path.clone(), interval)
         } else {
@@ -405,7 +368,7 @@ impl App {
             selection: SelectionState::default(),
             copy_request: None,
             should_quit: false,
-            settings_path,
+            settings_store,
             pending_reload: None,
             reload_queued: None,
             editor_input: String::new(),
@@ -664,20 +627,23 @@ impl App {
                 self.mode == Mode::Files && matches!(dialog.kind, FileDialogKind::Name { .. }),
             );
         }
-        let interval = fetch_interval(&self.settings);
+        let interval = self.settings.fetch_interval();
         self.session
             .maybe_start_fetch(self.settings.auto_fetch, interval);
         self.session.maybe_start_status_check();
         while let Some(done) = self.session.next_worker_completion(interval) {
             changed = true;
-            match done {
-                WorkerCompletion::Commit(result) => match result {
+            let invalidation = done.invalidation();
+            if let Some(scope) = invalidation {
+                self.reload(scope);
+            }
+            match done.outcome {
+                WorkerOutcome::Commit(result) => match result {
                     Ok(output) if output.success => {
                         self.commit_input.clear();
                         self.commit_scroll = None;
                         self.schedule_commit_draft();
                         self.flush_commit_draft();
-                        self.reload(RefreshScope::WORKTREE.union(RefreshScope::HISTORY_AND_REFS));
                         self.notice = Some("Commit created".to_owned());
                     }
                     Ok(output) => {
@@ -685,12 +651,11 @@ impl App {
                     }
                     Err(error) => self.notice = Some(error),
                 },
-                WorkerCompletion::Fetch(result) => match result {
+                WorkerOutcome::Fetch(result) => match result {
                     Ok(output) if output.success => {
                         if let Some(root) = self.session.data().map(|repo| repo.root.clone()) {
                             self.recent_fetches.insert(root, Instant::now());
                         }
-                        self.reload(RefreshScope::HISTORY_AND_REFS);
                         self.notice = Some("Fetched remotes".to_owned());
                     }
                     Ok(output) => {
@@ -698,13 +663,10 @@ impl App {
                     }
                     Err(error) => self.notice = Some(error),
                 },
-                WorkerCompletion::Command(done) => match done.result {
+                WorkerOutcome::Command(done) => match done.result {
                     Ok(output) => {
                         let success = output.success;
                         let error = first_error(&output.stderr, "Git command failed");
-                        if success {
-                            self.reload(RefreshScope::ALL);
-                        }
                         self.actions.complete(output);
                         self.notice = Some(if success {
                             format!("{} complete", done.label)
@@ -717,31 +679,28 @@ impl App {
                         self.notice = Some(error);
                     }
                 },
-                WorkerCompletion::Mutation(result) => match result {
-                    Ok(()) => self.reload(RefreshScope::WORKTREE),
+                WorkerOutcome::Mutation(result) => match result {
+                    Ok(()) => {}
                     Err(error) => {
                         self.changes.cancel_pending_hunk_stage();
                         self.notice = Some(error);
                     }
                 },
-                WorkerCompletion::FileOperation(done) => match done.result {
+                WorkerOutcome::FileOperation(done) => match done.result {
                     Ok(selection) => {
                         self.pending_file_selection = selection;
-                        self.reload(RefreshScope::WORKTREE_AND_INVENTORY);
                         self.notice = Some(done.message);
                     }
                     Err(error) => self.notice = Some(error),
                 },
-                WorkerCompletion::DiscardUnstaged(done) => {
-                    self.reload(RefreshScope::WORKTREE_AND_INVENTORY);
+                WorkerOutcome::DiscardUnstaged(done) => {
                     self.notice = Some(match done.result {
                         Ok(()) => format!("Discarded unstaged changes to {}", done.path),
                         Err(error) => error,
                     });
                 }
-                WorkerCompletion::Format(done) => match done.result {
+                WorkerOutcome::Format(done) => match done.result {
                     Ok(output) if output.success => {
-                        self.reload(RefreshScope::WORKTREE);
                         self.notice =
                             Some(format!("Formatted {} with {}", done.path, done.formatter));
                     }
@@ -755,8 +714,7 @@ impl App {
                     }
                     Err(error) => self.notice = Some(error),
                 },
-                WorkerCompletion::BranchDelete(done) => {
-                    self.reload(RefreshScope::HISTORY_AND_REFS);
+                WorkerOutcome::BranchDelete(done) => {
                     self.notice = Some(match done.result {
                         Ok(()) => done.remote.map_or_else(
                             || {
@@ -1870,7 +1828,7 @@ impl App {
         self.flush_commit_draft();
         if self
             .session
-            .start_open(path, fetch_interval(&self.settings))
+            .start_open(path, self.settings.fetch_interval())
         {
             self.workspace_fetch_pending = fetch_if_stale;
             self.workspace_explorer.error = None;
@@ -1899,7 +1857,7 @@ impl App {
             self.workspace_fetch_pending = false;
             return;
         }
-        if self.session.start_fetch(fetch_interval(&self.settings)) {
+        if self.session.start_fetch(self.settings.fetch_interval()) {
             self.workspace_fetch_pending = false;
         }
     }
@@ -1963,14 +1921,12 @@ impl App {
 
     fn settings_changed(&mut self) {
         self.session
-            .reset_fetch_deadline(fetch_interval(&self.settings));
+            .reset_fetch_deadline(self.settings.fetch_interval());
         self.persist_settings();
     }
 
     fn persist_settings(&mut self) {
-        if let Some(path) = &self.settings_path
-            && let Err(error) = save_settings(path, &self.settings)
-        {
+        if let Err(error) = self.settings_store.save(&self.settings) {
             self.notice = Some(format!("Could not save settings: {error}"));
         }
     }
@@ -2173,7 +2129,7 @@ impl App {
 
         if self
             .session
-            .start_reload(scope, fetch_interval(&self.settings))
+            .start_reload(scope, self.settings.fetch_interval())
         {
             self.pending_reload = Some((selection, selected_oid));
             self.notice = Some("Refreshing…".to_owned());
@@ -2304,10 +2260,6 @@ impl App {
     }
 }
 
-fn fetch_interval(settings: &Settings) -> Duration {
-    Duration::from_secs(u64::from(settings.fetch_interval_minutes) * 60)
-}
-
 fn fetch_is_fresh(fetched_at: Option<&Instant>, now: Instant) -> bool {
     fetched_at.is_some_and(|fetched_at| {
         now.saturating_duration_since(*fetched_at) < WORKSPACE_FETCH_FRESHNESS
@@ -2320,84 +2272,6 @@ fn same_workspace_path(left: &Path, right: &Path) -> bool {
             .ok()
             .zip(fs::canonicalize(right).ok())
             .is_some_and(|(left, right)| left == right)
-}
-
-fn settings_path() -> Option<PathBuf> {
-    config_path("hunkle")
-}
-
-fn legacy_settings_path() -> Option<PathBuf> {
-    config_path("gitui")
-}
-
-fn config_path(app_name: &str) -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("XDG_CONFIG_HOME") {
-        return Some(PathBuf::from(path).join(app_name).join("config"));
-    }
-    if let Some(path) = std::env::var_os("APPDATA") {
-        return Some(PathBuf::from(path).join(app_name).join("config"));
-    }
-    home_directory().map(|home| home.join(".config").join(app_name).join("config"))
-}
-
-fn load_settings(path: &Path) -> Settings {
-    let Ok(contents) = fs::read_to_string(path) else {
-        return Settings::default();
-    };
-    let mut settings = Settings::default();
-    for line in contents.lines() {
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        match key.trim() {
-            "auto_fetch" => settings.auto_fetch = value.trim() == "true",
-            "fetch_interval_minutes" => {
-                if let Ok(minutes) = value.trim().parse::<u16>() {
-                    settings.fetch_interval_minutes = minutes.clamp(1, 1440);
-                }
-            }
-            "worktree_width" => {
-                if let Ok(width) = value.trim().parse::<u16>() {
-                    settings.worktree_width = width.clamp(24, 4096);
-                }
-            }
-            "workspace_panel_width" => {
-                if let Ok(width) = value.trim().parse::<u16>() {
-                    settings.workspace_panel_width =
-                        width.clamp(MINIMUM_WORKSPACE_PANEL_WIDTH, 4096);
-                }
-            }
-            "history_height" => {
-                if let Ok(height) = value.trim().parse::<u16>() {
-                    settings.history_height = height.clamp(3, 256);
-                }
-            }
-            "editor_command" => {
-                let command = value.trim();
-                settings.editor_command = (!command.is_empty()).then(|| command.to_owned());
-            }
-            _ => {}
-        }
-    }
-    settings
-}
-
-fn save_settings(path: &Path, settings: &Settings) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(
-        path,
-        format!(
-            "auto_fetch={}\nfetch_interval_minutes={}\nworktree_width={}\nworkspace_panel_width={}\nhistory_height={}\neditor_command={}\n",
-            settings.auto_fetch,
-            settings.fetch_interval_minutes,
-            settings.worktree_width,
-            settings.workspace_panel_width,
-            settings.history_height,
-            settings.editor_command.as_deref().unwrap_or_default()
-        ),
-    )
 }
 
 fn first_error(stderr: &str, fallback: &str) -> String {
@@ -2430,12 +2304,6 @@ fn is_workspace_passthrough_shortcut(key: KeyEvent) -> bool {
         ) => true,
         _ => false,
     }
-}
-
-fn home_directory() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
 }
 
 fn move_table(state: &mut TableState, len: usize, delta: isize) {
@@ -2826,34 +2694,6 @@ mod tests {
     }
 
     #[test]
-    fn persists_auto_fetch_settings() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("nested/config");
-        let settings = Settings {
-            auto_fetch: true,
-            fetch_interval_minutes: 17,
-            worktree_width: 61,
-            workspace_panel_width: 33,
-            history_height: 9,
-            editor_command: Some("code --wait".to_owned()),
-        };
-
-        save_settings(&path, &settings).unwrap();
-        assert_eq!(load_settings(&path), settings);
-
-        fs::write(
-            &path,
-            "auto_fetch=true\nfetch_interval_minutes=0\nworktree_width=5\nworkspace_panel_width=2\nhistory_height=1\n",
-        )
-        .unwrap();
-        let loaded = load_settings(&path);
-        assert_eq!(loaded.fetch_interval_minutes, 1);
-        assert_eq!(loaded.worktree_width, 24);
-        assert_eq!(loaded.workspace_panel_width, MINIMUM_WORKSPACE_PANEL_WIDTH);
-        assert_eq!(loaded.history_height, 3);
-    }
-
-    #[test]
     fn empty_diff_falls_back_to_the_graph() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
@@ -2926,7 +2766,7 @@ mod tests {
         let mut app = App::new(directory.path().join("missing"));
         app.mode = Mode::Normal;
         app.settings = Settings::default();
-        app.settings_path = Some(path.clone());
+        app.settings_store = SettingsStore::at(path.clone());
 
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.view, View::Graph);
@@ -2963,7 +2803,7 @@ mod tests {
                 editor_command: None,
             }
         );
-        assert_eq!(load_settings(&path), app.settings);
+        assert_eq!(app.settings_store.load(), app.settings);
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.mode, Mode::Editor);
@@ -2973,7 +2813,7 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.mode, Mode::Settings);
         assert_eq!(app.settings.editor_command.as_deref(), Some("nvim"));
-        assert_eq!(load_settings(&path), app.settings);
+        assert_eq!(app.settings_store.load(), app.settings);
 
         app.mode = Mode::Normal;
         app.changes.diff_scroll = 37;
@@ -3201,7 +3041,7 @@ mod tests {
         let settings_path = root.join(".git/hunkle-editor-test-config");
         let mut app = App::new(root.to_path_buf());
         app.settings.editor_command = None;
-        app.settings_path = Some(settings_path.clone());
+        app.settings_store = SettingsStore::at(settings_path.clone());
 
         app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
         assert_eq!(app.mode, Mode::Editor);

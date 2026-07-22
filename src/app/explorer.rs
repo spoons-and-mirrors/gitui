@@ -30,6 +30,20 @@ pub enum PickerAction {
     Navigate,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExplorerHitTarget {
+    Overlay,
+    Path,
+    SurroundingsPane,
+    Surrounding { generation: u64, index: usize },
+    EntriesPane,
+    Entry { generation: u64, index: usize },
+    MatchesPane,
+    Match { generation: u64, index: usize },
+    PreviewPane,
+    Preview { generation: u64, index: usize },
+}
+
 #[derive(Debug)]
 pub struct Explorer {
     pub(crate) directory: PathBuf,
@@ -51,6 +65,7 @@ pub struct Explorer {
     index_roots: Vec<PathBuf>,
     index_rx: Option<Receiver<Vec<IndexedDirectory>>>,
     browse_rx: Option<Receiver<Result<BrowseResult, String>>>,
+    content_generation: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +120,7 @@ impl Explorer {
             index_roots,
             index_rx: None,
             browse_rx: None,
+            content_generation: 0,
         };
         picker.reload();
         picker
@@ -114,6 +130,7 @@ impl Explorer {
         if self.editing_path {
             match key.code {
                 KeyCode::Esc => {
+                    self.invalidate_targets();
                     self.editing_path = false;
                     self.set_path_input(display_search_path(&self.directory));
                     self.matches.clear();
@@ -275,6 +292,7 @@ impl Explorer {
     }
 
     pub(super) fn reload(&mut self) {
+        self.invalidate_targets();
         self.error = None;
         self.loading = true;
         self.entries.clear();
@@ -336,6 +354,7 @@ impl Explorer {
             .as_ref()
             .and_then(|receiver| receiver.try_recv().ok())
         {
+            self.invalidate_targets();
             self.browse_rx = None;
             self.loading = false;
             match result {
@@ -384,6 +403,80 @@ impl Explorer {
         self.refresh_matches();
     }
 
+    pub(crate) fn surrounding_target(&self, index: usize) -> ExplorerHitTarget {
+        ExplorerHitTarget::Surrounding {
+            generation: self.content_generation,
+            index,
+        }
+    }
+
+    pub(crate) fn entry_target(&self, index: usize) -> ExplorerHitTarget {
+        ExplorerHitTarget::Entry {
+            generation: self.content_generation,
+            index,
+        }
+    }
+
+    pub(crate) fn match_target(&self, index: usize) -> ExplorerHitTarget {
+        ExplorerHitTarget::Match {
+            generation: self.content_generation,
+            index,
+        }
+    }
+
+    pub(crate) fn preview_target(&self, index: usize) -> ExplorerHitTarget {
+        ExplorerHitTarget::Preview {
+            generation: self.content_generation,
+            index,
+        }
+    }
+
+    pub(super) fn activate_target(&mut self, target: ExplorerHitTarget) -> PickerCommand {
+        match target {
+            ExplorerHitTarget::Path => {
+                self.begin_search(None);
+                PickerCommand::None
+            }
+            ExplorerHitTarget::Surrounding { generation, index }
+                if generation == self.content_generation =>
+            {
+                self.activate_surrounding(index);
+                PickerCommand::None
+            }
+            ExplorerHitTarget::Entry { generation, index }
+                if generation == self.content_generation && index < self.entries.len() =>
+            {
+                self.state.select(Some(index));
+                self.activate_selected(true)
+            }
+            ExplorerHitTarget::Match { generation, index }
+                if generation == self.content_generation && index < self.matches.len() =>
+            {
+                self.match_state.select(Some(index));
+                self.confirm_path()
+            }
+            ExplorerHitTarget::Preview { generation, index }
+                if generation == self.content_generation =>
+            {
+                self.accept_preview(index);
+                PickerCommand::None
+            }
+            ExplorerHitTarget::Overlay
+            | ExplorerHitTarget::SurroundingsPane
+            | ExplorerHitTarget::EntriesPane
+            | ExplorerHitTarget::MatchesPane
+            | ExplorerHitTarget::PreviewPane
+            | ExplorerHitTarget::Surrounding { .. }
+            | ExplorerHitTarget::Entry { .. }
+            | ExplorerHitTarget::Match { .. }
+            | ExplorerHitTarget::Preview { .. } => PickerCommand::None,
+        }
+    }
+
+    fn invalidate_targets(&mut self) {
+        self.content_generation = self.content_generation.wrapping_add(1);
+    }
+
     fn selected(&self) -> Option<&PickerEntry> {
         self.state
             .selected()
@@ -412,6 +505,7 @@ impl Explorer {
     }
 
     fn refresh_matches(&mut self) {
+        self.invalidate_targets();
         self.error = None;
         let selected_path = self
             .match_state
@@ -1156,6 +1250,35 @@ mod tests {
             panic!("Enter should open the directory being browsed");
         };
         assert_eq!(opened, directory);
+    }
+
+    #[test]
+    fn semantic_targets_activate_exact_entries_and_reject_stale_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let child = temp.path().join("child");
+        fs::create_dir(&child).unwrap();
+        let mut picker = Explorer::new(temp.path().to_path_buf());
+        picker.entries = vec![PickerEntry {
+            label: "child/".to_owned(),
+            path: child.clone(),
+            action: PickerAction::Navigate,
+            is_repo: false,
+        }];
+        picker.state.select(Some(0));
+        let target = picker.entry_target(0);
+
+        assert!(matches!(
+            picker.activate_target(target),
+            PickerCommand::None
+        ));
+        assert_eq!(picker.directory, child);
+
+        let generation = picker.content_generation;
+        assert!(matches!(
+            picker.activate_target(target),
+            PickerCommand::None
+        ));
+        assert_eq!(picker.content_generation, generation);
     }
 
     #[test]

@@ -9,10 +9,10 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
     ACTION_ITEMS, ActionsState, BranchDeleteDialog, BrowserTab, CommandStatus, Explorer,
-    FileDialog, FileDialogKind, FileNameAction, FileSearch, HitTarget, PickerAction, PickerEntry,
-    PullRequest, RemoteItems, RepositoryBrowser, RepositoryBrowserHitTarget, Settings,
-    SnapshotLoadDialog, SurroundingEntry, WorkspaceDeleteDialog, WorkspaceDeleteKind,
-    WorkspacePanel, WorkspacePanelHitTarget,
+    ExplorerHitTarget, FileDialog, FileDialogKind, FileNameAction, FileSearch, HitTarget,
+    PickerAction, PickerEntry, PullRequest, RemoteItems, RepositoryBrowser,
+    RepositoryBrowserHitTarget, Settings, SnapshotLoadDialog, SurroundingEntry,
+    WorkspaceDeleteDialog, WorkspaceDeleteKind, WorkspacePanel, WorkspacePanelHitTarget,
 };
 
 use super::{fill, palette, truncate_width};
@@ -20,14 +20,6 @@ use super::{fill, palette, truncate_width};
 pub(super) struct FileSearchRegions {
     pub(super) overlay: Rect,
     pub(super) list: Rect,
-}
-
-pub(super) struct ExplorerRegions {
-    pub(super) overlay: Rect,
-    pub(super) path: Rect,
-    pub(super) surroundings: Option<Rect>,
-    pub(super) list: Rect,
-    pub(super) preview: Option<Rect>,
 }
 
 pub(super) struct SettingsRegions {
@@ -1385,7 +1377,10 @@ fn rendered_height(lines: &[Line<'_>], width: usize) -> usize {
         .sum()
 }
 
-pub(super) fn draw_explorer(frame: &mut Frame<'_>, explorer: &mut Explorer) -> ExplorerRegions {
+pub(super) fn draw_explorer(
+    frame: &mut Frame<'_>,
+    explorer: &mut Explorer,
+) -> Vec<(HitTarget, Rect)> {
     let area = centered_min(frame.area(), 88, 78, 68, 20);
     frame.render_widget(Clear, area);
     fill(frame, area, palette().panel);
@@ -1729,17 +1724,79 @@ pub(super) fn draw_explorer(frame: &mut Frame<'_>, explorer: &mut Explorer) -> E
         frame.render_widget(Paragraph::new(hint).alignment(Alignment::Right), footer);
     }
 
-    ExplorerRegions {
-        overlay: area,
-        path: path_area,
-        surroundings: (!explorer.editing_path).then_some(left_list),
-        list: if explorer.editing_path {
-            left_list
-        } else {
-            right_list
-        },
-        preview: explorer.editing_path.then_some(right_list),
+    let mut targets = vec![
+        (HitTarget::Explorer(ExplorerHitTarget::Overlay), area),
+        (HitTarget::Explorer(ExplorerHitTarget::Path), path_area),
+    ];
+    if explorer.editing_path {
+        targets.push((
+            HitTarget::Explorer(ExplorerHitTarget::MatchesPane),
+            left_list,
+        ));
+        targets.push((
+            HitTarget::Explorer(ExplorerHitTarget::PreviewPane),
+            right_list,
+        ));
+        let offset = explorer.match_state.offset();
+        for index in offset..(offset + usize::from(left_list.height)).min(explorer.matches.len()) {
+            targets.push((
+                HitTarget::Explorer(explorer.match_target(index)),
+                Rect::new(
+                    left_list.x,
+                    left_list.y + u16::try_from(index - offset).unwrap_or(u16::MAX),
+                    left_list.width,
+                    1,
+                ),
+            ));
+        }
+        for index in 0..usize::from(right_list.height).min(explorer.preview_entries.len()) {
+            targets.push((
+                HitTarget::Explorer(explorer.preview_target(index)),
+                Rect::new(
+                    right_list.x,
+                    right_list.y + u16::try_from(index).unwrap_or(u16::MAX),
+                    right_list.width,
+                    1,
+                ),
+            ));
+        }
+    } else {
+        targets.push((
+            HitTarget::Explorer(ExplorerHitTarget::SurroundingsPane),
+            left_list,
+        ));
+        targets.push((
+            HitTarget::Explorer(ExplorerHitTarget::EntriesPane),
+            right_list,
+        ));
+        let offset = explorer.surroundings_state.offset();
+        for index in
+            offset..(offset + usize::from(left_list.height)).min(explorer.surroundings.len())
+        {
+            targets.push((
+                HitTarget::Explorer(explorer.surrounding_target(index)),
+                Rect::new(
+                    left_list.x,
+                    left_list.y + u16::try_from(index - offset).unwrap_or(u16::MAX),
+                    left_list.width,
+                    1,
+                ),
+            ));
+        }
+        let offset = explorer.state.offset();
+        for index in offset..(offset + usize::from(right_list.height)).min(explorer.entries.len()) {
+            targets.push((
+                HitTarget::Explorer(explorer.entry_target(index)),
+                Rect::new(
+                    right_list.x,
+                    right_list.y + u16::try_from(index - offset).unwrap_or(u16::MAX),
+                    right_list.width,
+                    1,
+                ),
+            ));
+        }
     }
+    targets
 }
 
 pub(super) fn draw_file_search(

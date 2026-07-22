@@ -1,12 +1,15 @@
+mod graph;
+mod inventory;
+
 use std::{
-    collections::{HashMap, HashSet, hash_map::DefaultHasher},
+    collections::{HashMap, hash_map::DefaultHasher},
     fs,
     hash::{Hash, Hasher},
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     thread,
-    time::{Instant, UNIX_EPOCH},
+    time::UNIX_EPOCH,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -444,7 +447,7 @@ fn load_worktree(root: &Path) -> Result<WorktreeData> {
 }
 
 fn load_git_inventory(root: &Path) -> Result<InventoryData> {
-    let (files, directories) = git_repository_entries(root)?;
+    let (files, directories) = inventory::git_entries(root)?;
     Ok(InventoryData {
         fingerprint: fingerprint(&(&files, &directories)),
         files,
@@ -453,7 +456,7 @@ fn load_git_inventory(root: &Path) -> Result<InventoryData> {
 }
 
 fn load_local_inventory(root: &Path) -> Result<InventoryData> {
-    let (files, directories) = local_entries(root)?;
+    let (files, directories) = inventory::local_entries(root)?;
     Ok(InventoryData {
         fingerprint: fingerprint(&(&files, &directories)),
         files,
@@ -478,12 +481,11 @@ fn load_history(root: &Path) -> Result<HistoryData> {
 }
 
 fn load_graph(root: &Path) -> Result<GraphData> {
-    let (mut commits, truncated) = log(root)?;
-    layout_graph(&mut commits);
+    let prepared = graph::prepare(log(root)?);
     Ok(GraphData {
-        width: graph_width(&commits),
-        commits,
-        truncated,
+        commits: prepared.commits,
+        width: prepared.width,
+        truncated: prepared.truncated,
     })
 }
 
@@ -621,283 +623,6 @@ fn repository_branches(root: &Path) -> Result<Vec<Branch>> {
     Ok(branches)
 }
 
-fn git_repository_entries(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
-    let output = run(
-        root,
-        &[
-            "ls-files",
-            "-z",
-            "-t",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "--deleted",
-        ],
-    )?;
-    if !output.status.success() {
-        bail!("{}", clean_stderr(&output));
-    }
-    let mut states = HashMap::<String, (bool, bool)>::new();
-    for entry in output.stdout.split(|byte| *byte == 0) {
-        let Some((&tag, path)) = entry.split_first() else {
-            continue;
-        };
-        let path = path.strip_prefix(b" ").unwrap_or(path);
-        if path.is_empty() {
-            continue;
-        }
-        let path = String::from_utf8_lossy(path).into_owned();
-        let absent_skip_worktree = tag == b'S' && root.join(&path).symlink_metadata().is_err();
-        let state = states.entry(path).or_default();
-        if tag == b'R' || absent_skip_worktree {
-            state.1 = true;
-        } else {
-            state.0 = true;
-        }
-    }
-    let mut files: Vec<String> = states
-        .into_iter()
-        .filter_map(|(path, (present, deleted))| (present && !deleted).then_some(path))
-        .collect();
-    let (ignored_files, ignored_directories) = ignored_repository_entries(root)?;
-    files.extend(ignored_files);
-    files.sort_unstable();
-    files.dedup();
-    let output = run(
-        root,
-        &[
-            "ls-files",
-            "-z",
-            "--others",
-            "--directory",
-            "--empty-directory",
-            "--exclude-standard",
-        ],
-    )?;
-    if !output.status.success() {
-        bail!("{}", clean_stderr(&output));
-    }
-    let directory_roots: Vec<String> = output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter_map(|path| path.strip_suffix(b"/"))
-        .map(|path| String::from_utf8_lossy(path).into_owned())
-        .filter(|path| !path.is_empty())
-        .collect();
-    let mut directories = expand_git_directories(root, directory_roots)?;
-    directories.extend(ignored_directories);
-    let output = run(root, &["ls-files", "-z", "--stage"])?;
-    if !output.status.success() {
-        bail!("{}", clean_stderr(&output));
-    }
-    let submodules: HashSet<String> = output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter_map(|entry| {
-            let separator = entry.iter().position(|byte| *byte == b'\t')?;
-            let (metadata, path) = entry.split_at(separator);
-            let path = path.get(1..)?;
-            metadata
-                .starts_with(b"160000 ")
-                .then(|| String::from_utf8_lossy(path).into_owned())
-        })
-        .filter(|path| {
-            root.join(path)
-                .symlink_metadata()
-                .is_ok_and(|metadata| metadata.is_dir())
-        })
-        .collect();
-    files.retain(|path| !submodules.contains(path));
-    directories.extend(submodules);
-    directories.sort_unstable();
-    directories.dedup();
-    Ok((files, directories))
-}
-
-fn ignored_repository_entries(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
-    let output = run(
-        root,
-        &[
-            "ls-files",
-            "-z",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-        ],
-    )?;
-    if !output.status.success() {
-        bail!("{}", clean_stderr(&output));
-    }
-    let files = output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-        .map(|path| String::from_utf8_lossy(path).into_owned())
-        .collect();
-    let output = run(
-        root,
-        &[
-            "ls-files",
-            "-z",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-            "--directory",
-        ],
-    )?;
-    if !output.status.success() {
-        bail!("{}", clean_stderr(&output));
-    }
-    let directories = output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter_map(|path| path.strip_suffix(b"/"))
-        .map(|path| String::from_utf8_lossy(path).into_owned())
-        .filter(|path| !path.is_empty())
-        .collect();
-    Ok((files, directories))
-}
-
-fn expand_git_directories(root: &Path, roots: Vec<String>) -> Result<Vec<String>> {
-    let mut directories: HashSet<String> = roots.iter().cloned().collect();
-    let mut frontier = roots;
-    while !frontier.is_empty() {
-        let mut candidates = Vec::new();
-        for relative in frontier {
-            let path = root.join(&relative);
-            let Ok(entries) = fs::read_dir(path) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                if entry.file_name() == ".git" {
-                    continue;
-                }
-                let path = entry.path();
-                let Ok(metadata) = fs::symlink_metadata(&path) else {
-                    continue;
-                };
-                if !metadata.is_dir() || metadata.file_type().is_symlink() {
-                    continue;
-                }
-                if let Ok(path) = path.strip_prefix(root) {
-                    let path = path.to_string_lossy();
-                    candidates.push(if cfg!(windows) {
-                        path.replace('\\', "/")
-                    } else {
-                        path.into_owned()
-                    });
-                }
-            }
-        }
-        candidates.sort_unstable();
-        candidates.dedup();
-        let ignored = git_ignored_paths(root, &candidates)?;
-        frontier = candidates
-            .into_iter()
-            .filter(|path| !ignored.contains(path))
-            .filter(|path| directories.insert(path.clone()))
-            .collect();
-    }
-    Ok(directories.into_iter().collect())
-}
-
-fn git_ignored_paths(root: &Path, paths: &[String]) -> Result<HashSet<String>> {
-    if paths.is_empty() {
-        return Ok(HashSet::new());
-    }
-    let mut command = base_command(root);
-    command
-        .args(["check-ignore", "-z", "--stdin"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn().context("could not run git check-ignore")?;
-    let input = paths.to_vec();
-    let writer = child.stdin.take().map(|mut stdin| {
-        std::thread::spawn(move || -> std::io::Result<()> {
-            for path in input {
-                stdin.write_all(path.as_bytes())?;
-                stdin.write_all(&[0])?;
-            }
-            Ok(())
-        })
-    });
-    let output = child
-        .wait_with_output()
-        .context("could not read git check-ignore")?;
-    if let Some(writer) = writer {
-        writer
-            .join()
-            .map_err(|_| anyhow!("git check-ignore input writer panicked"))?
-            .context("could not write git check-ignore input")?;
-    }
-    if !output.status.success() && output.status.code() != Some(1) {
-        bail!("{}", clean_stderr(&output));
-    }
-    Ok(output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-        .map(|path| String::from_utf8_lossy(path).into_owned())
-        .collect())
-}
-
-fn local_entries(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
-    let started = Instant::now();
-    crate::diagnostics::event(format!("local inventory started root={}", root.display()));
-    let mut files = Vec::new();
-    let mut directory_paths = Vec::new();
-    let mut directories = vec![root.to_owned()];
-    let mut next_progress = 100_000;
-    while let Some(directory) = directories.pop() {
-        let entries = match fs::read_dir(&directory) {
-            Ok(entries) => entries,
-            Err(_) if directory != root => continue,
-            Err(error) => return Err(error).context("read repository files"),
-        };
-        for entry in entries.flatten() {
-            if entry.file_name() == ".git" {
-                continue;
-            }
-            let path = entry.path();
-            let Ok(metadata) = fs::symlink_metadata(&path) else {
-                continue;
-            };
-            if metadata.is_dir() {
-                if let Ok(relative) = path.strip_prefix(root) {
-                    directory_paths.push(relative.to_string_lossy().into_owned());
-                }
-                directories.push(path);
-            } else if let Ok(relative) = path.strip_prefix(root) {
-                files.push(relative.to_string_lossy().into_owned());
-            }
-            let entries = files.len().saturating_add(directory_paths.len());
-            if entries >= next_progress {
-                crate::diagnostics::event(format!(
-                    "local inventory progress root={} entries={} pending_directories={} elapsed_ms={}",
-                    root.display(),
-                    entries,
-                    directories.len(),
-                    started.elapsed().as_millis()
-                ));
-                next_progress = next_progress.saturating_add(100_000);
-            }
-        }
-    }
-    files.sort();
-    files.dedup();
-    directory_paths.sort();
-    directory_paths.dedup();
-    crate::diagnostics::event(format!(
-        "local inventory finished root={} files={} directories={} elapsed_ms={}",
-        root.display(),
-        files.len(),
-        directory_paths.len(),
-        started.elapsed().as_millis()
-    ));
-    Ok((files, directory_paths))
-}
-
 fn fingerprint<T: Hash>(value: &T) -> u64 {
     let mut hasher = DefaultHasher::new();
     value.hash(&mut hasher);
@@ -912,14 +637,6 @@ fn change_counts(changes: &[Change]) -> (usize, usize) {
             (staged, unstaged + 1)
         }
     })
-}
-
-fn graph_width(commits: &[Commit]) -> usize {
-    commits
-        .iter()
-        .map(|commit| commit.graph.len())
-        .max()
-        .unwrap_or(1)
 }
 
 pub fn file_content(root: &Path, relative_path: &str) -> Result<String> {
@@ -1398,10 +1115,8 @@ fn count_file_lines(path: &Path) -> Result<u64> {
     Ok(lines + u64::from(has_bytes && !ends_with_newline))
 }
 
-const GRAPH_COMMIT_LIMIT: usize = 5_000;
-
-fn log(root: &Path) -> Result<(Vec<Commit>, bool)> {
-    let commits = read_log(
+fn log(root: &Path) -> Result<Vec<Commit>> {
+    read_log(
         root,
         &[
             "--date-order",
@@ -1412,14 +1127,7 @@ fn log(root: &Path) -> Result<(Vec<Commit>, bool)> {
             "--tags",
             "HEAD",
         ],
-    )?;
-    Ok(cap_graph_commits(commits))
-}
-
-fn cap_graph_commits(mut commits: Vec<Commit>) -> (Vec<Commit>, bool) {
-    let truncated = commits.len() > GRAPH_COMMIT_LIMIT;
-    commits.truncate(GRAPH_COMMIT_LIMIT);
-    (commits, truncated)
+    )
 }
 
 fn branch_history(root: &Path) -> Result<Vec<Commit>> {
@@ -1492,167 +1200,6 @@ fn parse_log(bytes: &[u8]) -> Vec<Commit> {
             })
         })
         .collect()
-}
-
-const UP: u8 = 1;
-const DOWN: u8 = 2;
-const LEFT: u8 = 4;
-const RIGHT: u8 = 8;
-
-fn layout_graph(commits: &mut [Commit]) {
-    let mut oid_ids = HashMap::new();
-    let mut next_oid = 0usize;
-    for commit in commits.iter() {
-        for oid in std::iter::once(&commit.oid).chain(commit.parents.iter()) {
-            oid_ids.entry(oid.clone()).or_insert_with(|| {
-                let id = next_oid;
-                next_oid += 1;
-                id
-            });
-        }
-    }
-
-    let mut lanes: Vec<Option<usize>> = Vec::new();
-    let mut colors: Vec<usize> = Vec::new();
-    let mut next_color = 0;
-
-    for commit in commits {
-        let commit_id = oid_ids[&commit.oid];
-        let incoming: Vec<usize> = lanes
-            .iter()
-            .enumerate()
-            .filter_map(|(index, oid)| (*oid == Some(commit_id)).then_some(index))
-            .collect();
-
-        let node = incoming.first().copied().unwrap_or_else(|| {
-            if let Some(index) = lanes.iter().position(Option::is_none) {
-                lanes[index] = Some(commit_id);
-                colors[index] = next_color;
-                next_color += 1;
-                index
-            } else {
-                lanes.push(Some(commit_id));
-                colors.push(next_color);
-                next_color += 1;
-                lanes.len() - 1
-            }
-        });
-
-        let before_len = lanes.len();
-        let mut after = lanes.clone();
-        for lane in incoming.iter().copied().skip(1) {
-            after[lane] = None;
-        }
-
-        if let Some(first_parent) = commit.parents.first() {
-            after[node] = Some(oid_ids[first_parent]);
-        } else {
-            after[node] = None;
-        }
-
-        let mut outgoing = Vec::new();
-        for parent in commit.parents.iter().skip(1) {
-            let parent_id = oid_ids[parent];
-            let destination = after
-                .iter()
-                .position(|oid| *oid == Some(parent_id))
-                .unwrap_or_else(|| {
-                    if let Some(index) = after.iter().position(Option::is_none) {
-                        after[index] = Some(parent_id);
-                        colors[index] = next_color;
-                        next_color += 1;
-                        index
-                    } else {
-                        after.push(Some(parent_id));
-                        colors.push(next_color);
-                        next_color += 1;
-                        after.len() - 1
-                    }
-                });
-            outgoing.push(destination);
-        }
-
-        let lane_count = before_len.max(after.len()).max(node + 1);
-        let mut masks = vec![0_u8; lane_count.saturating_mul(2).saturating_sub(1)];
-        let mut cell_colors = vec![colors.get(node).copied().unwrap_or(0); masks.len()];
-
-        for (index, lane) in lanes.iter().enumerate() {
-            if lane.is_some() {
-                masks[index * 2] |= UP;
-                cell_colors[index * 2] = colors[index];
-            }
-        }
-        for (index, lane) in after.iter().enumerate() {
-            if lane.is_some() {
-                masks[index * 2] |= DOWN;
-                cell_colors[index * 2] = colors[index];
-            }
-        }
-
-        for destination in incoming.iter().copied().skip(1).chain(outgoing) {
-            connect(
-                &mut masks,
-                &mut cell_colors,
-                node * 2,
-                destination * 2,
-                colors[node],
-            );
-        }
-
-        commit.graph = masks
-            .into_iter()
-            .enumerate()
-            .map(|(index, mask)| GraphCell {
-                symbol: if index == node * 2 {
-                    '●'
-                } else {
-                    glyph(mask)
-                },
-                color: cell_colors[index],
-            })
-            .collect();
-
-        lanes = after;
-        while lanes.last().is_some_and(Option::is_none) {
-            lanes.pop();
-            colors.pop();
-        }
-    }
-}
-
-fn connect(masks: &mut [u8], colors: &mut [usize], from: usize, to: usize, color: usize) {
-    let (left, right) = if from <= to { (from, to) } else { (to, from) };
-    for index in left..=right {
-        if index > left {
-            masks[index] |= LEFT;
-        }
-        if index < right {
-            masks[index] |= RIGHT;
-        }
-        colors[index] = color;
-    }
-}
-
-fn glyph(mask: u8) -> char {
-    match mask {
-        0 => ' ',
-        3 => '│',
-        12 => '─',
-        10 => '╭',
-        6 => '╮',
-        9 => '╰',
-        5 => '╯',
-        11 => '├',
-        7 => '┤',
-        14 => '┬',
-        13 => '┴',
-        15 => '┼',
-        UP => '╵',
-        DOWN => '╷',
-        LEFT => '╴',
-        RIGHT => '╶',
-        _ => '┼',
-    }
 }
 
 fn run(root: &Path, args: &[&str]) -> Result<Output> {
@@ -1793,104 +1340,6 @@ mod tests {
     }
 
     #[test]
-    fn lays_out_a_merge_as_connected_cells() {
-        let mut commits = vec![
-            commit("merge", &["left", "right"]),
-            commit("left", &["base"]),
-            commit("right", &["base"]),
-            commit("base", &[]),
-        ];
-        layout_graph(&mut commits);
-        assert!(commits.iter().all(|commit| {
-            commit.graph.contains(&GraphCell {
-                symbol: '●',
-                color: commit
-                    .graph
-                    .iter()
-                    .find(|cell| cell.symbol == '●')
-                    .unwrap()
-                    .color,
-            })
-        }));
-        assert!(
-            commits[0]
-                .graph
-                .iter()
-                .any(|cell| matches!(cell.symbol, '─' | '╮' | '╭'))
-        );
-        assert_eq!(
-            commits
-                .iter()
-                .map(|commit| commit
-                    .graph
-                    .iter()
-                    .map(|cell| cell.symbol)
-                    .collect::<String>())
-                .collect::<Vec<_>>(),
-            ["●─╮", "● │", "│ ●", "●─╯"]
-        );
-    }
-
-    #[test]
-    fn lays_out_linear_history_without_extra_lanes() {
-        let mut commits = vec![
-            commit("three", &["two"]),
-            commit("two", &["one"]),
-            commit("one", &[]),
-        ];
-        layout_graph(&mut commits);
-        assert_eq!(
-            commits
-                .iter()
-                .map(|commit| commit
-                    .graph
-                    .iter()
-                    .map(|cell| cell.symbol)
-                    .collect::<String>())
-                .collect::<Vec<_>>(),
-            ["●", "●", "●"]
-        );
-    }
-
-    #[test]
-    fn lays_out_a_distinct_branch_exactly() {
-        let mut commits = vec![
-            commit("main", &["base"]),
-            commit("side", &["base"]),
-            commit("base", &[]),
-        ];
-        layout_graph(&mut commits);
-        let symbols = commits
-            .iter()
-            .map(|commit| {
-                commit
-                    .graph
-                    .iter()
-                    .map(|cell| cell.symbol)
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(symbols, ["●", "│ ●", "●─╯"]);
-    }
-
-    #[test]
-    fn caps_graph_commits_and_reports_truncation() {
-        let commits = (0..=GRAPH_COMMIT_LIMIT)
-            .map(|index| commit(&index.to_string(), &[]))
-            .collect();
-        let (commits, truncated) = cap_graph_commits(commits);
-        assert_eq!(commits.len(), GRAPH_COMMIT_LIMIT);
-        assert!(truncated);
-        let mut commits = commits;
-        layout_graph(&mut commits);
-        assert!(
-            commits
-                .iter()
-                .all(|commit| { commit.graph.len() == 1 && commit.graph[0].symbol == '●' })
-        );
-    }
-
-    #[test]
     fn recognizes_github_remote_urls() {
         assert!(is_github_remote_url("git@github.com:owner/repo.git"));
         assert!(is_github_remote_url("https://github.com/owner/repo.git"));
@@ -1907,19 +1356,6 @@ mod tests {
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0].subject, "Subject");
         assert_eq!(commits[0].message, "Subject\n\nBody line\n\nFinal note");
-    }
-
-    fn commit(oid: &str, parents: &[&str]) -> Commit {
-        Commit {
-            oid: oid.to_owned(),
-            parents: parents.iter().map(|parent| (*parent).to_owned()).collect(),
-            refs: Vec::new(),
-            author: "A".to_owned(),
-            date: "2026-01-01".to_owned(),
-            subject: oid.to_owned(),
-            message: oid.to_owned(),
-            graph: Vec::new(),
-        }
     }
 
     #[test]
@@ -2032,7 +1468,7 @@ mod tests {
         fs::write(root.join("config/.env.production"), "SECRET=prod\n").unwrap();
         fs::remove_file(root.join("tracked.txt")).unwrap();
 
-        let (files, directories) = git_repository_entries(root).unwrap();
+        let (files, directories) = inventory::git_entries(root).unwrap();
         assert_eq!(
             files,
             [
@@ -2066,7 +1502,7 @@ mod tests {
         git(root, &["update-index", "--add", "--cacheinfo", &cache_info]);
         fs::create_dir(root.join("module")).unwrap();
 
-        let (files, directories) = git_repository_entries(root).unwrap();
+        let (files, directories) = inventory::git_entries(root).unwrap();
         assert!(!files.iter().any(|path| path == "module"));
         assert!(directories.iter().any(|path| path == "module"));
     }
@@ -2081,7 +1517,7 @@ mod tests {
         git(root, &["update-index", "--skip-worktree", "sparse.txt"]);
         fs::remove_file(root.join("sparse.txt")).unwrap();
 
-        assert!(git_repository_entries(root).unwrap().0.is_empty());
+        assert!(inventory::git_entries(root).unwrap().0.is_empty());
     }
 
     #[test]

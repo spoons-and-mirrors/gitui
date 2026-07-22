@@ -159,12 +159,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         Mode::Explorer => {
             dim(frame);
-            let regions = overlays::draw_explorer(frame, &mut app.workspace_explorer);
-            app.regions.workspace_explorer_overlay = Some(regions.overlay);
-            app.regions.workspace_explorer_path = Some(regions.path);
-            app.regions.workspace_explorer_surroundings = regions.surroundings;
-            app.regions.workspace_explorer_list = Some(regions.list);
-            app.regions.workspace_explorer_preview = regions.preview;
+            for (target, rect) in overlays::draw_explorer(frame, &mut app.workspace_explorer) {
+                app.regions.register_hit_target(target, rect);
+            }
         }
         Mode::Settings => {
             dim(frame);

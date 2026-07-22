@@ -10,9 +10,9 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
-    App, BrowserTab, ChangesHitTarget, CommitMessageGenerator, GraphHitTarget, HitTarget, LeftPane,
-    Mode, PullRequest, RemoteItems, RepositoryBrowserHitTarget, Settings, View, WorkspacePanel,
-    WorkspacePanelHitTarget,
+    App, BrowserTab, ChangesHitTarget, CommitMessageGenerator, ExplorerHitTarget, GraphHitTarget,
+    HitTarget, LeftPane, Mode, PullRequest, RemoteItems, RepositoryBrowserHitTarget, Settings,
+    SettingsStore, View, WorkspacePanel, WorkspacePanelHitTarget,
 };
 
 use super::draw;
@@ -73,7 +73,7 @@ fn renders_every_primary_surface() {
     app.commit_message_generator = CommitMessageGenerator::ready_for_test();
     assert_eq!(app.changes.history_state.selected(), None);
     let settings_path = root.join(".git/hunkle-test-config");
-    app.settings_path = Some(settings_path.clone());
+    app.settings_store = SettingsStore::at(settings_path.clone());
     let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(app.regions.worktree.unwrap().x, 0);
@@ -1003,9 +1003,20 @@ fn renders_every_primary_surface() {
     assert!(explorer_screen.contains("CONTENTS"));
     assert!(!explorer_screen.contains("OPEN REPOSITORY"));
     assert!(!explorer_screen.contains('┌'));
-    assert!(app.regions.workspace_explorer_surroundings.is_some());
-    assert!(app.regions.workspace_explorer_list.is_some());
-    let path = app.regions.workspace_explorer_path.unwrap();
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::SurroundingsPane))
+            .is_some()
+    );
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::EntriesPane))
+            .is_some()
+    );
+    let path = app
+        .regions
+        .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::Path))
+        .unwrap();
     click(&mut app, path.x + 2, path.y + 1);
     assert!(app.workspace_explorer.editing_path);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -1020,7 +1031,11 @@ fn renders_every_primary_surface() {
     assert!(explorer_search_screen.contains("LIVE PREVIEW"));
     assert!(explorer_search_screen.contains("Ctrl/Alt+BS segment"));
     assert!(!explorer_search_screen.contains('⌫'));
-    assert!(app.regions.workspace_explorer_preview.is_some());
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::PreviewPane))
+            .is_some()
+    );
 
     app.mode = Mode::Normal;
     app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
@@ -1224,7 +1239,7 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
     let directory = tempfile::tempdir().unwrap();
     let mut app = App::new(directory.path().to_path_buf());
     let settings_path = directory.path().join("config");
-    app.settings_path = Some(settings_path.clone());
+    app.settings_store = SettingsStore::at(settings_path.clone());
     app.settings.workspace_panel_width = 26;
     app.workspace_panel = WorkspacePanel::ready_for_test(&serde_json::json!({
         "result": {

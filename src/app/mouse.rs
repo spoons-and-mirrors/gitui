@@ -5,9 +5,10 @@ use std::time::{Duration, Instant};
 use crate::selection::SelectionOutcome;
 
 use super::{
-    ACTION_ITEMS, App, GraphHitTarget, HitTarget, LeftPane, MINIMUM_WORKSPACE_PANEL_WIDTH, Mode,
-    RepositoryBrowserEffect, RepositoryBrowserHitTarget, View, WorkspaceDropTarget,
-    WorkspacePanelHitTarget, WorkspacePanelPlacement, changes::ChangesEffect, scroll_table,
+    ACTION_ITEMS, App, ExplorerHitTarget, GraphHitTarget, HitTarget, LeftPane,
+    MINIMUM_WORKSPACE_PANEL_WIDTH, Mode, RepositoryBrowserEffect, RepositoryBrowserHitTarget, View,
+    WorkspaceDropTarget, WorkspacePanelHitTarget, WorkspacePanelPlacement, changes::ChangesEffect,
+    scroll_table,
 };
 
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
@@ -306,7 +307,8 @@ impl App {
             self.regions.editor_overlay,
             self.regions.file_search_overlay,
             self.regions.file_dialog_overlay,
-            self.regions.workspace_explorer_overlay,
+            self.regions
+                .hit_target_rect(HitTarget::Explorer(ExplorerHitTarget::Overlay)),
             self.regions.settings_overlay,
             self.regions.action_menu,
             self.regions
@@ -779,6 +781,7 @@ impl App {
                     RepositoryBrowserHitTarget::Overlay | RepositoryBrowserHitTarget::List,
                 )) => {}
                 Some(HitTarget::Graph(_)) => {}
+                Some(HitTarget::Explorer(_)) => {}
                 Some(HitTarget::WorkspacePanel(_)) => {}
                 Some(HitTarget::Changes(_)) => {}
                 Some(HitTarget::CommitMessageGenerate) => {}
@@ -799,78 +802,27 @@ impl App {
                 };
                 if self.workspace_explorer.editing_path {
                     self.workspace_explorer.move_match_selection(delta);
-                } else if self
-                    .regions
-                    .workspace_explorer_surroundings
-                    .is_some_and(|rect| rect.contains(point))
-                {
+                } else if matches!(
+                    self.regions.hit_target_at(point),
+                    Some(HitTarget::Explorer(
+                        ExplorerHitTarget::SurroundingsPane | ExplorerHitTarget::Surrounding { .. }
+                    ))
+                ) {
                     self.workspace_explorer.move_surrounding_selection(delta);
                 } else {
                     self.workspace_explorer.move_selection(delta);
                 }
             }
-            MouseEventKind::Down(MouseButton::Left) => {
-                if self
-                    .regions
-                    .workspace_explorer_overlay
-                    .is_some_and(|rect| !rect.contains(point))
-                    && self.repository().is_some()
-                {
-                    self.mode = Mode::Normal;
-                    return;
-                }
-                if self
-                    .regions
-                    .workspace_explorer_path
-                    .is_some_and(|rect| rect.contains(point))
-                {
-                    self.workspace_explorer.begin_search(None);
-                    return;
-                }
-                if let Some(rect) = self
-                    .regions
-                    .workspace_explorer_surroundings
-                    .filter(|rect| rect.contains(point))
-                {
-                    let index = self.workspace_explorer.surroundings_state.offset()
-                        + usize::from(mouse.row - rect.y);
-                    if index < self.workspace_explorer.surroundings.len() {
-                        self.workspace_explorer.activate_surrounding(index);
-                    }
-                    return;
-                }
-                if let Some(rect) = self
-                    .regions
-                    .workspace_explorer_preview
-                    .filter(|rect| rect.contains(point))
-                {
-                    self.workspace_explorer
-                        .accept_preview(usize::from(mouse.row - rect.y));
-                    return;
-                }
-                let Some(rect) = self
-                    .regions
-                    .workspace_explorer_list
-                    .filter(|rect| rect.contains(point))
-                else {
-                    return;
-                };
-                let index =
-                    self.workspace_explorer.state.offset() + usize::from(mouse.row - rect.y);
-                if self.workspace_explorer.editing_path {
-                    let index = self.workspace_explorer.match_state.offset()
-                        + usize::from(mouse.row - rect.y);
-                    if index < self.workspace_explorer.matches.len() {
-                        self.workspace_explorer.match_state.select(Some(index));
-                        let command = self.workspace_explorer.confirm_path();
-                        self.apply_explorer_command(command);
-                    }
-                } else if index < self.workspace_explorer.entries.len() {
-                    self.workspace_explorer.state.select(Some(index));
-                    let command = self.workspace_explorer.activate_selected(true);
+            MouseEventKind::Down(MouseButton::Left) => match self.regions.hit_target_at(point) {
+                Some(HitTarget::Explorer(target)) => {
+                    let command = self.workspace_explorer.activate_target(target);
                     self.apply_explorer_command(command);
                 }
-            }
+                _ if self.repository().is_some() => {
+                    self.mode = Mode::Normal;
+                }
+                _ => {}
+            },
             _ => {}
         }
     }

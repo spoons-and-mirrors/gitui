@@ -1,17 +1,19 @@
+mod preview_loader;
+
 use std::{
     collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver, Sender},
-    thread,
+    path::Path,
 };
 
 use ratatui::widgets::ListState;
 
 use crate::{
-    git::{self, Change, Commit, RepositoryData},
+    git::{Change, Commit, RepositoryData},
     tree::{ExplorerRow, FileTree, PreparedFileTree, WorktreeRow, WorktreeSection, WorktreeTree},
     ui::preview::PreviewPresentation,
 };
+
+use preview_loader::PreviewLoader;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeftPane {
@@ -73,29 +75,9 @@ pub struct ChangesState {
     worktree_tree: Option<WorktreeTree>,
     worktree_tree_fingerprint: Option<u64>,
     change_codes: HashMap<String, char>,
-    preview_generation: u64,
     pub(crate) preview_content_generation: u64,
     pub(crate) preview_presentation: PreviewPresentation,
-    preview_tx: Sender<PreviewRequest>,
-    preview_rx: Receiver<PreviewResult>,
-}
-
-struct PreviewRequest {
-    generation: u64,
-    root: PathBuf,
-    task: PreviewTask,
-}
-
-enum PreviewTask {
-    File(String),
-    Commit(String),
-    Diff(Change),
-}
-
-struct PreviewResult {
-    generation: u64,
-    root: PathBuf,
-    content: String,
+    preview_loader: PreviewLoader,
 }
 
 struct PendingHunkSelection {
@@ -113,7 +95,6 @@ pub(super) struct ChangesSelection {
 
 impl ChangesState {
     pub(super) fn new(repo: Option<&RepositoryData>) -> Self {
-        let (preview_tx, preview_rx) = preview_worker();
         let file_tree = repo.map(|repo| FileTree::new(&repo.files, &repo.directories));
         let collapsed_explorer_directories = file_tree
             .as_ref()
@@ -149,11 +130,9 @@ impl ChangesState {
             worktree_tree: repo.map(|repo| WorktreeTree::new(&repo.changes)),
             worktree_tree_fingerprint: repo.map(|repo| repo.changes_fingerprint),
             change_codes: repo.map_or_else(HashMap::new, |repo| change_codes(&repo.changes)),
-            preview_generation: 0,
             preview_content_generation: 0,
             preview_presentation: PreviewPresentation::default(),
-            preview_tx,
-            preview_rx,
+            preview_loader: PreviewLoader::new(),
         };
         state.rebuild_worktree_rows(repo);
         state.rebuild_explorer_rows(repo);
@@ -765,8 +744,9 @@ impl ChangesState {
         self.hunk_selection = None;
         self.hunk_pin_pending = false;
         self.pending_hunk_selection = None;
-        self.preview_generation = self.preview_generation.wrapping_add(1);
-        self.request_preview(repo, PreviewTask::Commit(commit.oid.clone()));
+        self.set_diff("Loading preview…".to_owned());
+        self.preview_loader
+            .request_commit(&repo.root, commit.oid.clone());
     }
 
     pub(super) fn enter_hunk_selection(&mut self, repo: &RepositoryData) -> bool {
@@ -999,7 +979,7 @@ impl ChangesState {
             self.hunk_pin_pending = false;
             self.pending_hunk_selection = None;
         }
-        self.preview_generation = self.preview_generation.wrapping_add(1);
+        self.preview_loader.invalidate();
         let Some(repo) = repo else {
             self.set_diff(String::new());
             return;
@@ -1014,7 +994,9 @@ impl ChangesState {
                 return;
             };
             if let Some(index) = row.file_index {
-                self.request_preview(repo, PreviewTask::File(repo.files[index].clone()));
+                self.set_diff("Loading preview…".to_owned());
+                self.preview_loader
+                    .request_file(&repo.root, repo.files[index].clone());
             } else if let Some(path) = &row.directory_path {
                 self.set_diff(format!("{} files in {path}/", row.descendant_count));
             }
@@ -1026,7 +1008,9 @@ impl ChangesState {
                 .selected()
                 .and_then(|index| repo.history.get(index))
         {
-            self.request_preview(repo, PreviewTask::Commit(commit.oid.clone()));
+            self.set_diff("Loading preview…".to_owned());
+            self.preview_loader
+                .request_commit(&repo.root, commit.oid.clone());
             return;
         }
         let rows = self.worktree_rows(repo);
@@ -1039,37 +1023,25 @@ impl ChangesState {
             return;
         };
         if let Some(index) = row.change_index {
-            self.request_preview(repo, PreviewTask::Diff(repo.changes[index].clone()));
+            self.set_diff("Loading preview…".to_owned());
+            self.preview_loader
+                .request_diff(&repo.root, repo.changes[index].clone());
         } else if let Some(path) = &row.directory_path {
             self.set_diff(format!("{} changed files in {path}/", row.descendant_count));
         }
     }
 
     pub(super) fn poll_preview(&mut self, active_root: Option<&Path>) -> bool {
-        let mut changed = false;
-        while let Ok(result) = self.preview_rx.try_recv() {
-            if result.generation == self.preview_generation
-                && active_root.is_some_and(|root| root == result.root)
-            {
-                self.set_diff(result.content);
-                if let Some(pending) = self.pending_hunk_selection.take() {
-                    let count = hunk_count(&self.diff);
-                    self.hunk_selection = (count > 0).then(|| pending.index.min(count - 1));
-                    self.hunk_pin_pending = self.hunk_selection.is_some();
-                }
-                changed = true;
-            }
+        let Some(content) = self.preview_loader.poll(active_root) else {
+            return false;
+        };
+        self.set_diff(content);
+        if let Some(pending) = self.pending_hunk_selection.take() {
+            let count = hunk_count(&self.diff);
+            self.hunk_selection = (count > 0).then(|| pending.index.min(count - 1));
+            self.hunk_pin_pending = self.hunk_selection.is_some();
         }
-        changed
-    }
-
-    fn request_preview(&mut self, repo: &RepositoryData, task: PreviewTask) {
-        self.set_diff("Loading preview…".to_owned());
-        let _ = self.preview_tx.send(PreviewRequest {
-            generation: self.preview_generation,
-            root: repo.root.clone(),
-            task,
-        });
+        true
     }
 
     fn rebuild_explorer_rows(&mut self, repo: Option<&RepositoryData>) {
@@ -1184,35 +1156,6 @@ impl ChangesState {
 
 fn hunk_count(diff: &str) -> usize {
     diff.lines().filter(|line| line.starts_with("@@")).count()
-}
-
-fn preview_worker() -> (Sender<PreviewRequest>, Receiver<PreviewResult>) {
-    let (request_tx, request_rx) = mpsc::channel::<PreviewRequest>();
-    let (result_tx, result_rx) = mpsc::channel();
-    thread::spawn(move || {
-        while let Ok(mut request) = request_rx.recv() {
-            while let Ok(latest) = request_rx.try_recv() {
-                request = latest;
-            }
-            let content = match &request.task {
-                PreviewTask::File(path) => git::file_content(&request.root, path),
-                PreviewTask::Commit(oid) => git::commit_diff(&request.root, oid),
-                PreviewTask::Diff(change) => git::diff(&request.root, change),
-            }
-            .unwrap_or_else(|error| error.to_string());
-            if result_tx
-                .send(PreviewResult {
-                    generation: request.generation,
-                    root: request.root,
-                    content,
-                })
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
-    (request_tx, result_rx)
 }
 
 fn change_codes(changes: &[Change]) -> HashMap<String, char> {

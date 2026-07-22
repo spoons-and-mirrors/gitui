@@ -113,17 +113,22 @@ The binary stays deliberately direct, with modules split by the behavior they ow
 |---|---|
 | `main` | Terminal setup, cleanup, and event loop |
 | `diagnostics` | Rotating performance log, slow-phase timing, and main-loop watchdog |
-| `app` | Global input routing, workspace state, Git mutations, settings, and notices |
+| `app` | Global input routing, workspace state, Git mutations, and notices |
 | `app::actions` | Repository Actions, command input, and captured results |
 | `app::author_filter` | Repository-scoped Graph author filtering and selection |
-| `app::changes` | Changes-screen selection, navigation, and displayed content |
+| `app::changes` | Changes-screen selection, navigation, semantic targets, and displayed content |
+| `app::changes::preview_loader` | Coalesced asynchronous file, commit, and diff preview loading |
 | `app::commit_summary` | Lazy, repository-scoped cache of commit file and line-change summaries |
-| `app::explorer` | Workspace discovery, navigation, and fuzzy search |
+| `app::explorer` | Workspace discovery, navigation, fuzzy search, and semantic interaction targets |
 | `app::repository_browser` | Branch, pull-request, and issue interaction plus cached remote data |
+| `app::settings` | Settings discovery, legacy fallback, validation, and persistence |
 | `app::workspace_panel` | Workspace Panel interaction, focus transitions, groups, presets, and background refresh |
 | `app::workspace_panel::herdr` | Typed Herdr environment, command, restore, and session-snapshot adapter |
-| `repository_session` | Active workspace lifecycle, background operations, and scoped refreshes |
-| `git` | Installed-Git commands, parsing, refreshable repository facets, and local workspaces |
+| `app::workspace_panel::presets` | Preset and group persistence, migration, matching, and recall planning |
+| `repository_session` | Active workspace lifecycle, background operations, and completion invalidation policy |
+| `git` | Installed-Git facade, refresh orchestration, worktree operations, and history loading |
+| `git::graph` | Commit capping and deterministic graph-lane projection |
+| `git::inventory` | Git and local workspace file inventory, ignore, sparse-checkout, and submodule policy |
 | `ui::preview` | Stateful preview styling, wrapping, viewport windows, and hunk geometry |
 | `selection` | Screen-cell selection, text extraction, and clipboard fallback |
 | `tree` | Pure worktree and file-tree projection |

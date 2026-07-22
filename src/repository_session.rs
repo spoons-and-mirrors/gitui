@@ -20,7 +20,7 @@ use crate::{
 const MIN_STATUS_INTERVAL: Duration = Duration::from_millis(800);
 const MAX_STATUS_INTERVAL: Duration = Duration::from_secs(10);
 
-pub(crate) enum WorkerCompletion {
+pub(crate) enum WorkerOutcome {
     Commit(Result<CommandOutput, String>),
     Fetch(Result<CommandOutput, String>),
     Command(CommandCompletion),
@@ -29,6 +29,54 @@ pub(crate) enum WorkerCompletion {
     DiscardUnstaged(DiscardUnstagedCompletion),
     Format(FormatCompletion),
     BranchDelete(BranchDeleteCompletion),
+}
+
+pub(crate) struct WorkerCompletion {
+    pub(crate) outcome: WorkerOutcome,
+    invalidation: Option<RefreshScope>,
+}
+
+impl WorkerCompletion {
+    fn new(outcome: WorkerOutcome) -> Self {
+        let invalidation = match &outcome {
+            WorkerOutcome::Commit(Ok(output)) if output.success => {
+                Some(RefreshScope::WORKTREE.union(RefreshScope::HISTORY_AND_REFS))
+            }
+            WorkerOutcome::Fetch(Ok(output)) if output.success => {
+                Some(RefreshScope::HISTORY_AND_REFS)
+            }
+            WorkerOutcome::Command(done)
+                if done.result.as_ref().is_ok_and(|output| output.success) =>
+            {
+                Some(RefreshScope::ALL)
+            }
+            WorkerOutcome::Mutation(Ok(())) => Some(RefreshScope::WORKTREE),
+            WorkerOutcome::FileOperation(done) if done.result.is_ok() => {
+                Some(RefreshScope::WORKTREE_AND_INVENTORY)
+            }
+            WorkerOutcome::DiscardUnstaged(_) => Some(RefreshScope::WORKTREE_AND_INVENTORY),
+            WorkerOutcome::Format(done)
+                if done.result.as_ref().is_ok_and(|output| output.success) =>
+            {
+                Some(RefreshScope::WORKTREE)
+            }
+            WorkerOutcome::BranchDelete(_) => Some(RefreshScope::HISTORY_AND_REFS),
+            WorkerOutcome::Commit(_)
+            | WorkerOutcome::Fetch(_)
+            | WorkerOutcome::Command(_)
+            | WorkerOutcome::Mutation(_)
+            | WorkerOutcome::FileOperation(_)
+            | WorkerOutcome::Format(_) => None,
+        };
+        Self {
+            outcome,
+            invalidation,
+        }
+    }
+
+    pub(crate) fn invalidation(&self) -> Option<RefreshScope> {
+        self.invalidation
+    }
 }
 
 pub(crate) struct BranchDeleteCompletion {
@@ -665,59 +713,67 @@ impl RepositorySession {
                 WorkerKind::Commit => {
                     self.operations.finish(Operation::Commit);
                     if active {
-                        return Some(WorkerCompletion::Commit(done.result));
+                        return Some(WorkerCompletion::new(WorkerOutcome::Commit(done.result)));
                     }
                 }
                 WorkerKind::Fetch => {
                     self.operations.finish(Operation::Fetch);
                     self.next_fetch_at = Instant::now() + fetch_interval;
                     if active {
-                        return Some(WorkerCompletion::Fetch(done.result));
+                        return Some(WorkerCompletion::new(WorkerOutcome::Fetch(done.result)));
                     }
                 }
                 WorkerKind::Command { label } => {
                     self.operations.finish(Operation::Command);
                     if active {
-                        return Some(WorkerCompletion::Command(CommandCompletion {
-                            label,
-                            result: done.result,
-                        }));
+                        return Some(WorkerCompletion::new(WorkerOutcome::Command(
+                            CommandCompletion {
+                                label,
+                                result: done.result,
+                            },
+                        )));
                     }
                 }
                 WorkerKind::Mutation => {
                     self.operations.finish(Operation::Mutation);
                     if active {
-                        return Some(WorkerCompletion::Mutation(done.result.map(|_| ())));
+                        return Some(WorkerCompletion::new(WorkerOutcome::Mutation(
+                            done.result.map(|_| ()),
+                        )));
                     }
                 }
                 WorkerKind::FileOperation { selection, message } => {
                     self.operations.finish(Operation::Mutation);
                     if active {
-                        return Some(WorkerCompletion::FileOperation(FileOperationCompletion {
-                            result: done.result.map(|_| selection),
-                            message,
-                        }));
+                        return Some(WorkerCompletion::new(WorkerOutcome::FileOperation(
+                            FileOperationCompletion {
+                                result: done.result.map(|_| selection),
+                                message,
+                            },
+                        )));
                     }
                 }
                 WorkerKind::DiscardUnstaged { path } => {
                     self.operations.finish(Operation::Mutation);
                     if active {
-                        return Some(WorkerCompletion::DiscardUnstaged(
+                        return Some(WorkerCompletion::new(WorkerOutcome::DiscardUnstaged(
                             DiscardUnstagedCompletion {
                                 path,
                                 result: done.result.map(|_| ()),
                             },
-                        ));
+                        )));
                     }
                 }
                 WorkerKind::Format { path, formatter } => {
                     self.operations.finish(Operation::Format);
                     if active {
-                        return Some(WorkerCompletion::Format(FormatCompletion {
-                            path,
-                            formatter,
-                            result: done.result,
-                        }));
+                        return Some(WorkerCompletion::new(WorkerOutcome::Format(
+                            FormatCompletion {
+                                path,
+                                formatter,
+                                result: done.result,
+                            },
+                        )));
                     }
                 }
                 WorkerKind::BranchDelete {
@@ -727,12 +783,14 @@ impl RepositorySession {
                 } => {
                     self.operations.finish(Operation::Mutation);
                     if active {
-                        return Some(WorkerCompletion::BranchDelete(BranchDeleteCompletion {
-                            branch,
-                            remote,
-                            force,
-                            result: done.result.map(|_| ()),
-                        }));
+                        return Some(WorkerCompletion::new(WorkerOutcome::BranchDelete(
+                            BranchDeleteCompletion {
+                                branch,
+                                remote,
+                                force,
+                                result: done.result.map(|_| ()),
+                            },
+                        )));
                     }
                 }
             }
@@ -861,6 +919,57 @@ impl RepositorySession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn command_output(success: bool) -> CommandOutput {
+        CommandOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            success,
+            exit_code: Some(if success { 0 } else { 1 }),
+        }
+    }
+
+    #[test]
+    fn completions_declare_repository_invalidation_policy() {
+        assert_eq!(
+            WorkerCompletion::new(WorkerOutcome::Commit(Ok(command_output(true)))).invalidation(),
+            Some(RefreshScope::WORKTREE.union(RefreshScope::HISTORY_AND_REFS))
+        );
+        assert_eq!(
+            WorkerCompletion::new(WorkerOutcome::Command(CommandCompletion {
+                label: "command".to_owned(),
+                result: Ok(command_output(false)),
+            }))
+            .invalidation(),
+            None
+        );
+        assert_eq!(
+            WorkerCompletion::new(WorkerOutcome::FileOperation(FileOperationCompletion {
+                result: Ok(None),
+                message: "saved".to_owned(),
+            }))
+            .invalidation(),
+            Some(RefreshScope::WORKTREE_AND_INVENTORY)
+        );
+        assert_eq!(
+            WorkerCompletion::new(WorkerOutcome::DiscardUnstaged(DiscardUnstagedCompletion {
+                path: "file".to_owned(),
+                result: Err("failed".to_owned()),
+            }))
+            .invalidation(),
+            Some(RefreshScope::WORKTREE_AND_INVENTORY)
+        );
+        assert_eq!(
+            WorkerCompletion::new(WorkerOutcome::BranchDelete(BranchDeleteCompletion {
+                branch: "topic".to_owned(),
+                remote: None,
+                force: false,
+                result: Err("failed".to_owned()),
+            }))
+            .invalidation(),
+            Some(RefreshScope::HISTORY_AND_REFS)
+        );
+    }
 
     #[test]
     fn ignores_worker_completion_from_a_previous_repository() {
