@@ -155,6 +155,8 @@ pub struct Regions {
     pub settings: Option<Rect>,
     pub help: Option<Rect>,
     pub workspace_panel: Option<Rect>,
+    pub workspace_panel_workspaces: Option<Rect>,
+    pub workspace_panel_agents: Option<Rect>,
     pub workspace_panel_splitter: Option<Rect>,
     pub workspace_panel_bounds: Option<Rect>,
     pub workspace_presets_overlay: Option<Rect>,

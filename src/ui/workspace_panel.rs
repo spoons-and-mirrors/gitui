@@ -27,11 +27,14 @@ pub(super) fn draw(
         return targets;
     }
 
+    let (workspace_section, agent_section) = section_areas(area);
     let body = Rect::new(
-        area.x.saturating_add(1),
-        area.y.saturating_add(1),
-        area.width.saturating_sub(2),
-        area.height.saturating_sub(2),
+        workspace_section.x,
+        workspace_section.y,
+        workspace_section.width,
+        workspace_section
+            .height
+            .saturating_add(agent_section.height),
     );
     let footer = Rect::new(
         area.x.saturating_add(1),
@@ -40,52 +43,81 @@ pub(super) fn draw(
         1,
     );
 
-    keep_selection_visible(panel, usize::from(body.height));
-    let rows = panel.rows();
     let spinner_frame = panel.spinner_frame();
     let mut create_button = None;
     let mut snapshot_button = None;
-    for (visual_row, row) in rows.iter().copied().enumerate().skip(panel.scroll) {
-        let screen_row = visual_row.saturating_sub(panel.scroll);
-        if screen_row >= usize::from(body.height) {
+
+    if workspace_section.height > 0 {
+        let row_area = Rect::new(
+            workspace_section.x,
+            workspace_section.y,
+            workspace_section.width,
+            1,
+        );
+        let (create, load) = draw_workspace_header(
+            frame,
+            row_area,
+            panel.create_menu_open || hovered == Some(WorkspacePanelHitTarget::CreateMenu),
+            panel.snapshot_menu_open || hovered == Some(WorkspacePanelHitTarget::SnapshotMenu),
+        );
+        create_button = Some(create);
+        targets.push((
+            HitTarget::WorkspacePanel(WorkspacePanelHitTarget::CreateMenu),
+            create,
+        ));
+        if let Some(load) = load {
+            snapshot_button = Some(load);
+            targets.push((
+                HitTarget::WorkspacePanel(WorkspacePanelHitTarget::SnapshotMenu),
+                load,
+            ));
+        }
+        let collapse = Rect::new(row_area.right().saturating_sub(1), row_area.y, 1, 1);
+        let collapse_marker = match panel.placement {
+            WorkspacePanelPlacement::Right => "›",
+            WorkspacePanelPlacement::Off | WorkspacePanelPlacement::Left => "‹",
+        };
+        frame.render_widget(
+            Paragraph::new(collapse_marker).style(Style::default().fg(palette().faint)),
+            collapse,
+        );
+        targets.push((
+            HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Collapse),
+            collapse,
+        ));
+    }
+
+    let workspace_list = Rect::new(
+        workspace_section.x,
+        workspace_section.y.saturating_add(1),
+        workspace_section.width,
+        workspace_section.height.saturating_sub(1),
+    );
+    let workspace_rows = panel.workspace_rows();
+    let selected_workspace_row = panel.selected_workspace_visual_row();
+    keep_section_visible(
+        &mut panel.workspace_scroll,
+        selected_workspace_row,
+        workspace_rows.len(),
+        usize::from(workspace_list.height),
+    );
+    for (visual_row, row) in workspace_rows
+        .iter()
+        .copied()
+        .enumerate()
+        .skip(panel.workspace_scroll)
+    {
+        let screen_row = visual_row.saturating_sub(panel.workspace_scroll);
+        if screen_row >= usize::from(workspace_list.height) {
             break;
         }
-        let row_area = Rect::new(body.x, body.y + screen_row as u16, body.width, 1);
+        let row_area = Rect::new(
+            workspace_list.x,
+            workspace_list.y + screen_row as u16,
+            workspace_list.width,
+            1,
+        );
         match row {
-            WorkspacePanelRow::Header => {
-                let (create, load) = draw_workspace_header(
-                    frame,
-                    row_area,
-                    panel.create_menu_open || hovered == Some(WorkspacePanelHitTarget::CreateMenu),
-                    panel.snapshot_menu_open
-                        || hovered == Some(WorkspacePanelHitTarget::SnapshotMenu),
-                );
-                create_button = Some(create);
-                targets.push((
-                    HitTarget::WorkspacePanel(WorkspacePanelHitTarget::CreateMenu),
-                    create,
-                ));
-                if let Some(load) = load {
-                    snapshot_button = Some(load);
-                    targets.push((
-                        HitTarget::WorkspacePanel(WorkspacePanelHitTarget::SnapshotMenu),
-                        load,
-                    ));
-                }
-                let collapse = Rect::new(row_area.right().saturating_sub(1), row_area.y, 1, 1);
-                let collapse_marker = match panel.placement {
-                    WorkspacePanelPlacement::Right => "›",
-                    WorkspacePanelPlacement::Off | WorkspacePanelPlacement::Left => "‹",
-                };
-                frame.render_widget(
-                    Paragraph::new(collapse_marker).style(Style::default().fg(palette().faint)),
-                    collapse,
-                );
-                targets.push((
-                    HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Collapse),
-                    collapse,
-                ));
-            }
             WorkspacePanelRow::Group(index) => {
                 let group = &panel.groups[index];
                 let count = panel
@@ -128,9 +160,78 @@ pub(super) fn draw(
                     row_area,
                 ));
             }
-            WorkspacePanelRow::Spacer => {}
-            WorkspacePanelRow::AgentHeader => {
-                draw_header(frame, row_area, "AGENTS", panel.agents.len());
+            _ => {}
+        }
+    }
+
+    if panel.workspaces.is_empty() && workspace_list.height > 0 {
+        let state = panel.error.as_deref().unwrap_or(if panel.loading {
+            "Loading Herdr…"
+        } else {
+            "No workspaces"
+        });
+        frame.render_widget(
+            Paragraph::new(truncate_width(state, usize::from(workspace_list.width))).style(
+                Style::default().fg(if panel.error.is_some() {
+                    palette().red
+                } else {
+                    palette().faint
+                }),
+            ),
+            Rect::new(workspace_list.x, workspace_list.y, workspace_list.width, 1),
+        );
+    }
+
+    if agent_section.height > 0 {
+        draw_header(
+            frame,
+            Rect::new(agent_section.x, agent_section.y, agent_section.width, 1),
+            "AGENTS",
+            panel.agents.len(),
+        );
+    }
+    let agent_list = Rect::new(
+        agent_section.x,
+        agent_section.y.saturating_add(1),
+        agent_section.width,
+        agent_section.height.saturating_sub(1),
+    );
+    let agent_rows = panel.agent_rows();
+    let selected_agent_row = panel.selected_agent_visual_row();
+    keep_section_visible(
+        &mut panel.agent_scroll,
+        selected_agent_row,
+        agent_rows.len(),
+        usize::from(agent_list.height),
+    );
+    for (visual_row, row) in agent_rows
+        .iter()
+        .copied()
+        .enumerate()
+        .skip(panel.agent_scroll)
+    {
+        let screen_row = visual_row.saturating_sub(panel.agent_scroll);
+        if screen_row >= usize::from(agent_list.height) {
+            break;
+        }
+        let row_area = Rect::new(
+            agent_list.x,
+            agent_list.y + screen_row as u16,
+            agent_list.width,
+            1,
+        );
+        match row {
+            WorkspacePanelRow::AgentGroup(index) => {
+                let group = &panel.groups[index];
+                let count = (0..panel.agents.len())
+                    .filter(|agent| panel.group_for_agent(*agent) == Some(index))
+                    .count();
+                let marker = if group.expanded { "▾" } else { "▸" };
+                draw_group(frame, row_area, marker, &group.name, count, false);
+                targets.push((
+                    HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Group(index)),
+                    row_area,
+                ));
             }
             WorkspacePanelRow::EmptyAgents => {
                 frame.render_widget(
@@ -169,26 +270,7 @@ pub(super) fn draw(
                     row_area,
                 ));
             }
-        }
-    }
-
-    if panel.workspaces.is_empty() {
-        let state = panel.error.as_deref().unwrap_or(if panel.loading {
-            "Loading Herdr…"
-        } else {
-            "No workspaces"
-        });
-        if body.height > 1 {
-            frame.render_widget(
-                Paragraph::new(truncate_width(state, usize::from(body.width))).style(
-                    Style::default().fg(if panel.error.is_some() {
-                        palette().red
-                    } else {
-                        palette().faint
-                    }),
-                ),
-                Rect::new(body.x, body.y.saturating_add(1), body.width, 1),
-            );
+            _ => {}
         }
     }
 
@@ -270,6 +352,25 @@ pub(super) fn draw(
         }
     }
     targets
+}
+
+pub(super) fn section_areas(area: Rect) -> (Rect, Rect) {
+    let body = Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    );
+    let workspace_height = body.height.saturating_add(1) / 2;
+    (
+        Rect::new(body.x, body.y, body.width, workspace_height),
+        Rect::new(
+            body.x,
+            body.y.saturating_add(workspace_height),
+            body.width,
+            body.height.saturating_sub(workspace_height),
+        ),
+    )
 }
 
 fn draw_snapshot_popover(
@@ -579,22 +680,23 @@ fn status_color(status: AgentStatus) -> ratatui::style::Color {
     }
 }
 
-fn keep_selection_visible(panel: &mut WorkspacePanel, viewport: usize) {
+fn keep_section_visible(
+    scroll: &mut usize,
+    selected: Option<usize>,
+    row_count: usize,
+    viewport: usize,
+) {
     if viewport == 0 {
         return;
     }
-    let Some(selected) = panel.selected_visual_row() else {
-        panel.scroll = panel
-            .scroll
-            .min(panel.visual_row_count().saturating_sub(viewport));
+    let Some(selected) = selected else {
+        *scroll = (*scroll).min(row_count.saturating_sub(viewport));
         return;
     };
-    if selected < panel.scroll {
-        panel.scroll = selected;
-    } else if selected >= panel.scroll.saturating_add(viewport) {
-        panel.scroll = selected.saturating_add(1).saturating_sub(viewport);
+    if selected < *scroll {
+        *scroll = selected;
+    } else if selected >= (*scroll).saturating_add(viewport) {
+        *scroll = selected.saturating_add(1).saturating_sub(viewport);
     }
-    panel.scroll = panel
-        .scroll
-        .min(panel.visual_row_count().saturating_sub(viewport));
+    *scroll = (*scroll).min(row_count.saturating_sub(viewport));
 }

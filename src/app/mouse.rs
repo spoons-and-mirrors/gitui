@@ -962,6 +962,18 @@ impl App {
     fn scroll_at(&mut self, point: Position, delta: isize) {
         if self
             .regions
+            .workspace_panel_workspaces
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.workspace_panel.move_workspace_selection(delta);
+        } else if self
+            .regions
+            .workspace_panel_agents
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.workspace_panel.move_agent_selection(delta);
+        } else if self
+            .regions
             .workspace_panel
             .is_some_and(|rect| rect.contains(point))
         {

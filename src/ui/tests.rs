@@ -12,7 +12,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::{
     App, BrowserTab, ChangesHitTarget, CommitMessageGenerator, ExplorerHitTarget, GraphHitTarget,
     HitTarget, LeftPane, Mode, PullRequest, RemoteItems, RepositoryBrowserHitTarget, Settings,
-    SettingsStore, View, WorkspacePanel, WorkspacePanelHitTarget,
+    SettingsStore, View, WorkspaceDropTarget, WorkspacePanel, WorkspacePanelHitTarget,
 };
 
 use super::draw;
@@ -1273,6 +1273,11 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
 
     assert_eq!(app.regions.workspace_panel.unwrap().width, 26);
     assert_eq!(app.regions.worktree.unwrap().x, 27);
+    let panel_area = app.regions.workspace_panel.unwrap();
+    let workspace_section = app.regions.workspace_panel_workspaces.unwrap();
+    let agent_section = app.regions.workspace_panel_agents.unwrap();
+    assert_eq!(agent_section.y, panel_area.y + panel_area.height / 2);
+    assert_eq!(workspace_section.height, agent_section.height);
     assert_eq!(
         app.regions
             .hit_target_rect(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Collapse,))
@@ -1514,6 +1519,10 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
     app.workspace_panel.paste("Current work");
     app.workspace_panel
         .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.workspace_panel.begin_workspace_drag(0));
+    app.workspace_panel
+        .update_workspace_drag(Some(WorkspaceDropTarget::Group(0)));
+    app.workspace_panel.finish_workspace_drag();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert!(
         app.regions
@@ -1527,7 +1536,7 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(rendered.contains("Current work"));
+    assert_eq!(rendered.matches("Current work").count(), 2);
 
     app.workspace_panel.cycle_placement();
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();

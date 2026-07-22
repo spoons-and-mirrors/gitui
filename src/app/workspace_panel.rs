@@ -133,6 +133,7 @@ pub(crate) enum WorkspacePanelRow {
     Workspace(usize),
     Spacer,
     AgentHeader,
+    AgentGroup(usize),
     Agent(usize),
     EmptyAgents,
 }
@@ -261,7 +262,8 @@ pub(crate) struct WorkspacePanel {
     pub(crate) agents: Vec<HerdrAgent>,
     pub(crate) groups: Vec<WorkspaceGroup>,
     pub(crate) selected: Option<usize>,
-    pub(crate) scroll: usize,
+    pub(crate) workspace_scroll: usize,
+    pub(crate) agent_scroll: usize,
     pub(crate) loading: bool,
     pub(crate) error: Option<String>,
     pub(crate) group_input: TextInput,
@@ -329,7 +331,8 @@ impl WorkspacePanel {
             agents: Vec::new(),
             groups,
             selected: None,
-            scroll: 0,
+            workspace_scroll: 0,
+            agent_scroll: 0,
             loading: false,
             error: None,
             group_input: TextInput::default(),
@@ -396,7 +399,17 @@ impl WorkspacePanel {
 
     pub(crate) fn rows(&self) -> Vec<WorkspacePanelRow> {
         let mut rows = vec![WorkspacePanelRow::Header];
+        rows.extend(self.workspace_rows());
+        rows.push(WorkspacePanelRow::Spacer);
+        rows.push(WorkspacePanelRow::AgentHeader);
+        rows.extend(self.agent_rows());
+        rows
+    }
+
+    pub(crate) fn workspace_rows(&self) -> Vec<WorkspacePanelRow> {
+        let mut rows = Vec::new();
         for (group_index, group) in self.groups.iter().enumerate() {
+            rows.push(WorkspacePanelRow::Spacer);
             rows.push(WorkspacePanelRow::Group(group_index));
             if group.expanded {
                 for (index, workspace) in
@@ -432,13 +445,33 @@ impl WorkspacePanel {
                 })
                 .map(|(index, _)| WorkspacePanelRow::Workspace(index)),
         );
-        rows.push(WorkspacePanelRow::Spacer);
-        rows.push(WorkspacePanelRow::AgentHeader);
+        rows
+    }
+
+    pub(crate) fn agent_rows(&self) -> Vec<WorkspacePanelRow> {
         if self.agents.is_empty() {
-            rows.push(WorkspacePanelRow::EmptyAgents);
-        } else {
-            rows.extend((0..self.agents.len()).map(WorkspacePanelRow::Agent));
+            return vec![WorkspacePanelRow::EmptyAgents];
         }
+
+        let mut rows = Vec::new();
+        for (group_index, group) in self.groups.iter().enumerate() {
+            let agents = (0..self.agents.len())
+                .filter(|agent| self.group_for_agent(*agent) == Some(group_index))
+                .collect::<Vec<_>>();
+            if agents.is_empty() {
+                continue;
+            }
+            rows.push(WorkspacePanelRow::Spacer);
+            rows.push(WorkspacePanelRow::AgentGroup(group_index));
+            if group.expanded {
+                rows.extend(agents.into_iter().map(WorkspacePanelRow::Agent));
+            }
+        }
+        rows.extend(
+            (0..self.agents.len())
+                .filter(|agent| self.group_for_agent(*agent).is_none())
+                .map(WorkspacePanelRow::Agent),
+        );
         rows
     }
 
@@ -1278,6 +1311,15 @@ impl WorkspacePanel {
         self.group_for_workspace_id(workspace_id)
     }
 
+    pub(crate) fn group_for_agent(&self, index: usize) -> Option<usize> {
+        let workspace_id = &self.agents.get(index)?.workspace_id;
+        let workspace = self
+            .workspaces
+            .iter()
+            .position(|workspace| &workspace.id == workspace_id)?;
+        self.group_for_workspace(workspace)
+    }
+
     pub(crate) fn workspace_indent(&self, index: usize) -> &'static str {
         let Some(workspace) = self.workspaces.get(index) else {
             return "";
@@ -1521,10 +1563,50 @@ impl WorkspacePanel {
             self.selected = None;
             return;
         }
-        let current = self
+        self.move_selection_within(&selections, delta);
+    }
+
+    pub(crate) fn move_workspace_selection(&mut self, delta: isize) {
+        let selections = self
+            .workspace_rows()
+            .into_iter()
+            .filter_map(|row| match row {
+                WorkspacePanelRow::Workspace(index) => Some(index),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        self.move_selection_within(&selections, delta);
+    }
+
+    pub(crate) fn move_agent_selection(&mut self, delta: isize) {
+        let selections = self
+            .agent_rows()
+            .into_iter()
+            .filter_map(|row| match row {
+                WorkspacePanelRow::Agent(index) => {
+                    Some(self.workspaces.len().saturating_add(index))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        self.move_selection_within(&selections, delta);
+    }
+
+    fn move_selection_within(&mut self, selections: &[usize], delta: isize) {
+        if selections.is_empty() {
+            return;
+        }
+        let Some(current) = self
             .selected
             .and_then(|selected| selections.iter().position(|entry| *entry == selected))
-            .unwrap_or(0);
+        else {
+            self.selected = if delta < 0 {
+                selections.last().copied()
+            } else {
+                selections.first().copied()
+            };
+            return;
+        };
         self.selected = selections
             .get(
                 current
@@ -1608,7 +1690,12 @@ impl WorkspacePanel {
             })
             .or_else(|| (self.entry_count() > 0).then_some(0));
         self.ensure_visible_selection();
-        self.scroll = self.scroll.min(self.visual_row_count().saturating_sub(1));
+        self.workspace_scroll = self
+            .workspace_scroll
+            .min(self.workspace_rows().len().saturating_sub(1));
+        self.agent_scroll = self
+            .agent_scroll
+            .min(self.agent_rows().len().saturating_sub(1));
     }
 
     fn select_host_workspace(&mut self) {
@@ -1624,10 +1711,7 @@ impl WorkspacePanel {
         }
     }
 
-    pub(crate) fn visual_row_count(&self) -> usize {
-        self.rows().len()
-    }
-
+    #[cfg(test)]
     pub(crate) fn selected_visual_row(&self) -> Option<usize> {
         let selected = self.selected?;
         self.rows().iter().position(|row| match row {
@@ -1636,6 +1720,21 @@ impl WorkspacePanel {
                 self.workspaces.len().saturating_add(*index) == selected
             }
             _ => false,
+        })
+    }
+
+    pub(crate) fn selected_workspace_visual_row(&self) -> Option<usize> {
+        let selected = self.selected?;
+        self.workspace_rows().iter().position(
+            |row| matches!(row, WorkspacePanelRow::Workspace(index) if *index == selected),
+        )
+    }
+
+    pub(crate) fn selected_agent_visual_row(&self) -> Option<usize> {
+        let selected = self.selected?;
+        self.agent_rows().iter().position(|row| {
+            matches!(row, WorkspacePanelRow::Agent(index)
+                if self.workspaces.len().saturating_add(*index) == selected)
         })
     }
 
@@ -2309,12 +2408,14 @@ mod tests {
             &panel.rows()[..5],
             &[
                 WorkspacePanelRow::Header,
+                WorkspacePanelRow::Spacer,
                 WorkspacePanelRow::Group(0),
                 WorkspacePanelRow::Workspace(0),
                 WorkspacePanelRow::Workspace(2),
-                WorkspacePanelRow::Group(1),
             ]
         );
+        assert_eq!(panel.rows()[5], WorkspacePanelRow::Spacer);
+        assert_eq!(panel.rows()[6], WorkspacePanelRow::Group(1));
     }
 
     #[test]
@@ -2344,6 +2445,14 @@ mod tests {
         panel.update_workspace_drag(Some(WorkspaceDropTarget::Group(0)));
         assert_eq!(panel.finish_workspace_drag(), WorkspacePanelEffect::None);
         assert_eq!(panel.group_for_workspace(0), Some(0));
+        assert_eq!(
+            panel.agent_rows(),
+            [
+                WorkspacePanelRow::Spacer,
+                WorkspacePanelRow::AgentGroup(0),
+                WorkspacePanelRow::Agent(0),
+            ]
+        );
         assert!(path.exists());
 
         assert!(panel.begin_workspace_drag(1));
@@ -2364,6 +2473,21 @@ mod tests {
         assert_eq!(panel.finish_workspace_drag(), WorkspacePanelEffect::None);
         assert_eq!(panel.group_for_workspace(0), Some(0));
         assert_eq!(panel.groups[1].workspace_ids, ["w2"]);
+        assert_eq!(
+            panel.agent_rows(),
+            [
+                WorkspacePanelRow::Spacer,
+                WorkspacePanelRow::AgentGroup(0),
+                WorkspacePanelRow::Agent(0),
+            ]
+        );
+
+        panel.toggle_group(0);
+        assert_eq!(
+            panel.agent_rows(),
+            [WorkspacePanelRow::Spacer, WorkspacePanelRow::AgentGroup(0)]
+        );
+        panel.toggle_group(0);
 
         panel.toggle_group(1);
         assert!(!panel.groups[1].expanded);

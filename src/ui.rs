@@ -93,6 +93,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             WorkspacePanelPlacement::Off => unreachable!(),
         };
         app.regions.workspace_panel = Some(panel_area);
+        let (workspace_section, agent_section) = workspace_panel::section_areas(panel_area);
+        app.regions.workspace_panel_workspaces = Some(workspace_section);
+        app.regions.workspace_panel_agents = Some(agent_section);
         app.regions.workspace_panel_splitter = Some(divider);
         app.regions.workspace_panel_bounds = Some(content);
         let workspace_panel_hover = match app.hovered_hit_target {
