@@ -27,9 +27,9 @@ pub(crate) use repository_browser::{
 };
 pub(crate) use workspace_panel::{
     AgentStatus, DEFAULT_WIDTH as DEFAULT_WORKSPACE_PANEL_WIDTH,
-    MINIMUM_WIDTH as MINIMUM_WORKSPACE_PANEL_WIDTH, SnapshotLoadDialog, WorkspaceDeleteDialog,
-    WorkspaceDeleteKind, WorkspaceDropTarget, WorkspacePanel, WorkspacePanelEffect,
-    WorkspacePanelPlacement, WorkspacePanelRow,
+    MINIMUM_WIDTH as MINIMUM_WORKSPACE_PANEL_WIDTH, SPINNER_FRAMES, SnapshotLoadDialog,
+    WorkspaceDeleteDialog, WorkspaceDeleteKind, WorkspaceDropTarget, WorkspacePanel,
+    WorkspacePanelEffect, WorkspacePanelPlacement, WorkspacePanelRow,
 };
 
 use std::{

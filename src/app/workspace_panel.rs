@@ -17,6 +17,8 @@ pub(crate) const MINIMUM_WIDTH: u16 = 18;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
+const SPINNER_INTERVAL: Duration = Duration::from_millis(80);
+pub(crate) const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const SNAPSHOT_SAVE_ITEM: usize = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -333,6 +335,8 @@ pub(crate) struct WorkspacePanel {
     sender: Sender<Completion>,
     receiver: Receiver<Completion>,
     next_refresh: Instant,
+    spinner_frame: usize,
+    next_spinner: Instant,
 }
 
 pub(crate) struct WorkspacePanelEntryState {
@@ -408,6 +412,8 @@ impl WorkspacePanel {
             sender,
             receiver,
             next_refresh: Instant::now(),
+            spinner_frame: 0,
+            next_spinner: Instant::now(),
         }
     }
 
@@ -576,12 +582,41 @@ impl WorkspacePanel {
             self.start_snapshot();
             changed = true;
         }
+        changed |= self.poll_spinner(Instant::now());
         (
             changed,
             action_error,
             reopen_path,
             workspace_focus_succeeded,
         )
+    }
+
+    pub(crate) fn spinner_frame(&self) -> usize {
+        self.spinner_frame
+    }
+
+    fn poll_spinner(&mut self, now: Instant) -> bool {
+        let working = self.is_visible()
+            && self.layout_available
+            && (self
+                .workspaces
+                .iter()
+                .any(|workspace| workspace.status == AgentStatus::Working)
+                || self
+                    .agents
+                    .iter()
+                    .any(|agent| agent.status == AgentStatus::Working));
+        if !working {
+            self.spinner_frame = 0;
+            self.next_spinner = now;
+            return false;
+        }
+        if now < self.next_spinner {
+            return false;
+        }
+        self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
+        self.next_spinner = now + SPINNER_INTERVAL;
+        true
     }
 
     pub(crate) fn refresh(&mut self) {
@@ -2970,5 +3005,23 @@ mod tests {
             }
         });
         assert_eq!(workspace_id_in(&response).as_deref(), Some("workspace-42"));
+    }
+
+    #[test]
+    fn animates_the_status_marker_while_an_agent_is_working() {
+        let mut panel = WorkspacePanel::ready_for_test(&snapshot());
+        panel.set_layout_available(true);
+        let now = Instant::now();
+        panel.next_spinner = now;
+
+        assert!(panel.poll_spinner(now));
+        assert_eq!(panel.spinner_frame, 1);
+        assert!(!panel.poll_spinner(now));
+        assert!(panel.poll_spinner(now + SPINNER_INTERVAL));
+        assert_eq!(panel.spinner_frame, 2);
+
+        panel.workspaces[0].status = AgentStatus::Idle;
+        assert!(!panel.poll_spinner(now + SPINNER_INTERVAL * 2));
+        assert_eq!(panel.spinner_frame, 0);
     }
 }

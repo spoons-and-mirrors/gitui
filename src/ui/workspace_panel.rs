@@ -8,8 +8,8 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
-    AgentStatus, HitTarget, WorkspaceDropTarget, WorkspacePanel, WorkspacePanelHitTarget,
-    WorkspacePanelPlacement, WorkspacePanelRow,
+    AgentStatus, HitTarget, SPINNER_FRAMES, WorkspaceDropTarget, WorkspacePanel,
+    WorkspacePanelHitTarget, WorkspacePanelPlacement, WorkspacePanelRow,
 };
 
 use super::{fill, palette, truncate_width};
@@ -42,6 +42,7 @@ pub(super) fn draw(
 
     keep_selection_visible(panel, usize::from(body.height));
     let rows = panel.rows();
+    let spinner_frame = panel.spinner_frame();
     let mut create_button = None;
     let mut snapshot_button = None;
     for (visual_row, row) in rows.iter().copied().enumerate().skip(panel.scroll) {
@@ -118,6 +119,7 @@ pub(super) fn draw(
                     workspace.status,
                     state.active,
                     state.selected || ungrouped_drop,
+                    spinner_frame,
                 );
                 targets.push((
                     HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Workspace(index)),
@@ -156,6 +158,7 @@ pub(super) fn draw(
                     agent.status,
                     state.active,
                     state.selected,
+                    spinner_frame,
                 );
                 targets.push((
                     HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(index)),
@@ -500,10 +503,12 @@ fn draw_entry(
     status: AgentStatus,
     active: bool,
     selected: bool,
+    spinner_frame: usize,
 ) {
     let marker = if active { "› " } else { "  " };
     let status_marker = match status {
         AgentStatus::Unknown => "○",
+        AgentStatus::Working => SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()],
         _ => "●",
     };
     let available = usize::from(area.width).saturating_sub(4);

@@ -8,6 +8,7 @@ use std::{
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::fuzzy::{fuzzy_text_score, fuzzy_text_score_lower};
 
@@ -33,6 +34,7 @@ pub enum PickerAction {
 pub struct Explorer {
     pub(crate) directory: PathBuf,
     pub(crate) path_input: String,
+    pub(crate) path_cursor: usize,
     pub(crate) editing_path: bool,
     pub(crate) entries: Vec<PickerEntry>,
     pub(crate) state: ListState,
@@ -46,6 +48,7 @@ pub struct Explorer {
     pub(crate) surroundings_focused: bool,
     pub(crate) preview_entries: Vec<PickerEntry>,
     directory_index: Vec<IndexedDirectory>,
+    index_roots: Vec<PathBuf>,
     index_rx: Option<Receiver<Vec<IndexedDirectory>>>,
     browse_rx: Option<Receiver<Result<BrowseResult, String>>>,
 }
@@ -81,8 +84,10 @@ pub(super) enum PickerCommand {
 
 impl Explorer {
     pub(super) fn new(directory: PathBuf) -> Self {
+        let index_roots = search_roots(&directory);
         let mut picker = Self {
             path_input: display_search_path(&directory),
+            path_cursor: display_search_path(&directory).len(),
             directory,
             editing_path: false,
             entries: Vec::new(),
@@ -97,6 +102,7 @@ impl Explorer {
             surroundings_focused: false,
             preview_entries: Vec::new(),
             directory_index: Vec::new(),
+            index_roots,
             index_rx: None,
             browse_rx: None,
         };
@@ -109,22 +115,53 @@ impl Explorer {
             match key.code {
                 KeyCode::Esc => {
                     self.editing_path = false;
+                    self.set_path_input(display_search_path(&self.directory));
                     self.matches.clear();
+                    self.preview_entries.clear();
+                    self.error = None;
                 }
                 KeyCode::Enter => return self.confirm_path(),
                 KeyCode::Tab => self.accept_completion(),
                 KeyCode::Down => self.move_match_selection(1),
                 KeyCode::Up => self.move_match_selection(-1),
+                KeyCode::Backspace
+                    if key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    delete_previous_path_segment(&mut self.path_input, &mut self.path_cursor);
+                    self.refresh_matches();
+                }
                 KeyCode::Backspace => {
-                    self.path_input.pop();
+                    delete_previous_character(&mut self.path_input, &mut self.path_cursor);
                     self.refresh_matches();
                 }
+                KeyCode::Delete => {
+                    delete_next_character(&mut self.path_input, self.path_cursor);
+                    self.refresh_matches();
+                }
+                KeyCode::Left => {
+                    self.path_cursor = previous_boundary(&self.path_input, self.path_cursor);
+                }
+                KeyCode::Right => {
+                    self.path_cursor = next_boundary(&self.path_input, self.path_cursor);
+                }
+                KeyCode::Home => self.path_cursor = 0,
+                KeyCode::End => self.path_cursor = self.path_input.len(),
                 KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.path_input.clear();
+                    self.set_path_input(String::new());
                     self.refresh_matches();
                 }
-                KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.path_input.push(character);
+                KeyCode::Char(character)
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    self.path_input.insert(self.path_cursor, character);
+                    self.path_cursor = boundary_at_or_after(
+                        &self.path_input,
+                        self.path_cursor + character.len_utf8(),
+                    );
                     self.refresh_matches();
                 }
                 _ => {}
@@ -166,6 +203,12 @@ impl Explorer {
                 self.begin_search(Some(std::path::MAIN_SEPARATOR_STR));
                 PickerCommand::None
             }
+            KeyCode::Char('~') => {
+                if let Some(home) = home_directory() {
+                    self.navigate(home);
+                }
+                PickerCommand::None
+            }
             KeyCode::Char('r') => {
                 self.reload();
                 PickerCommand::None
@@ -184,7 +227,9 @@ impl Explorer {
 
     pub(super) fn paste(&mut self, text: &str) {
         if self.editing_path {
-            self.path_input.push_str(text);
+            self.path_input.insert_str(self.path_cursor, text);
+            self.path_cursor =
+                boundary_at_or_after(&self.path_input, self.path_cursor + text.len());
             self.refresh_matches();
         }
     }
@@ -264,7 +309,9 @@ impl Explorer {
         self.editing_path = true;
         self.error = None;
         if let Some(initial) = initial {
-            self.path_input = initial.to_owned();
+            self.set_path_input(initial.to_owned());
+        } else {
+            self.path_cursor = self.path_input.len();
         }
         self.refresh_matches();
     }
@@ -279,7 +326,9 @@ impl Explorer {
             self.directory_index = index;
             self.index_rx = None;
             self.searching = false;
-            self.refresh_matches();
+            if self.editing_path {
+                self.refresh_matches();
+            }
             changed = true;
         }
         if let Some(result) = self
@@ -304,8 +353,15 @@ impl Explorer {
     }
 
     pub(super) fn navigate(&mut self, path: PathBuf) {
+        let index_roots = search_roots(&path);
+        if self.index_roots != index_roots {
+            self.directory_index.clear();
+            self.index_rx = None;
+            self.index_roots = index_roots;
+            self.searching = false;
+        }
         self.directory = path;
-        self.path_input = display_search_path(&self.directory);
+        self.set_path_input(display_search_path(&self.directory));
         self.surroundings_focused = false;
         self.reload();
     }
@@ -324,7 +380,7 @@ impl Explorer {
         else {
             return;
         };
-        self.path_input = completion_path(&path);
+        self.set_path_input(completion_path(&path));
         self.refresh_matches();
     }
 
@@ -357,17 +413,23 @@ impl Explorer {
 
     fn refresh_matches(&mut self) {
         self.error = None;
+        let selected_path = self
+            .match_state
+            .selected()
+            .and_then(|index| self.matches.get(index))
+            .map(|entry| entry.path.clone());
         let query = self.path_input.trim();
         if query.is_empty() {
+            self.searching = false;
             self.matches.clear();
             self.preview_entries.clear();
             self.match_state.select(None);
             return;
         }
         if query.contains(['/', '\\']) || query.starts_with('~') {
+            self.searching = false;
             self.matches = path_completion_candidates(query, &self.directory);
-            self.match_state
-                .select((!self.matches.is_empty()).then_some(0));
+            self.select_match(selected_path.as_deref());
             self.refresh_preview();
             return;
         }
@@ -378,11 +440,12 @@ impl Explorer {
             self.searching = true;
             let (sender, receiver) = mpsc::channel();
             self.index_rx = Some(receiver);
-            let roots = search_roots(&self.directory);
+            let roots = self.index_roots.clone();
             thread::spawn(move || {
                 let _ = sender.send(index_directories(&roots));
             });
         }
+        self.searching = self.directory_index.is_empty() && self.index_rx.is_some();
 
         let query_lower = query.to_lowercase();
         let mut candidates = Vec::with_capacity(12);
@@ -428,8 +491,7 @@ impl Explorer {
                 action: PickerAction::Navigate,
             })
             .collect();
-        self.match_state
-            .select((!self.matches.is_empty()).then_some(0));
+        self.select_match(selected_path.as_deref());
         self.refresh_preview();
     }
 
@@ -442,8 +504,15 @@ impl Explorer {
         else {
             return;
         };
-        self.path_input = completion_path(&path);
+        self.set_path_input(completion_path(&path));
         self.refresh_matches();
+    }
+
+    fn select_match(&mut self, previous_path: Option<&Path>) {
+        let selected = previous_path
+            .and_then(|path| self.matches.iter().position(|entry| entry.path == path))
+            .or((!self.matches.is_empty()).then_some(0));
+        self.match_state.select(selected);
     }
 
     fn refresh_preview(&mut self) {
@@ -477,6 +546,87 @@ impl Explorer {
             self.directory.join(expanded)
         }
     }
+
+    fn set_path_input(&mut self, input: String) {
+        self.path_input = input;
+        self.path_cursor = self.path_input.len();
+    }
+}
+
+fn delete_previous_path_segment(input: &mut String, cursor: &mut usize) {
+    while *cursor > 0 {
+        let previous = previous_boundary(input, *cursor);
+        let character = input[previous..*cursor]
+            .chars()
+            .next()
+            .expect("character boundary");
+        if character != '/' && character != '\\' {
+            break;
+        }
+        input.drain(previous..*cursor);
+        *cursor = previous;
+    }
+    while *cursor > 0 {
+        let previous = previous_boundary(input, *cursor);
+        let character = input[previous..*cursor]
+            .chars()
+            .next()
+            .expect("character boundary");
+        if character == '/' || character == '\\' {
+            break;
+        }
+        input.drain(previous..*cursor);
+        *cursor = previous;
+    }
+    if *cursor < input.len() {
+        let next = next_boundary(input, *cursor);
+        let next_is_separator = input[*cursor..next]
+            .chars()
+            .next()
+            .is_some_and(|character| character == '/' || character == '\\');
+        let previous_is_separator = *cursor == 0
+            || input[..*cursor]
+                .chars()
+                .next_back()
+                .is_some_and(|character| character == '/' || character == '\\');
+        if next_is_separator && previous_is_separator {
+            input.drain(*cursor..next);
+        }
+    }
+}
+
+fn delete_previous_character(input: &mut String, cursor: &mut usize) {
+    let previous = previous_boundary(input, *cursor);
+    input.drain(previous..*cursor);
+    *cursor = previous;
+}
+
+fn delete_next_character(input: &mut String, cursor: usize) {
+    let next = next_boundary(input, cursor);
+    input.drain(cursor..next);
+}
+
+fn previous_boundary(input: &str, cursor: usize) -> usize {
+    input[..cursor]
+        .grapheme_indices(true)
+        .next_back()
+        .map_or(0, |(index, _)| index)
+}
+
+fn next_boundary(input: &str, cursor: usize) -> usize {
+    input[cursor..]
+        .grapheme_indices(true)
+        .nth(1)
+        .map_or(input.len(), |(index, _)| cursor + index)
+}
+
+fn boundary_at_or_after(input: &str, cursor: usize) -> usize {
+    input
+        .grapheme_indices(true)
+        .map(|(index, _)| index)
+        .chain(std::iter::once(input.len()))
+        .find(|index| *index >= cursor)
+        .unwrap_or(input.len())
 }
 
 fn load_directory_entries(directory: &Path) -> Result<BrowseResult, String> {
@@ -912,6 +1062,86 @@ mod tests {
 
         assert!(matches!(picker.confirm_path(), PickerCommand::None));
         assert_eq!(picker.directory, config);
+    }
+
+    #[test]
+    fn edits_paths_at_the_cursor_and_deletes_previous_segments() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut picker = Explorer::new(temp.path().to_path_buf());
+        picker.begin_search(Some("~/projects/alpha/"));
+
+        picker.handle_key(
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL),
+            true,
+        );
+        assert_eq!(picker.path_input, "~/projects/");
+        picker.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT), true);
+        assert_eq!(picker.path_input, "~/");
+
+        picker.begin_search(Some("~/foo/bar"));
+        picker.path_cursor = "~/foo".len();
+        picker.handle_key(
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL),
+            true,
+        );
+        assert_eq!(picker.path_input, "~/bar");
+
+        picker.begin_search(Some("/foo bar/"));
+        picker.handle_key(
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL),
+            true,
+        );
+        assert_eq!(picker.path_input, "/");
+
+        picker.begin_search(Some("cafe\u{301}"));
+        picker.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE), true);
+        assert_eq!(picker.path_input, "caf");
+
+        picker.begin_search(Some("👩👩"));
+        picker.path_cursor = "👩".len();
+        picker.handle_key(
+            KeyEvent::new(KeyCode::Char('\u{200d}'), KeyModifiers::NONE),
+            true,
+        );
+        assert_eq!(picker.path_cursor, picker.path_input.len());
+        picker.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE), true);
+        assert!(picker.path_input.is_empty());
+
+        picker.begin_search(Some("ac"));
+        picker.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), true);
+        picker.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), true);
+        assert_eq!(picker.path_input, "abc");
+        picker.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE), true);
+        picker.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE), true);
+        assert_eq!(picker.path_input, "bc");
+
+        picker.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), true);
+        assert_eq!(picker.path_input, display_search_path(temp.path()));
+        assert_eq!(picker.path_cursor, picker.path_input.len());
+    }
+
+    #[test]
+    fn invalidates_fuzzy_index_when_roaming_to_another_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+
+        let mut picker = Explorer::new(first.clone());
+        picker.directory_index.push(IndexedDirectory {
+            path: first.join("stale"),
+            name_lower: "stale".to_owned(),
+            depth: 1,
+            is_repo: false,
+        });
+        let (_, receiver) = mpsc::channel();
+        picker.index_rx = Some(receiver);
+
+        picker.navigate(second);
+
+        assert!(picker.directory_index.is_empty());
+        assert!(picker.index_rx.is_none());
     }
 
     #[test]

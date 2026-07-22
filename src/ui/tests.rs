@@ -972,6 +972,8 @@ fn renders_every_primary_surface() {
         .collect();
     assert!(explorer_search_screen.contains("PATH MATCHES"));
     assert!(explorer_search_screen.contains("LIVE PREVIEW"));
+    assert!(explorer_search_screen.contains("Ctrl/Alt+BS segment"));
+    assert!(!explorer_search_screen.contains('⌫'));
     assert!(app.regions.workspace_explorer_preview.is_some());
 
     app.mode = Mode::Normal;
@@ -1243,6 +1245,18 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
     assert!(rendered.contains("AGENTS"));
     assert!(rendered.contains("opencode / HUNKLE"));
     assert!(!rendered.contains('↻'));
+    for target in [
+        WorkspacePanelHitTarget::Workspace(0),
+        WorkspacePanelHitTarget::Agent(0),
+    ] {
+        let row = app
+            .regions
+            .hit_target_rect(HitTarget::WorkspacePanel(target))
+            .unwrap();
+        let status = &terminal.backend().buffer()[(row.right() - 1, row.y)];
+        assert_eq!(status.symbol(), "⠋");
+        assert_eq!(status.fg, super::palette().yellow);
+    }
     let workspace_row = app
         .regions
         .hit_target_rect(HitTarget::WorkspacePanel(
