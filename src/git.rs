@@ -2076,6 +2076,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         git(root, &["init", "-b", "main"]);
+        git(root, &["config", "user.name", "Test Author"]);
+        git(root, &["config", "user.email", "test@example.com"]);
         fs::write(root.join("old.txt"), "content\n").unwrap();
         git(root, &["add", "old.txt"]);
         git(root, &["commit", "-m", "base"]);
