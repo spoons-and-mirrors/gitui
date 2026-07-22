@@ -120,7 +120,8 @@ The binary stays deliberately direct, with modules split by the behavior they ow
 | `app::commit_summary` | Lazy, repository-scoped cache of commit file and line-change summaries |
 | `app::explorer` | Workspace discovery, navigation, and fuzzy search |
 | `app::repository_browser` | Branch, pull-request, and issue interaction plus cached remote data |
-| `app::workspace_panel` | Herdr workspace and agent snapshots, navigation, and background refresh |
+| `app::workspace_panel` | Workspace Panel interaction, focus transitions, groups, presets, and background refresh |
+| `app::workspace_panel::herdr` | Typed Herdr environment, command, restore, and session-snapshot adapter |
 | `repository_session` | Active workspace lifecycle, background operations, and scoped refreshes |
 | `git` | Installed-Git commands, parsing, refreshable repository facets, and local workspaces |
 | `ui::preview` | Stateful preview styling, wrapping, viewport windows, and hunk geometry |

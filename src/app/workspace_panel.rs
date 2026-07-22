@@ -1,7 +1,6 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
     sync::mpsc::{self, Receiver, Sender},
     thread,
     time::{Duration, Instant},
@@ -11,6 +10,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
 
 use super::TextInput;
+
+mod herdr;
 
 pub(crate) const DEFAULT_WIDTH: u16 = 26;
 pub(crate) const MINIMUM_WIDTH: u16 = 18;
@@ -37,18 +38,6 @@ pub(crate) enum WorkspacePanelPlacement {
     Right,
 }
 
-impl AgentStatus {
-    fn parse(value: Option<&str>) -> Self {
-        match value {
-            Some("idle") => Self::Idle,
-            Some("working") => Self::Working,
-            Some("blocked") => Self::Blocked,
-            Some("done") => Self::Done,
-            _ => Self::Unknown,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HerdrWorkspace {
     pub(crate) id: String,
@@ -59,7 +48,6 @@ pub(crate) struct HerdrWorkspace {
     pub(crate) pane_count: usize,
     pub(crate) focused: bool,
     pub(crate) status: AgentStatus,
-    repo_key: Option<String>,
     repo_root: Option<PathBuf>,
     linked_worktree: bool,
 }
@@ -347,14 +335,13 @@ pub(crate) struct WorkspacePanelEntryState {
 impl WorkspacePanel {
     pub(crate) fn detect(groups_path: Option<PathBuf>, snapshots_path: Option<PathBuf>) -> Self {
         #[cfg(test)]
-        let enabled = false;
+        let environment: Option<herdr::Environment> = None;
         #[cfg(not(test))]
-        let enabled = std::env::var("HERDR_ENV").ok().as_deref() == Some("1");
+        let environment = herdr::environment();
+        let enabled = environment.is_some();
         let mut panel = Self::new(enabled, groups_path, snapshots_path);
-        if enabled {
-            panel
-                .focus
-                .set_host(std::env::var("HERDR_WORKSPACE_ID").ok());
+        if let Some(environment) = environment {
+            panel.focus.set_host(environment.workspace_id);
         }
         panel
     }
@@ -815,20 +802,32 @@ impl WorkspacePanel {
     }
 
     pub(crate) fn create_workspace(&self, path: Option<&Path>) {
-        self.start_action(workspace_create_args(path));
+        self.start_action(herdr::Action::CreateWorkspace {
+            path: path.map(Path::to_owned),
+        });
     }
 
     pub(crate) fn create_worktree(&self, workspace_id: &str) {
-        self.start_action(worktree_create_args(workspace_id));
+        self.start_action(herdr::Action::CreateWorktree {
+            workspace_id: workspace_id.to_owned(),
+        });
     }
 
     pub(crate) fn close_workspace(&self, workspace_id: &str) {
-        self.start_destructive_action(workspace_close_args(workspace_id), workspace_id, None);
+        self.start_destructive_action(
+            herdr::Action::CloseWorkspace {
+                workspace_id: workspace_id.to_owned(),
+            },
+            workspace_id,
+            None,
+        );
     }
 
     pub(crate) fn delete_worktree(&self, workspace_id: &str, reopen_path: Option<PathBuf>) {
         self.start_destructive_action(
-            worktree_remove_args(workspace_id),
+            herdr::Action::RemoveWorktree {
+                workspace_id: workspace_id.to_owned(),
+            },
             workspace_id,
             reopen_path,
         );
@@ -845,6 +844,7 @@ impl WorkspacePanel {
         self.create_menu_choice = 0;
     }
 
+    #[cfg(test)]
     pub(crate) fn toggle_snapshot_menu(&mut self) {
         self.close_create_menu();
         self.snapshot_menu_open = !self.snapshot_menu_open;
@@ -1560,33 +1560,27 @@ impl WorkspacePanel {
         let Some(agent) = self.agents.get(agent_index) else {
             return;
         };
-        self.start_action(vec![
-            "tab".to_owned(),
-            "focus".to_owned(),
-            agent.tab_id.clone(),
-        ]);
+        self.start_action(herdr::Action::FocusTab {
+            tab_id: agent.tab_id.clone(),
+        });
     }
 
     fn start_workspace_focus(&mut self, workspace_id: String) {
         let request_id = self.focus.begin(workspace_id.clone());
         let sender = self.sender.clone();
         thread::spawn(move || {
-            let result = run_herdr(&workspace_focus_args(&workspace_id)).map(|_| ());
+            let result = herdr::perform(herdr::Action::FocusWorkspace { workspace_id });
             let _ = sender.send(Completion::WorkspaceFocus { request_id, result });
         });
     }
 
-    fn start_action(&self, args: Vec<String>) {
-        self.start_action_with_reopen(args, None);
-    }
-
-    fn start_action_with_reopen(&self, args: Vec<String>, reopen_path: Option<PathBuf>) {
+    fn start_action(&self, action: herdr::Action) {
         let sender = self.sender.clone();
         thread::spawn(move || {
-            let result = run_herdr(&args).map(|_| ());
+            let result = herdr::perform(action);
             let _ = sender.send(Completion::Action {
                 result,
-                reopen_path,
+                reopen_path: None,
                 warning: None,
             });
         });
@@ -1594,17 +1588,17 @@ impl WorkspacePanel {
 
     fn start_destructive_action(
         &self,
-        args: Vec<String>,
+        action: herdr::Action,
         removed_workspace_id: &str,
         reopen_path: Option<PathBuf>,
     ) {
         let restore_focus = self.focus_to_restore_after_removing(removed_workspace_id);
         let sender = self.sender.clone();
         thread::spawn(move || {
-            let result = run_herdr(&args).map(|_| ());
+            let result = herdr::perform(action);
             let warning = if result.is_ok() {
                 restore_focus.and_then(|workspace_id| {
-                    run_herdr(&workspace_focus_args(&workspace_id))
+                    herdr::perform(herdr::Action::FocusWorkspace { workspace_id })
                         .err()
                         .map(|error| {
                             format!(
@@ -1688,12 +1682,10 @@ impl WorkspacePanel {
         self.next_refresh = Instant::now() + REFRESH_INTERVAL;
         let sender = self.sender.clone();
         thread::spawn(move || {
-            let result = run_herdr(&["api".to_owned(), "snapshot".to_owned()])
-                .and_then(|value| parse_snapshot(&value))
-                .map(|(mut workspaces, agents)| {
-                    populate_workspace_branches(&mut workspaces);
-                    (workspaces, agents)
-                });
+            let result = herdr::session_snapshot().map(|(mut workspaces, agents)| {
+                populate_workspace_branches(&mut workspaces);
+                (workspaces, agents)
+            });
             let _ = sender.send(Completion::Snapshot(result));
         });
     }
@@ -1771,7 +1763,7 @@ impl WorkspacePanel {
     pub(crate) fn ready_for_test(value: &Value) -> Self {
         let mut panel = Self::new(true, None, None);
         panel.placement = WorkspacePanelPlacement::Left;
-        let (workspaces, agents) = parse_snapshot(value).unwrap();
+        let (workspaces, agents) = herdr::parse_snapshot(value).unwrap();
         panel.focus.apply_snapshot(&workspaces);
         panel.workspaces = workspaces;
         panel.agents = agents;
@@ -1800,46 +1792,6 @@ pub(crate) enum WorkspacePanelEffect {
 
 fn sort_groups(groups: &mut [WorkspaceGroup]) {
     groups.sort_by_cached_key(|group| group.name.to_lowercase());
-}
-
-fn workspace_create_args(path: Option<&Path>) -> Vec<String> {
-    let mut args = vec!["workspace".to_owned(), "create".to_owned()];
-    if let Some(path) = path {
-        args.push("--cwd".to_owned());
-        args.push(path.to_string_lossy().into_owned());
-    }
-    args.push("--no-focus".to_owned());
-    args
-}
-
-fn worktree_create_args(workspace_id: &str) -> Vec<String> {
-    [
-        "worktree",
-        "create",
-        "--workspace",
-        workspace_id,
-        "--no-focus",
-    ]
-    .map(str::to_owned)
-    .to_vec()
-}
-
-fn workspace_close_args(workspace_id: &str) -> Vec<String> {
-    ["workspace", "close", workspace_id]
-        .map(str::to_owned)
-        .to_vec()
-}
-
-fn workspace_focus_args(workspace_id: &str) -> Vec<String> {
-    ["workspace", "focus", workspace_id]
-        .map(str::to_owned)
-        .to_vec()
-}
-
-fn worktree_remove_args(workspace_id: &str) -> Vec<String> {
-    ["worktree", "remove", "--workspace", workspace_id]
-        .map(str::to_owned)
-        .to_vec()
 }
 
 fn load_groups(path: &Path) -> Vec<WorkspaceGroup> {
@@ -1999,32 +1951,18 @@ fn recall_snapshot(
             continue;
         }
 
-        let mut args = if entry.linked_worktree {
-            vec![
-                "worktree".to_owned(),
-                "open".to_owned(),
-                "--path".to_owned(),
-            ]
-        } else {
-            vec![
-                "workspace".to_owned(),
-                "create".to_owned(),
-                "--cwd".to_owned(),
-            ]
-        };
-        args.push(entry.path.to_string_lossy().into_owned());
-        args.extend([
-            "--label".to_owned(),
-            entry.label.clone(),
-            "--no-focus".to_owned(),
-        ]);
-        let response = run_herdr(&args).map_err(|error| {
+        let id = herdr::restore(herdr::RestoreRequest {
+            path: entry.path.clone(),
+            label: entry.label.clone(),
+            linked_worktree: entry.linked_worktree,
+        })
+        .map_err(|error| {
             format!(
                 "Could not load preset '{}' completely: {error}",
                 snapshot.name
             )
-        })?;
-        let id = workspace_id_in(&response).ok_or_else(|| {
+        })?
+        .ok_or_else(|| {
             format!(
                 "Could not identify '{}' while loading preset '{}'",
                 entry.label, snapshot.name
@@ -2034,12 +1972,10 @@ fn recall_snapshot(
     }
 
     for (workspace_id, label) in renames {
-        run_herdr(&[
-            "workspace".to_owned(),
-            "rename".to_owned(),
+        herdr::perform(herdr::Action::RenameWorkspace {
             workspace_id,
             label,
-        ])?;
+        })?;
     }
 
     let focus_index = snapshot
@@ -2047,11 +1983,9 @@ fn recall_snapshot(
         .iter()
         .position(|entry| entry.focused)
         .unwrap_or(0);
-    run_herdr(&[
-        "workspace".to_owned(),
-        "focus".to_owned(),
-        target_ids[focus_index].clone(),
-    ])?;
+    herdr::perform(herdr::Action::FocusWorkspace {
+        workspace_id: target_ids[focus_index].clone(),
+    })?;
 
     let mut extras = current
         .iter()
@@ -2061,7 +1995,9 @@ fn recall_snapshot(
         .collect::<Vec<_>>();
     extras.sort_by_key(|workspace| workspace.focused);
     for workspace in extras {
-        run_herdr(&workspace_close_args(&workspace.id))?;
+        herdr::perform(herdr::Action::CloseWorkspace {
+            workspace_id: workspace.id.clone(),
+        })?;
     }
 
     let groups = recalled_groups(snapshot, &target_ids);
@@ -2099,123 +2035,6 @@ fn same_path(left: &Path, right: &Path) -> bool {
             .ok()
             .zip(right.canonicalize().ok())
             .is_some_and(|(left, right)| left == right)
-}
-
-fn workspace_id_in(value: &Value) -> Option<String> {
-    match value {
-        Value::Object(object) => object
-            .get("workspace_id")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| object.values().find_map(workspace_id_in)),
-        Value::Array(values) => values.iter().find_map(workspace_id_in),
-        _ => None,
-    }
-}
-
-fn run_herdr(args: &[String]) -> Result<Value, String> {
-    let output = Command::new("herdr")
-        .args(args)
-        .output()
-        .map_err(|error| format!("Herdr unavailable: {error}"))?;
-    let value: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let detail = stderr.lines().find(|line| !line.trim().is_empty());
-        detail.map_or_else(
-            || format!("Could not read Herdr response: {error}"),
-            |detail| detail.trim().to_owned(),
-        )
-    })?;
-    if let Some(error) = value.get("error") {
-        return Err(error
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("Herdr command failed")
-            .to_owned());
-    }
-    if !output.status.success() {
-        return Err("Herdr command failed".to_owned());
-    }
-    Ok(value)
-}
-
-fn parse_snapshot(value: &Value) -> Result<(Vec<HerdrWorkspace>, Vec<HerdrAgent>), String> {
-    let snapshot = value
-        .get("result")
-        .and_then(|result| result.get("snapshot"))
-        .ok_or_else(|| "Herdr returned an invalid session snapshot".to_owned())?;
-    let mut workspaces: Vec<HerdrWorkspace> = snapshot
-        .get("workspaces")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "Herdr snapshot has no workspaces".to_owned())?
-        .iter()
-        .filter_map(|workspace| parse_workspace(workspace, snapshot))
-        .collect();
-    assign_worktree_parents(&mut workspaces);
-    let agents = snapshot
-        .get("agents")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(parse_agent)
-        .collect();
-    Ok((workspaces, agents))
-}
-
-fn parse_workspace(value: &Value, snapshot: &Value) -> Option<HerdrWorkspace> {
-    let worktree = value.get("worktree").filter(|value| value.is_object());
-    Some(HerdrWorkspace {
-        id: value.get("workspace_id")?.as_str()?.to_owned(),
-        label: value.get("label")?.as_str()?.to_owned(),
-        path: workspace_path(value, snapshot),
-        branch: None,
-        parent_workspace_id: None,
-        pane_count: value.get("pane_count").and_then(Value::as_u64).unwrap_or(0) as usize,
-        focused: value
-            .get("focused")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        status: AgentStatus::parse(value.get("agent_status").and_then(Value::as_str)),
-        repo_key: worktree
-            .and_then(|worktree| worktree.get("repo_key"))
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        repo_root: worktree
-            .and_then(|worktree| worktree.get("repo_root"))
-            .and_then(Value::as_str)
-            .map(PathBuf::from),
-        linked_worktree: worktree
-            .and_then(|worktree| worktree.get("is_linked_worktree"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-    })
-}
-
-fn assign_worktree_parents(workspaces: &mut [HerdrWorkspace]) {
-    let parent_ids = workspaces
-        .iter()
-        .map(|worktree| {
-            if !worktree.linked_worktree {
-                return None;
-            }
-            let repo_key = worktree.repo_key.as_deref()?;
-            let exact_root = workspaces.iter().find(|candidate| {
-                !candidate.linked_worktree
-                    && candidate.path.as_deref() == worktree.repo_root.as_deref()
-            });
-            exact_root
-                .or_else(|| {
-                    workspaces.iter().find(|candidate| {
-                        !candidate.linked_worktree
-                            && candidate.repo_key.as_deref() == Some(repo_key)
-                    })
-                })
-                .map(|parent| parent.id.clone())
-        })
-        .collect::<Vec<_>>();
-    for (workspace, parent_id) in workspaces.iter_mut().zip(parent_ids) {
-        workspace.parent_workspace_id = parent_id;
-    }
 }
 
 fn populate_workspace_branches(workspaces: &mut [HerdrWorkspace]) {
@@ -2256,66 +2075,6 @@ fn branch_from_head(path: &Path) -> Option<String> {
         .strip_prefix("ref: refs/heads/")
         .filter(|branch| !branch.is_empty())
         .map(str::to_owned)
-}
-
-fn workspace_path(workspace: &Value, snapshot: &Value) -> Option<PathBuf> {
-    if let Some(path) = workspace
-        .get("worktree")
-        .and_then(|worktree| worktree.get("checkout_path"))
-        .and_then(Value::as_str)
-    {
-        return Some(PathBuf::from(path));
-    }
-
-    let workspace_id = workspace.get("workspace_id")?.as_str()?;
-    let active_tab_id = workspace.get("active_tab_id").and_then(Value::as_str);
-    let panes = snapshot.get("panes").and_then(Value::as_array)?;
-    let focused_pane_id = snapshot
-        .get("layouts")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .find(|layout| {
-            layout.get("workspace_id").and_then(Value::as_str) == Some(workspace_id)
-                && layout.get("tab_id").and_then(Value::as_str) == active_tab_id
-        })
-        .and_then(|layout| layout.get("focused_pane_id"))
-        .and_then(Value::as_str);
-    let workspace_panes = || {
-        panes
-            .iter()
-            .filter(|pane| pane.get("workspace_id").and_then(Value::as_str) == Some(workspace_id))
-    };
-    let pane = focused_pane_id
-        .and_then(|focused| {
-            workspace_panes()
-                .find(|pane| pane.get("pane_id").and_then(Value::as_str) == Some(focused))
-        })
-        .or_else(|| {
-            active_tab_id.and_then(|active_tab| {
-                workspace_panes()
-                    .find(|pane| pane.get("tab_id").and_then(Value::as_str) == Some(active_tab))
-            })
-        })
-        .or_else(|| workspace_panes().next())?;
-    pane.get("foreground_cwd")
-        .and_then(Value::as_str)
-        .or_else(|| pane.get("cwd").and_then(Value::as_str))
-        .map(PathBuf::from)
-}
-
-fn parse_agent(value: &Value) -> Option<HerdrAgent> {
-    Some(HerdrAgent {
-        name: value.get("agent")?.as_str()?.to_owned(),
-        workspace_id: value.get("workspace_id")?.as_str()?.to_owned(),
-        tab_id: value.get("tab_id")?.as_str()?.to_owned(),
-        pane_id: value.get("pane_id")?.as_str()?.to_owned(),
-        focused: value
-            .get("focused")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        status: AgentStatus::parse(value.get("agent_status").and_then(Value::as_str)),
-    })
 }
 
 #[cfg(test)]
@@ -2460,7 +2219,7 @@ mod tests {
         let mut worktree_snapshot = snapshot();
         worktree_snapshot["result"]["snapshot"]["workspaces"][0]["worktree"] =
             serde_json::json!({ "checkout_path": "/tmp/hunkle-worktree" });
-        let (workspaces, _) = parse_snapshot(&worktree_snapshot).unwrap();
+        let (workspaces, _) = herdr::parse_snapshot(&worktree_snapshot).unwrap();
         assert_eq!(
             workspaces[0].path.as_deref(),
             Some(Path::new("/tmp/hunkle-worktree"))
@@ -2501,7 +2260,7 @@ mod tests {
         assert!(!panel.workspace_is_active(0));
         assert!(panel.workspace_is_active(1));
 
-        let stale = parse_snapshot(&snapshot()).unwrap();
+        let stale = herdr::parse_snapshot(&snapshot()).unwrap();
         panel.sender.send(Completion::Snapshot(Ok(stale))).unwrap();
         let (changed, error, _, focus_succeeded) = panel.poll();
         assert!(changed);
@@ -2517,9 +2276,9 @@ mod tests {
         confirmed["result"]["snapshot"]["workspaces"][1]["focused"] = true.into();
         panel
             .sender
-            .send(Completion::Snapshot(
-                Ok(parse_snapshot(&confirmed).unwrap()),
-            ))
+            .send(Completion::Snapshot(Ok(
+                herdr::parse_snapshot(&confirmed).unwrap()
+            )))
             .unwrap();
         panel.poll();
 
@@ -2551,7 +2310,7 @@ mod tests {
         assert!(panel.workspace_is_active(1));
         assert_eq!(panel.selected, Some(1));
 
-        let stale = parse_snapshot(&snapshot()).unwrap();
+        let stale = herdr::parse_snapshot(&snapshot()).unwrap();
         panel.workspaces = stale.0;
         assert!(!panel.workspace_is_active(0));
         assert!(panel.workspace_is_active(1));
@@ -2618,33 +2377,6 @@ mod tests {
         assert!(panel.focus.pending.is_none());
         assert!(panel.workspace_is_active(0));
         assert!(!panel.workspace_is_active(1));
-    }
-
-    #[test]
-    fn builds_background_workspace_and_worktree_commands() {
-        assert_eq!(
-            workspace_create_args(Some(Path::new("/tmp/current workspace"))),
-            [
-                "workspace",
-                "create",
-                "--cwd",
-                "/tmp/current workspace",
-                "--no-focus",
-            ]
-            .map(str::to_owned)
-        );
-        assert_eq!(
-            worktree_create_args("w1"),
-            ["worktree", "create", "--workspace", "w1", "--no-focus",].map(str::to_owned)
-        );
-        assert_eq!(
-            workspace_close_args("w1"),
-            ["workspace", "close", "w1"].map(str::to_owned)
-        );
-        assert_eq!(
-            worktree_remove_args("w3"),
-            ["worktree", "remove", "--workspace", "w3"].map(str::to_owned)
-        );
     }
 
     #[test]
@@ -2723,10 +2455,6 @@ mod tests {
             Some("w1")
         );
         assert_eq!(panel.focus_to_restore_after_removing("w1"), None);
-        assert_eq!(
-            workspace_focus_args("w1"),
-            ["workspace", "focus", "w1"].map(str::to_owned)
-        );
     }
 
     #[test]
@@ -2896,7 +2624,7 @@ mod tests {
         assert_eq!(panel.placement, WorkspacePanelPlacement::Off);
         panel.cycle_placement();
         assert_eq!(panel.placement, WorkspacePanelPlacement::Left);
-        let (workspaces, agents) = parse_snapshot(&snapshot()).unwrap();
+        let (workspaces, agents) = herdr::parse_snapshot(&snapshot()).unwrap();
         panel.workspaces = workspaces;
         panel.agents = agents;
         panel.restore_selection(None);
@@ -2949,7 +2677,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("workspace-snapshots.json");
         let mut panel = WorkspacePanel::new(true, None, Some(path.clone()));
-        let (mut workspaces, agents) = parse_snapshot(&snapshot()).unwrap();
+        let (mut workspaces, agents) = herdr::parse_snapshot(&snapshot()).unwrap();
         workspaces[1].path = Some(PathBuf::from("/home/spoon/docs"));
         panel.workspaces = workspaces;
         panel.agents = agents;
@@ -3093,18 +2821,6 @@ mod tests {
         assert_eq!(groups[1].workspace_ids, ["new-notes"]);
         assert!(!groups[0].expanded);
         assert!(groups[1].expanded);
-    }
-
-    #[test]
-    fn finds_workspace_ids_in_herdr_command_responses() {
-        let response = serde_json::json!({
-            "result": {
-                "event": {
-                    "workspace": { "workspace_id": "workspace-42" }
-                }
-            }
-        });
-        assert_eq!(workspace_id_in(&response).as_deref(), Some("workspace-42"));
     }
 
     #[test]

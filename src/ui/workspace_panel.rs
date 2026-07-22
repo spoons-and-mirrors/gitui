@@ -116,10 +116,12 @@ pub(super) fn draw(
                     row_area,
                     &label,
                     workspace.branch.as_deref(),
-                    workspace.status,
-                    state.active,
-                    state.selected || ungrouped_drop,
-                    spinner_frame,
+                    EntryPresentation {
+                        status: workspace.status,
+                        active: state.active,
+                        selected: state.selected || ungrouped_drop,
+                        spinner_frame,
+                    },
                 );
                 targets.push((
                     HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Workspace(index)),
@@ -155,10 +157,12 @@ pub(super) fn draw(
                     row_area,
                     &label,
                     None,
-                    agent.status,
-                    state.active,
-                    state.selected,
-                    spinner_frame,
+                    EntryPresentation {
+                        status: agent.status,
+                        active: state.active,
+                        selected: state.selected,
+                        spinner_frame,
+                    },
                 );
                 targets.push((
                     HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(index)),
@@ -495,16 +499,26 @@ fn draw_workspace_header(
     (button, load)
 }
 
+struct EntryPresentation {
+    status: AgentStatus,
+    active: bool,
+    selected: bool,
+    spinner_frame: usize,
+}
+
 fn draw_entry(
     frame: &mut Frame<'_>,
     area: Rect,
     label: &str,
     branch: Option<&str>,
-    status: AgentStatus,
-    active: bool,
-    selected: bool,
-    spinner_frame: usize,
+    presentation: EntryPresentation,
 ) {
+    let EntryPresentation {
+        status,
+        active,
+        selected,
+        spinner_frame,
+    } = presentation;
     let marker = if active { "› " } else { "  " };
     let status_marker = match status {
         AgentStatus::Unknown => "○",

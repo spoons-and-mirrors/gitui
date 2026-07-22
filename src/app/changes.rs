@@ -19,6 +19,27 @@ pub enum LeftPane {
     Files,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChangesHitTarget {
+    WorktreeTab,
+    FilesTab,
+    StageAll,
+    WorktreeBackground(u64),
+    WorktreeRow { generation: u64, index: usize },
+    WorktreeStage { generation: u64, index: usize },
+    HunkAction { generation: u64, index: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ChangesEffect {
+    PaneActivated,
+    WorktreeDirectoryActivated,
+    ToggleAllStaging,
+    ToggleSelectedStage,
+    StageHunk(usize),
+    WorktreeFileSelected { path: String, staged: bool },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ExplorerEntry {
     pub(super) path: String,
@@ -45,6 +66,7 @@ pub struct ChangesState {
     pub(crate) collapsed_directories: HashSet<String>,
     pub(crate) collapsed_explorer_directories: HashSet<String>,
     worktree_rows_cache: Vec<WorktreeRow>,
+    worktree_rows_generation: u64,
     explorer_rows_cache: Vec<ExplorerRow>,
     file_tree: Option<FileTree>,
     file_tree_fingerprint: Option<u64>,
@@ -120,6 +142,7 @@ impl ChangesState {
             collapsed_directories: HashSet::new(),
             collapsed_explorer_directories,
             worktree_rows_cache: Vec::new(),
+            worktree_rows_generation: 0,
             explorer_rows_cache: Vec::new(),
             file_tree,
             file_tree_fingerprint: repo.map(|repo| repo.files_fingerprint),
@@ -401,6 +424,110 @@ impl ChangesState {
         self.clear_history_selection();
         self.refresh_diff(Some(repo));
         true
+    }
+
+    pub(super) fn activate_target(
+        &mut self,
+        target: ChangesHitTarget,
+        repo: &RepositoryData,
+    ) -> Option<ChangesEffect> {
+        match target {
+            ChangesHitTarget::WorktreeTab => {
+                self.set_pane(LeftPane::Worktree, Some(repo));
+                Some(ChangesEffect::PaneActivated)
+            }
+            ChangesHitTarget::FilesTab => {
+                self.set_pane(LeftPane::Files, Some(repo));
+                Some(ChangesEffect::PaneActivated)
+            }
+            ChangesHitTarget::StageAll => {
+                if self.pane != LeftPane::Worktree {
+                    return None;
+                }
+                self.clear_history_selection();
+                Some(ChangesEffect::ToggleAllStaging)
+            }
+            ChangesHitTarget::WorktreeBackground(generation) => {
+                if !self.is_current_worktree_target(generation) {
+                    return None;
+                }
+                self.clear_history_selection();
+                self.refresh_diff(Some(repo));
+                None
+            }
+            ChangesHitTarget::WorktreeRow { generation, index } => {
+                if !self.is_current_worktree_target(generation) {
+                    return None;
+                }
+                if !self.select_worktree_row(repo, index) {
+                    self.clear_history_selection();
+                    self.refresh_diff(Some(repo));
+                    return None;
+                }
+                if self.selected_directory_path(repo).is_some() {
+                    self.toggle_selected_directory(Some(repo));
+                    return Some(ChangesEffect::WorktreeDirectoryActivated);
+                }
+                self.selected_change_index(repo)
+                    .and_then(|index| repo.changes.get(index))
+                    .map(|change| ChangesEffect::WorktreeFileSelected {
+                        path: change.path.clone(),
+                        staged: change.staged,
+                    })
+            }
+            ChangesHitTarget::WorktreeStage { .. } => self.stage_target(target, repo),
+            ChangesHitTarget::HunkAction { generation, index } => (generation
+                == self.preview_content_generation)
+                .then_some(ChangesEffect::StageHunk(index)),
+        }
+    }
+
+    pub(super) fn stage_target(
+        &mut self,
+        target: ChangesHitTarget,
+        repo: &RepositoryData,
+    ) -> Option<ChangesEffect> {
+        let (generation, index) = match target {
+            ChangesHitTarget::WorktreeRow { generation, index }
+            | ChangesHitTarget::WorktreeStage { generation, index } => (generation, index),
+            _ => return None,
+        };
+        if !self.is_current_worktree_target(generation) {
+            return None;
+        }
+        self.select_worktree_row(repo, index)
+            .then(|| self.selected_change_index(repo))
+            .flatten()
+            .map(|_| ChangesEffect::ToggleSelectedStage)
+    }
+
+    pub(crate) fn worktree_background_target(&self) -> ChangesHitTarget {
+        ChangesHitTarget::WorktreeBackground(self.worktree_rows_generation)
+    }
+
+    pub(crate) fn worktree_row_target(&self, index: usize) -> ChangesHitTarget {
+        ChangesHitTarget::WorktreeRow {
+            generation: self.worktree_rows_generation,
+            index,
+        }
+    }
+
+    pub(crate) fn worktree_stage_target(&self, index: usize) -> ChangesHitTarget {
+        ChangesHitTarget::WorktreeStage {
+            generation: self.worktree_rows_generation,
+            index,
+        }
+    }
+
+    pub(crate) fn hunk_action_target(&self, index: usize) -> ChangesHitTarget {
+        ChangesHitTarget::HunkAction {
+            generation: self.preview_content_generation,
+            index,
+        }
+    }
+
+    fn is_current_worktree_target(&self, generation: u64) -> bool {
+        self.pane == LeftPane::Worktree && generation == self.worktree_rows_generation
     }
 
     pub(super) fn select_explorer_row(&mut self, repo: &RepositoryData, index: usize) -> bool {
@@ -962,6 +1089,7 @@ impl ChangesState {
             .worktree_tree
             .as_ref()
             .map_or_else(Vec::new, |tree| tree.rows(&self.collapsed_directories));
+        self.worktree_rows_generation = self.worktree_rows_generation.wrapping_add(1);
     }
 
     fn sync_repository_caches(&mut self, repo: Option<&RepositoryData>) {
@@ -1190,9 +1318,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn starts_files_collapsed_but_keeps_worktree_expanded() {
-        let repo = RepositoryData {
+    fn repository_data() -> RepositoryData {
+        RepositoryData {
             root: PathBuf::new(),
             kind: RepositoryKind::Git,
             branch: "main".to_owned(),
@@ -1219,7 +1346,12 @@ mod tests {
             change_counts: (0, 1),
             graph_width: 0,
             graph_truncated: false,
-        };
+        }
+    }
+
+    #[test]
+    fn starts_files_collapsed_but_keeps_worktree_expanded() {
+        let repo = repository_data();
 
         let mut state = ChangesState::new(Some(&repo));
         assert!(state.collapsed_directories.is_empty());
@@ -1248,6 +1380,58 @@ mod tests {
             ["src", "app", "main.rs", "README.md"]
         );
         assert_eq!(state.explorer_rows()[1].directory_expanded, Some(false));
+    }
+
+    #[test]
+    fn owns_semantic_worktree_target_transitions() {
+        let repo = repository_data();
+        let mut state = ChangesState::new(Some(&repo));
+        let file_row = state
+            .worktree_rows(&repo)
+            .iter()
+            .position(|row| row.change_index.is_some())
+            .unwrap();
+
+        assert_eq!(
+            state.activate_target(state.worktree_row_target(file_row), &repo),
+            Some(ChangesEffect::WorktreeFileSelected {
+                path: "src/main.rs".to_owned(),
+                staged: false,
+            })
+        );
+        assert_eq!(state.worktree_state.selected(), Some(file_row));
+        assert_eq!(
+            state.stage_target(state.worktree_row_target(file_row), &repo),
+            Some(ChangesEffect::ToggleSelectedStage)
+        );
+
+        let stale_file_target = state.worktree_row_target(file_row);
+        let directory_row = state
+            .worktree_rows(&repo)
+            .iter()
+            .position(|row| row.directory_path.is_some())
+            .unwrap();
+        assert_eq!(
+            state.activate_target(state.worktree_row_target(directory_row), &repo),
+            Some(ChangesEffect::WorktreeDirectoryActivated)
+        );
+        assert_eq!(state.activate_target(stale_file_target, &repo), None);
+
+        state.set_diff("@@ -1 +1 @@\n-old\n+new\n".to_owned());
+        let stale_hunk_target = state.hunk_action_target(0);
+        state.set_diff("Loading preview…".to_owned());
+        assert_eq!(state.activate_target(stale_hunk_target, &repo), None);
+
+        assert_eq!(
+            state.activate_target(ChangesHitTarget::FilesTab, &repo),
+            Some(ChangesEffect::PaneActivated)
+        );
+        assert_eq!(state.pane, LeftPane::Files);
+        assert_eq!(
+            state.activate_target(ChangesHitTarget::WorktreeTab, &repo),
+            Some(ChangesEffect::PaneActivated)
+        );
+        assert_eq!(state.pane, LeftPane::Worktree);
     }
 
     #[test]

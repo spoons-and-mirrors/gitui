@@ -543,10 +543,7 @@ impl MarkdownRenderer {
                         .filter(|_| !*alert_used)
                         .map_or(0, |kind| alert_label(kind).len() + 2)
                 }
-                BlockState::List(list) => list
-                    .marker
-                    .as_deref()
-                    .map_or(2, |marker| UnicodeWidthStr::width(marker)),
+                BlockState::List(list) => list.marker.as_deref().map_or(2, UnicodeWidthStr::width),
                 BlockState::Footnote { label, .. } => UnicodeWidthStr::width(label.as_str()),
                 BlockState::Definition { .. } => 4,
             })

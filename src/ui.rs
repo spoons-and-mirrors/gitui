@@ -130,6 +130,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         app.regions.diff_scroll_thumb = None;
         app.regions.diff_scroll_max = 0;
         app.regions.diff_hunks.clear();
+        app.regions.clear_hit_targets_in(graph_area);
         let graph_regions = history::draw_graph(
             frame,
             app.session.data(),

@@ -10,8 +10,8 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
-    App, BrowserTab, CommitMessageGenerator, GraphHitTarget, HitTarget, LeftPane, Mode,
-    PullRequest, RemoteItems, RepositoryBrowserHitTarget, Settings, View, WorkspacePanel,
+    App, BrowserTab, ChangesHitTarget, CommitMessageGenerator, GraphHitTarget, HitTarget, LeftPane,
+    Mode, PullRequest, RemoteItems, RepositoryBrowserHitTarget, Settings, View, WorkspacePanel,
     WorkspacePanelHitTarget,
 };
 
@@ -160,7 +160,10 @@ fn renders_every_primary_surface() {
     assert_eq!(app.changes.pane, LeftPane::Worktree);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
-    let files_tab = app.regions.files_tab.unwrap();
+    let files_tab = app
+        .regions
+        .hit_target_rect(HitTarget::Changes(ChangesHitTarget::FilesTab))
+        .unwrap();
     click(&mut app, files_tab.x, files_tab.y);
     assert_eq!(app.changes.pane, LeftPane::Files);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -239,12 +242,18 @@ fn renders_every_primary_surface() {
     assert!(file_screen.contains("read-only"));
     assert!(file_screen.contains("fixture"));
 
-    let worktree_tab = app.regions.worktree_tab.unwrap();
+    let worktree_tab = app
+        .regions
+        .hit_target_rect(HitTarget::Changes(ChangesHitTarget::WorktreeTab))
+        .unwrap();
     click(&mut app, worktree_tab.x, worktree_tab.y);
     assert_eq!(app.changes.pane, LeftPane::Worktree);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
-    let stage_all = app.regions.stage_all.unwrap();
+    let stage_all = app
+        .regions
+        .hit_target_rect(HitTarget::Changes(ChangesHitTarget::StageAll))
+        .unwrap();
     assert_eq!(stage_all.width, 2);
     click(&mut app, stage_all.x, stage_all.y);
     wait_for(&mut app, |app| {
@@ -277,7 +286,10 @@ fn renders_every_primary_surface() {
             assert_eq!(cell.bg, trailing.bg);
         }
     }
-    let stage_all = app.regions.stage_all.unwrap();
+    let stage_all = app
+        .regions
+        .hit_target_rect(HitTarget::Changes(ChangesHitTarget::StageAll))
+        .unwrap();
     click(&mut app, stage_all.x, stage_all.y);
     wait_for(&mut app, |app| {
         app.repository()
@@ -304,11 +316,14 @@ fn renders_every_primary_surface() {
         .collect();
     assert!(unstaged_screen.contains('○'));
     assert!(!unstaged_screen.contains("[ ]"));
-    let status = app.regions.worktree_status.unwrap();
-    assert_eq!(status.width, 2);
     let selected = app.changes.worktree_state.selected().unwrap();
-    let selected_y = status.y + (selected - app.changes.worktree_scroll) as u16;
-    click(&mut app, status.x, selected_y);
+    let stage_target = app.changes.worktree_stage_target(selected);
+    let status = app
+        .regions
+        .hit_target_rect(HitTarget::Changes(stage_target))
+        .unwrap();
+    assert_eq!(status.width, 2);
+    click(&mut app, status.x, status.y);
     wait_for(&mut app, |app| {
         app.repository()
             .unwrap()
@@ -331,10 +346,13 @@ fn renders_every_primary_surface() {
     let rows = app.changes.worktree_rows(app.repository().unwrap());
     assert!(rows.iter().any(|row| row.label == "STAGED"));
     assert!(rows.iter().any(|row| row.label == "UNSTAGED"));
-    let status = app.regions.worktree_status.unwrap();
     let selected = app.changes.worktree_state.selected().unwrap();
-    let selected_y = status.y + (selected - app.changes.worktree_scroll) as u16;
-    click(&mut app, status.x, selected_y);
+    let stage_target = app.changes.worktree_stage_target(selected);
+    let status = app
+        .regions
+        .hit_target_rect(HitTarget::Changes(stage_target))
+        .unwrap();
+    click(&mut app, status.x, status.y);
     wait_for(&mut app, |app| {
         app.repository()
             .unwrap()
@@ -470,17 +488,32 @@ fn renders_every_primary_surface() {
     );
     app.changes.diff_scroll = 0;
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    let normal_hunk_y = app.regions.diff_hunks[0].action.unwrap().y;
+    let hunk_target = app.changes.hunk_action_target(0);
+    let normal_hunk_y = app
+        .regions
+        .hit_target_rect(HitTarget::Changes(hunk_target))
+        .unwrap()
+        .y;
     let normal_scroll_max = app.regions.diff_scroll_max;
     let normal_scroll_thumb = app.regions.diff_scroll_thumb;
     app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
     assert_eq!(app.changes.hunk_selection, Some(0));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-    assert_eq!(app.regions.diff_hunks[0].action.unwrap().y, normal_hunk_y);
+    assert_eq!(
+        app.regions
+            .hit_target_rect(HitTarget::Changes(hunk_target))
+            .unwrap()
+            .y,
+        normal_hunk_y
+    );
     assert_eq!(app.regions.diff_scroll_max, normal_scroll_max);
     assert_eq!(app.regions.diff_scroll_thumb, normal_scroll_thumb);
     assert_eq!(app.regions.diff_hunks.len(), 2);
-    let pinned_hunk_y = app.regions.diff_hunks[0].action.unwrap().y;
+    let pinned_hunk_y = app
+        .regions
+        .hit_target_rect(HitTarget::Changes(hunk_target))
+        .unwrap()
+        .y;
     let second_hunk = app.regions.diff_hunks[1].rect;
     app.handle_mouse(mouse(
         MouseEventKind::Moved,
@@ -495,7 +528,15 @@ fn renders_every_primary_surface() {
         .iter()
         .find(|hunk| hunk.index == 1)
         .unwrap();
-    assert_eq!(selected_hunk.action.unwrap().y, pinned_hunk_y);
+    assert_eq!(selected_hunk.index, 1);
+    let selected_hunk_target = app.changes.hunk_action_target(1);
+    assert_eq!(
+        app.regions
+            .hit_target_rect(HitTarget::Changes(selected_hunk_target))
+            .unwrap()
+            .y,
+        pinned_hunk_y
+    );
     app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
     assert_eq!(app.changes.hunk_selection, Some(0));
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
@@ -525,7 +566,11 @@ fn renders_every_primary_surface() {
     assert_eq!(app.changes.hunk_selection, Some(0));
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
     assert_eq!(app.regions.diff_hunks.len(), 1);
-    let rect = app.regions.diff_hunks[0].action.unwrap();
+    let hunk_target = app.changes.hunk_action_target(0);
+    let rect = app
+        .regions
+        .hit_target_rect(HitTarget::Changes(hunk_target))
+        .unwrap();
     let buffer = terminal.backend().buffer();
     let offset = usize::from(rect.y) * usize::from(buffer.area.width) + usize::from(rect.x);
     let button: String = buffer.content[offset..offset + 3]
@@ -1565,6 +1610,98 @@ fn toggles_worktree_directories_with_the_mouse() {
 }
 
 #[test]
+fn right_clicking_worktree_rows_toggles_staging() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    run_git(root, &["config", "user.name", "Right Click Test"]);
+    run_git(root, &["config", "user.email", "right-click@example.com"]);
+    fs::write(root.join("tracked.txt"), "initial\n").unwrap();
+    run_git(root, &["add", "."]);
+    run_git(root, &["commit", "-m", "initial commit"]);
+    fs::write(root.join("tracked.txt"), "changed\n").unwrap();
+
+    let mut app = App::new(root.to_path_buf());
+    let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+    for staged in [true, false] {
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let repo = app.repository().unwrap();
+        let row = app
+            .changes
+            .worktree_rows(repo)
+            .iter()
+            .position(|row| {
+                row.change_index
+                    .and_then(|index| repo.changes.get(index))
+                    .is_some_and(|change| change.path == "tracked.txt")
+            })
+            .unwrap();
+        let target = app.changes.worktree_row_target(row);
+        let rect = app
+            .regions
+            .hit_target_rect(HitTarget::Changes(target))
+            .unwrap();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            rect.x,
+            rect.y,
+        ));
+        wait_for(&mut app, |app| {
+            app.repository().is_some_and(|repo| {
+                repo.changes
+                    .iter()
+                    .find(|change| change.path == "tracked.txt")
+                    .is_some_and(|change| change.staged == staged)
+            })
+        });
+    }
+}
+
+#[test]
+fn graph_replacement_clears_hidden_diff_targets() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    run_git(root, &["init", "-b", "main"]);
+    run_git(root, &["config", "user.name", "Graph Target Test"]);
+    run_git(root, &["config", "user.email", "graph-target@example.com"]);
+    fs::write(root.join("tracked.txt"), "initial\n").unwrap();
+    run_git(root, &["add", "."]);
+    run_git(root, &["commit", "-m", "initial commit"]);
+    fs::write(root.join("tracked.txt"), "changed\n").unwrap();
+
+    let mut app = App::new(root.to_path_buf());
+    wait_for_preview(&mut app);
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let target = app.changes.hunk_action_target(0);
+    let action = app
+        .regions
+        .hit_target_rect(HitTarget::Changes(target))
+        .unwrap();
+
+    app.view = View::Graph;
+    app.graph_commit_open = false;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(
+        app.regions
+            .hit_target_rect(HitTarget::Changes(target))
+            .is_none()
+    );
+    click(&mut app, action.x, action.y);
+    for _ in 0..20 {
+        let _ = app.poll_worker();
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        app.repository()
+            .unwrap()
+            .changes
+            .iter()
+            .all(|change| !change.staged)
+    );
+}
+
+#[test]
 fn renders_colored_file_type_icons_in_the_files_view() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
@@ -1891,7 +2028,10 @@ fn opens_plain_directories_as_file_workspaces() {
     assert!(screen.contains("NEW FILE"));
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
-    let worktree_tab = app.regions.worktree_tab.unwrap();
+    let worktree_tab = app
+        .regions
+        .hit_target_rect(HitTarget::Changes(ChangesHitTarget::WorktreeTab))
+        .unwrap();
     click(&mut app, worktree_tab.x, worktree_tab.y);
     assert_eq!(app.changes.pane, LeftPane::Worktree);
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
@@ -1992,12 +2132,16 @@ fn left_pane_files_take_over_the_preview_from_graph() {
     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
     let worktree = app.regions.worktree_list.unwrap();
-    let status = app.regions.worktree_status.unwrap();
     let file_row = app
         .changes
         .worktree_rows(app.repository().unwrap())
         .iter()
         .position(|row| row.change_index.is_some())
+        .unwrap();
+    let stage_target = app.changes.worktree_stage_target(file_row);
+    let status = app
+        .regions
+        .hit_target_rect(HitTarget::Changes(stage_target))
         .unwrap();
     let file_y = worktree.y + (file_row - app.changes.worktree_scroll) as u16;
     click(&mut app, status.x, file_y);

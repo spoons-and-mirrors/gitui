@@ -14,6 +14,7 @@ mod workspace_panel;
 
 pub(crate) use actions::{ACTION_ITEMS, ActionsState, CommandStatus};
 pub(crate) use author_filter::{AuthorFilter, AuthorFilterEffect};
+pub(crate) use changes::ChangesHitTarget;
 pub use changes::{ChangesState, LeftPane};
 pub(crate) use commit_message::CommitMessageGenerator;
 pub(crate) use commit_summary::CommitSummaryCache;
@@ -108,7 +109,6 @@ impl Default for Settings {
 #[derive(Debug, Clone, Copy)]
 pub struct DiffHunkRegion {
     pub rect: Rect,
-    pub action: Option<Rect>,
     pub index: usize,
     pub continues_above: bool,
     pub continues_below: bool,
@@ -118,6 +118,7 @@ pub struct DiffHunkRegion {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HitTarget {
+    Changes(ChangesHitTarget),
     CommitMessageGenerate,
     MarkdownPreviewToggle,
     Graph(GraphHitTarget),
@@ -178,11 +179,8 @@ pub struct Regions {
     pub workspace_presets_overlay: Option<Rect>,
     pub actions: Option<Rect>,
     pub worktree: Option<Rect>,
-    pub worktree_tab: Option<Rect>,
-    pub files_tab: Option<Rect>,
     pub worktree_list: Option<Rect>,
     pub explorer_list: Option<Rect>,
-    pub worktree_status: Option<Rect>,
     pub history_list: Option<Rect>,
     pub history_splitter: Option<Rect>,
     pub history_bounds: Option<Rect>,
@@ -219,8 +217,6 @@ pub struct Regions {
     pub fetch_interval: Option<Rect>,
     pub fetch_interval_down: Option<Rect>,
     pub fetch_interval_up: Option<Rect>,
-    pub stage_all: Option<Rect>,
-    pub unstage_all: Option<Rect>,
     pub diff_hunks: Vec<DiffHunkRegion>,
     hit_regions: Vec<HitRegion>,
 }
@@ -243,6 +239,11 @@ impl Regions {
             .iter()
             .find(|region| region.target == target)
             .map(|region| region.rect)
+    }
+
+    pub(crate) fn clear_hit_targets_in(&mut self, rect: Rect) {
+        self.hit_regions
+            .retain(|region| region.rect.intersection(rect).is_empty());
     }
 }
 
@@ -2459,6 +2460,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn clearing_hit_targets_removes_overlaps_but_keeps_adjacent_targets() {
+        let mut regions = Regions::default();
+        regions.register_hit_target(HitTarget::CommitMessageGenerate, Rect::new(0, 0, 4, 1));
+        regions.register_hit_target(HitTarget::MarkdownPreviewToggle, Rect::new(3, 0, 4, 1));
+        regions.register_hit_target(
+            HitTarget::Graph(GraphHitTarget::AuthorHeader),
+            Rect::new(7, 0, 2, 1),
+        );
+
+        regions.clear_hit_targets_in(Rect::new(4, 0, 3, 1));
+
+        assert!(
+            regions
+                .hit_target_rect(HitTarget::CommitMessageGenerate)
+                .is_some()
+        );
+        assert!(
+            regions
+                .hit_target_rect(HitTarget::MarkdownPreviewToggle)
+                .is_none()
+        );
+        assert!(
+            regions
+                .hit_target_rect(HitTarget::Graph(GraphHitTarget::AuthorHeader))
+                .is_some()
+        );
+    }
+
+    #[test]
     fn graph_scrolling_moves_the_viewport_without_moving_selection() {
         let mut state = TableState::default().with_selected(4);
 
@@ -2877,7 +2907,10 @@ mod tests {
 
         let selected = app.changes.worktree_state.selected().unwrap() as u16;
         app.regions.worktree_list = Some(Rect::new(0, 0, 20, selected + 1));
-        app.regions.worktree_status = Some(Rect::new(18, 0, 2, selected + 1));
+        app.regions.register_hit_target(
+            HitTarget::Changes(app.changes.worktree_stage_target(selected as usize)),
+            Rect::new(18, selected, 2, 1),
+        );
         app.handle_left_click(Position::new(19, selected));
         wait_for_state(&mut app, |app| {
             app.repository()

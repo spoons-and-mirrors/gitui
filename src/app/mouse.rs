@@ -7,7 +7,7 @@ use crate::selection::SelectionOutcome;
 use super::{
     ACTION_ITEMS, App, GraphHitTarget, HitTarget, LeftPane, MINIMUM_WORKSPACE_PANEL_WIDTH, Mode,
     RepositoryBrowserEffect, RepositoryBrowserHitTarget, View, WorkspaceDropTarget,
-    WorkspacePanelHitTarget, WorkspacePanelPlacement, scroll_table,
+    WorkspacePanelHitTarget, WorkspacePanelPlacement, changes::ChangesEffect, scroll_table,
 };
 
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
@@ -220,8 +220,18 @@ impl App {
         match mouse.kind {
             MouseEventKind::ScrollDown => self.scroll_at(point, 1),
             MouseEventKind::ScrollUp => self.scroll_at(point, -1),
-            MouseEventKind::Down(MouseButton::Right) if self.select_worktree_row(point) => {
-                self.toggle_stage();
+            MouseEventKind::Down(MouseButton::Right) => {
+                let effect = self
+                    .regions
+                    .hit_target_at(point)
+                    .and_then(|target| match target {
+                        HitTarget::Changes(target) => self
+                            .session
+                            .data()
+                            .and_then(|repo| self.changes.stage_target(target, repo)),
+                        _ => None,
+                    });
+                self.apply_changes_effect(effect);
             }
             _ => {}
         }
@@ -356,6 +366,14 @@ impl App {
             self.flush_commit_draft();
         }
         match self.regions.hit_target_at(point) {
+            Some(HitTarget::Changes(target)) => {
+                let effect = self
+                    .session
+                    .data()
+                    .and_then(|repo| self.changes.activate_target(target, repo));
+                self.apply_changes_effect(effect);
+                return;
+            }
             Some(HitTarget::CommitMessageGenerate) => {
                 self.generate_commit_message();
                 return;
@@ -373,16 +391,6 @@ impl App {
                 return;
             }
             _ => {}
-        }
-        if let Some(hunk) = self
-            .regions
-            .diff_hunks
-            .iter()
-            .find(|hunk| hunk.action.is_some_and(|rect| rect.contains(point)))
-            .copied()
-        {
-            self.stage_hunk(hunk.index, false);
-            return;
         }
         if self
             .regions
@@ -402,45 +410,10 @@ impl App {
         }
         if self
             .regions
-            .worktree_tab
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.set_left_pane(LeftPane::Worktree);
-            self.show_graph_if_diff_empty();
-            return;
-        }
-        if self
-            .regions
-            .files_tab
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.set_left_pane(LeftPane::Files);
-            self.show_graph_if_diff_empty();
-            return;
-        }
-        if self
-            .regions
             .left_pane_toggle
             .is_some_and(|rect| rect.contains(point))
         {
             self.toggle_changes_files();
-            return;
-        }
-        if self
-            .regions
-            .stage_all
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.changes.clear_history_selection();
-            self.toggle_all_staging();
-            return;
-        }
-        if self
-            .regions
-            .unstage_all
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.unstage_all();
             return;
         }
         if self
@@ -486,44 +459,6 @@ impl App {
                 self.view = View::Changes;
                 self.graph_commit_open = false;
             }
-        } else if self.select_worktree_row(point) {
-            if self
-                .repository()
-                .and_then(|repo| self.changes.selected_directory_path(repo))
-                .is_some()
-            {
-                self.last_worktree_file_click = None;
-                let repo = self.session.data();
-                self.changes.toggle_selected_directory(repo);
-            } else if self
-                .regions
-                .worktree_status
-                .is_some_and(|rect| rect.contains(point))
-            {
-                self.last_worktree_file_click = None;
-                self.toggle_stage();
-            } else {
-                let selected = self.repository().and_then(|repo| {
-                    let index = self.changes.selected_change_index(repo)?;
-                    let change = repo.changes.get(index)?;
-                    Some((change.path.clone(), change.staged))
-                });
-                if let Some((path, staged)) = selected
-                    && self.register_worktree_file_click(&path, staged)
-                    && self.open_worktree_file_in_files(&path)
-                {
-                    return;
-                }
-                self.view = View::Changes;
-                self.graph_commit_open = false;
-            }
-        } else if self
-            .regions
-            .worktree_list
-            .is_some_and(|rect| rect.contains(point))
-        {
-            self.changes.clear_history_selection();
-            self.changes.refresh_diff(self.session.data());
         } else if self.select_history_row(point) {
         } else if self.select_graph_row(point) {
             self.open_selected_graph_commit();
@@ -537,6 +472,34 @@ impl App {
             self.commit_input
                 .set_cursor_at_visual_position(width, row, column);
             self.commit_scroll = Some(scroll.min(self.regions.commit_scroll_max));
+        }
+    }
+
+    fn apply_changes_effect(&mut self, effect: Option<ChangesEffect>) {
+        match effect {
+            Some(ChangesEffect::PaneActivated) => {
+                self.mode = Mode::Normal;
+                self.show_graph_if_diff_empty();
+            }
+            Some(ChangesEffect::WorktreeDirectoryActivated) => {
+                self.last_worktree_file_click = None;
+            }
+            Some(ChangesEffect::ToggleAllStaging) => self.toggle_all_staging(),
+            Some(ChangesEffect::ToggleSelectedStage) => {
+                self.last_worktree_file_click = None;
+                self.toggle_stage();
+            }
+            Some(ChangesEffect::StageHunk(index)) => self.stage_hunk(index, false),
+            Some(ChangesEffect::WorktreeFileSelected { path, staged }) => {
+                if self.register_worktree_file_click(&path, staged)
+                    && self.open_worktree_file_in_files(&path)
+                {
+                    return;
+                }
+                self.view = View::Changes;
+                self.graph_commit_open = false;
+            }
+            None => {}
         }
     }
 
@@ -817,6 +780,7 @@ impl App {
                 )) => {}
                 Some(HitTarget::Graph(_)) => {}
                 Some(HitTarget::WorkspacePanel(_)) => {}
+                Some(HitTarget::Changes(_)) => {}
                 Some(HitTarget::CommitMessageGenerate) => {}
                 Some(HitTarget::MarkdownPreviewToggle) => {}
             },
@@ -987,24 +951,6 @@ impl App {
             self.settings_selection = 2;
             self.open_editor_setting();
         }
-    }
-
-    fn select_worktree_row(&mut self, point: Position) -> bool {
-        if self.changes.pane != LeftPane::Worktree {
-            return false;
-        }
-        let Some(rect) = self
-            .regions
-            .worktree_list
-            .filter(|rect| rect.contains(point))
-        else {
-            return false;
-        };
-        let index = self.changes.worktree_scroll + usize::from(point.y - rect.y);
-        let Some(repo) = self.session.data() else {
-            return false;
-        };
-        self.changes.select_worktree_row(repo, index)
     }
 
     fn select_explorer_row(&mut self, point: Position) -> bool {

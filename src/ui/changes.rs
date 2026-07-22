@@ -8,7 +8,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    app::{App, DiffHunkRegion, HitTarget, LeftPane, Mode, TextInput, View},
+    app::{App, ChangesHitTarget, DiffHunkRegion, HitTarget, LeftPane, Mode, TextInput, View},
     git::{Change, DiffSummary},
     tree::{ExplorerRow, WorktreeRow, WorktreeSection},
 };
@@ -119,19 +119,18 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         history_area.y.saturating_sub(worktree_list_y),
     );
     app.regions.worktree_list = Some(worktree_list);
-    app.regions.worktree_status = Some(Rect::new(
-        worktree_list.right().saturating_sub(2),
-        worktree_list.y,
-        worktree_list.width.min(2),
-        worktree_list.height,
-    ));
-    app.regions.stage_all = Some(Rect::new(
+    app.regions.register_hit_target(
+        HitTarget::Changes(app.changes.worktree_background_target()),
+        worktree_list,
+    );
+    let stage_all = Rect::new(
         worktree_header.right().saturating_sub(2),
         worktree_header.y,
         worktree_header.width.min(2),
         1,
-    ));
-    app.regions.unstage_all = None;
+    );
+    app.regions
+        .register_hit_target(HitTarget::Changes(ChangesHitTarget::StageAll), stage_all);
     app.regions.history_bounds = Some(Rect::new(
         worktree_content.x,
         worktree_list_y.saturating_add(2),
@@ -197,6 +196,33 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             }
         })
         .collect();
+    for (index, row) in app
+        .changes
+        .worktree_rows(repo)
+        .iter()
+        .enumerate()
+        .skip(app.changes.worktree_scroll)
+        .take(worktree_viewport)
+    {
+        let row_area = Rect::new(
+            worktree_list.x,
+            worktree_list
+                .y
+                .saturating_add((index - app.changes.worktree_scroll) as u16),
+            worktree_list.width,
+            1,
+        );
+        app.regions.register_hit_target(
+            HitTarget::Changes(app.changes.worktree_row_target(index)),
+            row_area,
+        );
+        if row.change_index.is_some() {
+            app.regions.register_hit_target(
+                HitTarget::Changes(app.changes.worktree_stage_target(index)),
+                Rect::new(row_area.right().saturating_sub(2), row_area.y, 2, 1),
+            );
+        }
+    }
     let list = List::new(items);
     let stage_label = if worktree_header.width >= 36 {
         format!("Stage all  {} files", repo.changes.len())
@@ -238,20 +264,26 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         ])),
         worktree_header,
     );
-    app.regions.worktree_tab = Some(Rect::new(
-        worktree_header.x,
-        worktree_header.y,
-        worktree_title_width as u16,
-        1,
-    ));
-    app.regions.files_tab = Some(Rect::new(
-        worktree_header
-            .x
-            .saturating_add(worktree_title_width as u16 + 2),
-        worktree_header.y,
-        files_title.len() as u16,
-        1,
-    ));
+    app.regions.register_hit_target(
+        HitTarget::Changes(ChangesHitTarget::WorktreeTab),
+        Rect::new(
+            worktree_header.x,
+            worktree_header.y,
+            worktree_title_width as u16,
+            1,
+        ),
+    );
+    app.regions.register_hit_target(
+        HitTarget::Changes(ChangesHitTarget::FilesTab),
+        Rect::new(
+            worktree_header
+                .x
+                .saturating_add(worktree_title_width as u16 + 2),
+            worktree_header.y,
+            files_title.len() as u16,
+            1,
+        ),
+    );
     frame.render_widget(list, worktree_list);
 
     let history_header = app.regions.history_splitter.expect("set above");
@@ -697,8 +729,6 @@ fn draw_commit_message_action(frame: &mut Frame<'_>, area: Rect, app: &mut App, 
 
 fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2]) {
     app.regions.worktree_list = None;
-    app.regions.worktree_status = None;
-    app.regions.stage_all = None;
     app.regions.commit = None;
     app.regions.history_list = None;
     app.regions.history_splitter = None;
@@ -762,13 +792,19 @@ fn draw_explorer_changes(frame: &mut Frame<'_>, app: &mut App, columns: [Rect; 2
             root_target,
         );
     }
-    app.regions.worktree_tab = Some(Rect::new(header.x, header.y, 7, 1));
-    app.regions.files_tab = Some(Rect::new(
-        header.x.saturating_add(9),
-        header.y,
-        UnicodeWidthStr::width(files_title.as_str()) as u16,
-        1,
-    ));
+    app.regions.register_hit_target(
+        HitTarget::Changes(ChangesHitTarget::WorktreeTab),
+        Rect::new(header.x, header.y, 7, 1),
+    );
+    app.regions.register_hit_target(
+        HitTarget::Changes(ChangesHitTarget::FilesTab),
+        Rect::new(
+            header.x.saturating_add(9),
+            header.y,
+            UnicodeWidthStr::width(files_title.as_str()) as u16,
+            1,
+        ),
+    );
     app.regions.explorer_list = Some(list_area);
     app.regions.files_add = Some(add_button);
     app.regions.files_root = Some(root_target);
@@ -1302,8 +1338,12 @@ fn draw_hunk_actions(frame: &mut Frame<'_>, app: &mut App, body: Rect, hunks: Ve
                 Style::default().bg(palette().selected),
             );
         }
-        let action = hunk.header_y.map(|y| {
+        if let Some(y) = hunk.header_y {
             let rect = Rect::new(body.right().saturating_sub(3), y, 3, 1);
+            app.regions.register_hit_target(
+                HitTarget::Changes(app.changes.hunk_action_target(hunk.index)),
+                rect,
+            );
             frame.render_widget(
                 Paragraph::new("[+]").style(
                     Style::default()
@@ -1321,11 +1361,9 @@ fn draw_hunk_actions(frame: &mut Frame<'_>, app: &mut App, body: Rect, hunks: Ve
                 ),
                 rect,
             );
-            rect
-        });
+        }
         app.regions.diff_hunks.push(DiffHunkRegion {
             rect: hunk.area,
-            action,
             index: hunk.index,
             continues_above: hunk.continues_above,
             continues_below: hunk.continues_below,

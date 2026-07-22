@@ -524,6 +524,7 @@ fn start_continuation(
     *output_width = gutter.width;
 }
 
+#[derive(Default)]
 struct WrapGutter {
     width: usize,
     span_count: usize,
@@ -599,16 +600,6 @@ fn line_gutter(line: &Line<'_>, width: usize, is_diff: bool, markdown: bool) -> 
         WrapGutter::spaces(gutter, spans)
     } else {
         WrapGutter::default()
-    }
-}
-
-impl Default for WrapGutter {
-    fn default() -> Self {
-        Self {
-            width: 0,
-            span_count: 0,
-            continuation: Vec::new(),
-        }
     }
 }
 
