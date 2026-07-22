@@ -69,7 +69,8 @@ impl App {
             return;
         }
 
-        if self.workspace_panel.delete_dialog.is_some()
+        if self.workspace_panel.rename_dialog.is_some()
+            || self.workspace_panel.delete_dialog.is_some()
             || self.workspace_panel.snapshot_load_dialog.is_some()
         {
             return;

@@ -33,7 +33,7 @@ pub(crate) use workspace_panel::{
     AgentStatus, DEFAULT_WIDTH as DEFAULT_WORKSPACE_PANEL_WIDTH,
     MINIMUM_WIDTH as MINIMUM_WORKSPACE_PANEL_WIDTH, SPINNER_FRAMES, SnapshotLoadDialog,
     WorkspaceDeleteDialog, WorkspaceDeleteKind, WorkspaceDropTarget, WorkspacePanel,
-    WorkspacePanelEffect, WorkspacePanelPlacement, WorkspacePanelRow,
+    WorkspacePanelEffect, WorkspacePanelPlacement, WorkspacePanelRow, WorkspaceRenameDialog,
 };
 
 use std::{
@@ -609,6 +609,9 @@ impl App {
         changed |= self.workspace_panel.snapshot_input.poll_blink(
             self.mode == Mode::WorkspacePresets && self.workspace_panel.snapshot_editing,
         );
+        if let Some(dialog) = &mut self.workspace_panel.rename_dialog {
+            changed |= dialog.input.poll_blink(self.mode == Mode::WorkspacePanel);
+        }
         if let Some(completion) = self.commit_message_generator.poll() {
             changed = true;
             if !self
@@ -1634,7 +1637,10 @@ impl App {
     }
 
     fn handle_workspace_panel(&mut self, key: KeyEvent) {
-        if key.code == KeyCode::Char('p') && key.modifiers.is_empty() {
+        if key.code == KeyCode::Char('p')
+            && key.modifiers.is_empty()
+            && self.workspace_panel.rename_dialog.is_none()
+        {
             self.open_workspace_presets();
             return;
         }
@@ -1685,6 +1691,15 @@ impl App {
                     "Herdr worktree create requested workspace={workspace_id}"
                 ));
                 self.workspace_panel.create_worktree(&workspace_id);
+            }
+            WorkspacePanelEffect::RenameWorkspace {
+                workspace_id,
+                label,
+            } => {
+                diagnostics::event(format!(
+                    "Herdr workspace rename requested workspace={workspace_id}"
+                ));
+                self.workspace_panel.rename_workspace(workspace_id, label);
             }
             WorkspacePanelEffect::CloseWorkspace(workspace_id) => {
                 diagnostics::event(format!(

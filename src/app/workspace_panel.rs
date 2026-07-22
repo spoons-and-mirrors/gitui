@@ -112,6 +112,13 @@ pub(crate) struct WorkspaceDeleteDialog {
     pub(crate) kind: WorkspaceDeleteKind,
 }
 
+pub(crate) struct WorkspaceRenameDialog {
+    pub(crate) workspace_id: String,
+    pub(crate) original_label: String,
+    pub(crate) input: TextInput,
+    pub(crate) error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SnapshotLoadDialog {
     snapshot: WorkspaceSnapshot,
@@ -278,6 +285,7 @@ pub(crate) struct WorkspacePanel {
     pub(crate) snapshot_error: Option<String>,
     pub(crate) snapshots: Vec<WorkspaceSnapshot>,
     snapshot_loading: bool,
+    pub(crate) rename_dialog: Option<WorkspaceRenameDialog>,
     pub(crate) delete_dialog: Option<WorkspaceDeleteDialog>,
     pub(crate) snapshot_load_dialog: Option<SnapshotLoadDialog>,
     preset_store: presets::PresetStore,
@@ -347,6 +355,7 @@ impl WorkspacePanel {
             snapshot_error: None,
             snapshots,
             snapshot_loading: false,
+            rename_dialog: None,
             delete_dialog: None,
             snapshot_load_dialog: None,
             preset_store,
@@ -623,6 +632,9 @@ impl WorkspacePanel {
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> WorkspacePanelEffect {
+        if self.rename_dialog.is_some() {
+            return self.handle_rename_dialog(key);
+        }
         if self.snapshot_load_dialog.is_some() {
             return self.handle_snapshot_load_dialog(key);
         }
@@ -672,8 +684,97 @@ impl WorkspacePanel {
                 self.begin_group();
                 WorkspacePanelEffect::None
             }
+            KeyCode::F(2) if key.modifiers.is_empty() => self.begin_rename(),
             KeyCode::Delete if key.modifiers.is_empty() => self.begin_delete(),
             _ => WorkspacePanelEffect::Unhandled,
+        }
+    }
+
+    fn begin_rename(&mut self) -> WorkspacePanelEffect {
+        let Some(workspace) = self
+            .selected
+            .and_then(|selected| self.workspaces.get(selected))
+        else {
+            return WorkspacePanelEffect::Notice("Select a workspace to rename".to_owned());
+        };
+        let mut input = TextInput::default();
+        input.set(workspace.label.clone());
+        input.focus();
+        input.select_all();
+        self.rename_dialog = Some(WorkspaceRenameDialog {
+            workspace_id: workspace.id.clone(),
+            original_label: workspace.label.clone(),
+            input,
+            error: None,
+        });
+        WorkspacePanelEffect::None
+    }
+
+    fn handle_rename_dialog(&mut self, key: KeyEvent) -> WorkspacePanelEffect {
+        let Some(dialog) = self.rename_dialog.as_mut() else {
+            return WorkspacePanelEffect::None;
+        };
+        dialog.input.focus();
+        match key.code {
+            KeyCode::Esc => {
+                self.rename_dialog = None;
+            }
+            KeyCode::Enter => return self.submit_rename(),
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                dialog.input.select_all();
+            }
+            KeyCode::Backspace
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                dialog.input.delete_word();
+                dialog.error = None;
+            }
+            KeyCode::Left => dialog.input.move_left(),
+            KeyCode::Right => dialog.input.move_right(),
+            KeyCode::Home => dialog.input.move_home(),
+            KeyCode::End => dialog.input.move_end(),
+            KeyCode::Delete => {
+                dialog.input.delete();
+                dialog.error = None;
+            }
+            KeyCode::Backspace => {
+                dialog.input.backspace();
+                dialog.error = None;
+            }
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                dialog.input.insert_char(character);
+                dialog.error = None;
+            }
+            _ => {}
+        }
+        WorkspacePanelEffect::None
+    }
+
+    fn submit_rename(&mut self) -> WorkspacePanelEffect {
+        let Some(dialog) = self.rename_dialog.as_mut() else {
+            return WorkspacePanelEffect::None;
+        };
+        let label = dialog.input.text().trim();
+        if label.is_empty() {
+            dialog.error = Some("Workspace name is required".to_owned());
+            return WorkspacePanelEffect::None;
+        }
+        if label == dialog.original_label {
+            self.rename_dialog = None;
+            return WorkspacePanelEffect::None;
+        }
+        let workspace_id = dialog.workspace_id.clone();
+        let label = label.to_owned();
+        self.rename_dialog = None;
+        WorkspacePanelEffect::RenameWorkspace {
+            workspace_id,
+            label,
         }
     }
 
@@ -772,7 +873,10 @@ impl WorkspacePanel {
     }
 
     pub(crate) fn paste(&mut self, text: &str) {
-        if self.snapshot_editing {
+        if let Some(dialog) = self.rename_dialog.as_mut() {
+            dialog.input.insert(text);
+            dialog.error = None;
+        } else if self.snapshot_editing {
             self.snapshot_input.insert(text);
             self.snapshot_error = None;
         } else if self.group_editing {
@@ -808,6 +912,13 @@ impl WorkspacePanel {
             workspace_id,
             None,
         );
+    }
+
+    pub(crate) fn rename_workspace(&self, workspace_id: String, label: String) {
+        self.start_action(herdr::Action::RenameWorkspace {
+            workspace_id,
+            label,
+        });
     }
 
     pub(crate) fn delete_worktree(&self, workspace_id: &str, reopen_path: Option<PathBuf>) {
@@ -1759,6 +1870,10 @@ pub(crate) enum WorkspacePanelEffect {
     Cycle,
     CreateWorkspace,
     CreateWorktree(String),
+    RenameWorkspace {
+        workspace_id: String,
+        label: String,
+    },
     CloseWorkspace(String),
     DeleteWorktree {
         workspace_id: String,
@@ -2248,6 +2363,53 @@ mod tests {
             panel.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE)),
             WorkspacePanelEffect::Notice("Select a workspace to close".to_owned())
         );
+    }
+
+    #[test]
+    fn renames_only_the_selected_workspace() {
+        let mut panel = WorkspacePanel::ready_for_test(&snapshot());
+
+        assert_eq!(
+            panel.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)),
+            WorkspacePanelEffect::None
+        );
+        let dialog = panel.rename_dialog.as_ref().unwrap();
+        assert_eq!(dialog.workspace_id, "w1");
+        assert_eq!(dialog.original_label, "HUNKLE");
+        assert_eq!(dialog.input.selection(), Some((0, "HUNKLE".len())));
+
+        panel.paste("renamed");
+        assert_eq!(
+            panel.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            WorkspacePanelEffect::RenameWorkspace {
+                workspace_id: "w1".to_owned(),
+                label: "renamed".to_owned(),
+            }
+        );
+        assert!(panel.rename_dialog.is_none());
+
+        panel.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        panel.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(
+            panel.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            WorkspacePanelEffect::None
+        );
+        assert_eq!(
+            panel
+                .rename_dialog
+                .as_ref()
+                .and_then(|dialog| dialog.error.as_deref()),
+            Some("Workspace name is required")
+        );
+        panel.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(panel.rename_dialog.is_none());
+
+        assert!(panel.select_agent(0));
+        assert_eq!(
+            panel.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)),
+            WorkspacePanelEffect::Notice("Select a workspace to rename".to_owned())
+        );
+        assert!(panel.rename_dialog.is_none());
     }
 
     #[test]

@@ -13,6 +13,7 @@ use crate::app::{
     PickerAction, PickerEntry, PullRequest, RemoteItems, RepositoryBrowser,
     RepositoryBrowserHitTarget, Settings, SnapshotLoadDialog, SurroundingEntry,
     WorkspaceDeleteDialog, WorkspaceDeleteKind, WorkspacePanel, WorkspacePanelHitTarget,
+    WorkspaceRenameDialog,
 };
 
 use super::{fill, palette, truncate_width};
@@ -451,6 +452,56 @@ pub(super) fn draw_workspace_delete_dialog(frame: &mut Frame<'_>, dialog: &Works
     );
     frame.render_widget(
         Paragraph::new("Enter confirm   Esc cancel")
+            .alignment(Alignment::Right)
+            .style(Style::default().fg(palette().muted)),
+        Rect::new(inner.x, area.bottom().saturating_sub(1), inner.width, 1),
+    );
+}
+
+pub(super) fn draw_workspace_rename_dialog(frame: &mut Frame<'_>, dialog: &WorkspaceRenameDialog) {
+    let area = centered_min(frame.area(), 62, 0, 48, 12);
+    frame.render_widget(Clear, area);
+    fill(frame, area, palette().panel);
+    fill(
+        frame,
+        Rect::new(area.x, area.y, area.width, 3),
+        palette().surface_alt,
+    );
+    let inner = area.inner(ratatui::layout::Margin::new(2, 1));
+    frame.render_widget(
+        Paragraph::new("RENAME WORKSPACE").style(
+            Style::default()
+                .fg(palette().ink)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Rect::new(inner.x, area.y.saturating_add(1), inner.width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new(truncate_width(
+            &format!("Rename {}", dialog.original_label),
+            usize::from(inner.width),
+        ))
+        .style(Style::default().fg(palette().muted)),
+        Rect::new(inner.x, area.y.saturating_add(4), inner.width, 1),
+    );
+    let mut input = dialog.input.text().to_owned();
+    if dialog.input.cursor_visible() {
+        input.insert(dialog.input.cursor(), '▌');
+    }
+    frame.render_widget(
+        Paragraph::new(truncate_start_width(&input, usize::from(inner.width)))
+            .style(Style::default().fg(palette().ink).bg(palette().selected)),
+        Rect::new(inner.x, area.y.saturating_add(6), inner.width, 1),
+    );
+    if let Some(error) = &dialog.error {
+        frame.render_widget(
+            Paragraph::new(truncate_width(error, usize::from(inner.width)))
+                .style(Style::default().fg(palette().red)),
+            Rect::new(inner.x, area.y.saturating_add(7), inner.width, 1),
+        );
+    }
+    frame.render_widget(
+        Paragraph::new("Enter rename   Esc cancel")
             .alignment(Alignment::Right)
             .style(Style::default().fg(palette().muted)),
         Rect::new(inner.x, area.bottom().saturating_sub(1), inner.width, 1),
@@ -2488,7 +2539,7 @@ pub(super) fn draw_help(frame: &mut Frame<'_>) {
         help_line("Space", "Stage file / hunk"),
         help_line("Delete", "Discard unstaged file changes"),
         help_line("a / u", "Stage / unstage all"),
-        help_line("F2", "Rename file / folder"),
+        help_line("F2", "Rename file / folder / workspace"),
         help_line("Ctrl+Delete", "Delete from Files"),
         help_line("Ctrl+S", "Format selected file"),
         help_line("Drag", "Move file / folder"),

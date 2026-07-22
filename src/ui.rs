@@ -254,7 +254,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             overlays::draw_help(frame);
         }
         Mode::WorkspacePanel => {
-            if let Some(dialog) = &app.workspace_panel.snapshot_load_dialog {
+            if let Some(dialog) = &app.workspace_panel.rename_dialog {
+                dim(frame);
+                overlays::draw_workspace_rename_dialog(frame, dialog);
+            } else if let Some(dialog) = &app.workspace_panel.snapshot_load_dialog {
                 dim(frame);
                 overlays::draw_snapshot_load_dialog(frame, dialog);
             } else if let Some(dialog) = &app.workspace_panel.delete_dialog {

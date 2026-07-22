@@ -1523,6 +1523,44 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
     assert!(delete_screen.contains("all 2 panes"));
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(app.workspace_panel.delete_dialog.is_none());
+
+    app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let rename_screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(rename_screen.contains("RENAME WORKSPACE"));
+    assert!(rename_screen.contains("Rename HUNKLE"));
+    app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::WorkspacePanel);
+    assert_eq!(
+        app.workspace_panel
+            .rename_dialog
+            .as_ref()
+            .map(|dialog| dialog.input.text()),
+        Some("p")
+    );
+    let agent_row = app
+        .regions
+        .hit_target_rect(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Agent(0)))
+        .unwrap();
+    app.handle_mouse(mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        agent_row.x,
+        agent_row.y,
+    ));
+    app.handle_mouse(mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        agent_row.x,
+        agent_row.y,
+    ));
+    assert_eq!(app.workspace_panel.selected, Some(0));
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.workspace_panel.rename_dialog.is_none());
     app.mode = Mode::Normal;
 
     let divider = app.regions.workspace_panel_splitter.unwrap();
