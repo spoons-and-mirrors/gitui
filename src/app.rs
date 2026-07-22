@@ -192,6 +192,7 @@ pub struct Regions {
     pub file_dialog_secondary: Option<Rect>,
     pub editor_setting: Option<Rect>,
     pub auto_fetch: Option<Rect>,
+    pub workspace_panel_setting: Option<Rect>,
     pub fetch_interval: Option<Rect>,
     pub fetch_interval_down: Option<Rect>,
     pub fetch_interval_up: Option<Rect>,
@@ -487,6 +488,14 @@ impl App {
         self.session.fetch_running()
     }
 
+    pub(crate) fn workspace_panel_enabled(&self) -> bool {
+        self.settings.workspace_panel_enabled && self.workspace_panel.is_enabled()
+    }
+
+    pub(crate) fn workspace_panel_available(&self) -> bool {
+        self.settings.workspace_panel_enabled && self.workspace_panel.is_available()
+    }
+
     pub(crate) fn format_running(&self) -> bool {
         self.session.format_running()
     }
@@ -572,22 +581,26 @@ impl App {
 
     pub fn poll_worker(&mut self) -> bool {
         let mut changed = self.mode == Mode::Explorer && self.workspace_explorer.poll_index();
-        let (panel_changed, panel_error, panel_reopen_path, workspace_focus_succeeded) =
-            self.workspace_panel.poll();
-        changed |= panel_changed;
-        if let Some(error) = panel_error {
-            self.notice = Some(error);
-        }
-        if let Some(path) = panel_reopen_path {
-            diagnostics::event(format!(
-                "opening parent workspace after worktree removal path={}",
-                path.display()
-            ));
-            self.open_repository_with_fetch(path);
-        }
-        if workspace_focus_succeeded && let Some(path) = self.workspace_focus_restore_path.take() {
-            self.queue_workspace_restore(path);
-            changed = true;
+        if self.workspace_panel_enabled() {
+            let (panel_changed, panel_error, panel_reopen_path, workspace_focus_succeeded) =
+                self.workspace_panel.poll();
+            changed |= panel_changed;
+            if let Some(error) = panel_error {
+                self.notice = Some(error);
+            }
+            if let Some(path) = panel_reopen_path {
+                diagnostics::event(format!(
+                    "opening parent workspace after worktree removal path={}",
+                    path.display()
+                ));
+                self.open_repository_with_fetch(path);
+            }
+            if workspace_focus_succeeded
+                && let Some(path) = self.workspace_focus_restore_path.take()
+            {
+                self.queue_workspace_restore(path);
+                changed = true;
+            }
         }
         changed |= self.repository_browser.poll();
         self.prefetch_commit_summaries();
@@ -954,12 +967,12 @@ impl App {
             }
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('w')
-                if key.modifiers == KeyModifiers::NONE && self.workspace_panel.is_enabled() =>
+                if key.modifiers == KeyModifiers::NONE && self.workspace_panel_enabled() =>
             {
                 self.cycle_workspace_panel();
             }
             KeyCode::Char('p')
-                if key.modifiers == KeyModifiers::NONE && self.workspace_panel.is_enabled() =>
+                if key.modifiers == KeyModifiers::NONE && self.workspace_panel_enabled() =>
             {
                 self.open_workspace_presets();
             }
@@ -1224,10 +1237,10 @@ impl App {
         match key.code {
             KeyCode::Esc | KeyCode::Char('s') => self.mode = Mode::Normal,
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
-                self.settings_selection = (self.settings_selection + 1) % 3;
+                self.settings_selection = (self.settings_selection + 1) % 4;
             }
             KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
-                self.settings_selection = (self.settings_selection + 2) % 3;
+                self.settings_selection = (self.settings_selection + 3) % 4;
             }
             KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 0 => {
                 self.toggle_auto_fetch();
@@ -1241,6 +1254,9 @@ impl App {
                 self.change_fetch_interval(1);
             }
             KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 2 => {
+                self.toggle_workspace_panel_enabled();
+            }
+            KeyCode::Enter | KeyCode::Char(' ') if self.settings_selection == 3 => {
                 self.open_editor_setting();
             }
             _ => {}
@@ -1592,8 +1608,8 @@ impl App {
     }
 
     fn open_workspace_panel(&mut self) {
-        if !self.workspace_panel.is_available() {
-            if self.workspace_panel.is_enabled() {
+        if !self.workspace_panel_available() {
+            if self.workspace_panel_enabled() {
                 self.notice = Some("Workspaces need a wider terminal".to_owned());
             }
             return;
@@ -1605,7 +1621,7 @@ impl App {
     }
 
     fn cycle_workspace_panel(&mut self) {
-        if !self.workspace_panel.is_available() {
+        if !self.workspace_panel_available() {
             self.open_workspace_panel();
         } else {
             self.workspace_panel.cycle_placement();
@@ -1634,7 +1650,7 @@ impl App {
     }
 
     fn open_workspace_presets(&mut self) {
-        if !self.workspace_panel.is_enabled() {
+        if !self.workspace_panel_enabled() {
             return;
         }
         self.workspace_panel.open_workspace_presets();
@@ -1912,6 +1928,12 @@ impl App {
 
     fn toggle_auto_fetch(&mut self) {
         self.settings.auto_fetch = !self.settings.auto_fetch;
+        self.settings_changed();
+    }
+
+    fn toggle_workspace_panel_enabled(&mut self) {
+        self.settings.workspace_panel_enabled = !self.settings.workspace_panel_enabled;
+        self.dragging_workspace_panel_splitter = false;
         self.settings_changed();
     }
 
@@ -2800,11 +2822,16 @@ mod tests {
                 auto_fetch: true,
                 fetch_interval_minutes: 6,
                 worktree_width: 38,
+                workspace_panel_enabled: true,
                 workspace_panel_width: DEFAULT_WORKSPACE_PANEL_WIDTH,
                 history_height: 7,
                 editor_command: None,
             }
         );
+        assert_eq!(app.settings_store.load(), app.settings);
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.settings.workspace_panel_enabled);
         assert_eq!(app.settings_store.load(), app.settings);
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));

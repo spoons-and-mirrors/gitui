@@ -897,10 +897,17 @@ impl App {
             self.settings_selection = 1;
         } else if self
             .regions
-            .editor_setting
+            .workspace_panel_setting
             .is_some_and(|rect| rect.contains(point))
         {
             self.settings_selection = 2;
+            self.toggle_workspace_panel_enabled();
+        } else if self
+            .regions
+            .editor_setting
+            .is_some_and(|rect| rect.contains(point))
+        {
+            self.settings_selection = 3;
             self.open_editor_setting();
         }
     }

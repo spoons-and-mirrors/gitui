@@ -28,6 +28,7 @@ pub(super) struct SettingsRegions {
     pub(super) fetch_interval: Rect,
     pub(super) fetch_interval_down: Rect,
     pub(super) fetch_interval_up: Rect,
+    pub(super) workspace_panel: Rect,
     pub(super) editor: Rect,
 }
 
@@ -2097,7 +2098,7 @@ pub(super) fn draw_settings(
     selection: usize,
     fetch_running: bool,
 ) -> SettingsRegions {
-    let area = centered_min(frame.area(), 58, 0, 48, 17);
+    let area = centered_min(frame.area(), 58, 0, 48, 20);
     frame.render_widget(Clear, area);
     fill(frame, area, palette().panel);
     fill(
@@ -2150,7 +2151,8 @@ pub(super) fn draw_settings(
     );
     let auto_row = Rect::new(inner.x, area.y.saturating_add(7), inner.width, 1);
     let interval_row = Rect::new(inner.x, area.y.saturating_add(9), inner.width, 1);
-    let editor_row = Rect::new(inner.x, area.y.saturating_add(14), inner.width, 1);
+    let workspace_panel_row = Rect::new(inner.x, area.y.saturating_add(14), inner.width, 1);
+    let editor_row = Rect::new(inner.x, area.y.saturating_add(16), inner.width, 1);
     let interval_down = Rect::new(
         interval_row.right().saturating_sub(15),
         interval_row.y,
@@ -2177,23 +2179,21 @@ pub(super) fn draw_settings(
         Rect::new(inner.x, area.y.saturating_add(5), inner.width, 1),
     );
 
-    let checkbox = if settings.auto_fetch { "◉" } else { "○" };
+    let (auto_switch, auto_switch_color) = settings_toggle(settings.auto_fetch);
     let auto_padding =
-        usize::from(auto_row.width).saturating_sub(19 + UnicodeWidthStr::width(checkbox));
+        usize::from(auto_row.width).saturating_sub(19 + UnicodeWidthStr::width(auto_switch));
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("Auto-fetch remotes", Style::default().fg(palette().ink)),
             Span::raw(" ".repeat(auto_padding)),
             Span::styled(
-                format!("{checkbox} "),
+                auto_switch,
                 Style::default()
-                    .fg(if settings.auto_fetch {
-                        palette().green
-                    } else {
-                        palette().muted
-                    })
+                    .fg(palette().canvas)
+                    .bg(auto_switch_color)
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::raw(" "),
         ]))
         .style(Style::default().bg(if selection == 0 {
             palette().selected
@@ -2246,13 +2246,38 @@ pub(super) fn draw_settings(
 
     frame.render_widget(
         Paragraph::new(Line::styled(
-            "EDITOR",
+            "INTERFACE",
             Style::default()
                 .fg(palette().muted)
                 .add_modifier(Modifier::BOLD),
         )),
         Rect::new(inner.x, area.y.saturating_add(13), inner.width, 1),
     );
+    let (workspace_switch, workspace_switch_color) =
+        settings_toggle(settings.workspace_panel_enabled);
+    let workspace_padding = usize::from(workspace_panel_row.width)
+        .saturating_sub(15 + UnicodeWidthStr::width(workspace_switch));
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Workspace pane", Style::default().fg(palette().ink)),
+            Span::raw(" ".repeat(workspace_padding)),
+            Span::styled(
+                workspace_switch,
+                Style::default()
+                    .fg(palette().canvas)
+                    .bg(workspace_switch_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+        ]))
+        .style(Style::default().bg(if selection == 2 {
+            palette().selected
+        } else {
+            palette().surface_alt
+        })),
+        workspace_panel_row,
+    );
+
     let editor = settings
         .editor_command
         .as_deref()
@@ -2273,7 +2298,7 @@ pub(super) fn draw_settings(
                 }),
             ),
         ]))
-        .style(Style::default().bg(if selection == 2 {
+        .style(Style::default().bg(if selection == 3 {
             palette().selected
         } else {
             palette().surface_alt
@@ -2287,7 +2312,16 @@ pub(super) fn draw_settings(
         fetch_interval: interval_row,
         fetch_interval_down: interval_down,
         fetch_interval_up: interval_up,
+        workspace_panel: workspace_panel_row,
         editor: editor_row,
+    }
+}
+
+fn settings_toggle(enabled: bool) -> (&'static str, Color) {
+    if enabled {
+        ("   ◼ ", palette().green)
+    } else {
+        (" ◼   ", palette().faint)
     }
 }
 

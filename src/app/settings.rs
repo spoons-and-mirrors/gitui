@@ -11,6 +11,7 @@ pub struct Settings {
     pub auto_fetch: bool,
     pub fetch_interval_minutes: u16,
     pub worktree_width: u16,
+    pub workspace_panel_enabled: bool,
     pub workspace_panel_width: u16,
     pub history_height: u16,
     pub editor_command: Option<String>,
@@ -28,6 +29,7 @@ impl Default for Settings {
             auto_fetch: false,
             fetch_interval_minutes: 5,
             worktree_width: 38,
+            workspace_panel_enabled: true,
             workspace_panel_width: DEFAULT_WORKSPACE_PANEL_WIDTH,
             history_height: 7,
             editor_command: None,
@@ -82,10 +84,11 @@ impl SettingsStore {
         fs::write(
             path,
             format!(
-                "auto_fetch={}\nfetch_interval_minutes={}\nworktree_width={}\nworkspace_panel_width={}\nhistory_height={}\neditor_command={}\n",
+                "auto_fetch={}\nfetch_interval_minutes={}\nworktree_width={}\nworkspace_panel_enabled={}\nworkspace_panel_width={}\nhistory_height={}\neditor_command={}\n",
                 settings.auto_fetch,
                 settings.fetch_interval_minutes,
                 settings.worktree_width,
+                settings.workspace_panel_enabled,
                 settings.workspace_panel_width,
                 settings.history_height,
                 settings.editor_command.as_deref().unwrap_or_default()
@@ -131,6 +134,9 @@ fn load(path: &Path) -> Settings {
                     settings.worktree_width = width.clamp(24, 4096);
                 }
             }
+            "workspace_panel_enabled" => {
+                settings.workspace_panel_enabled = value.trim() == "true";
+            }
             "workspace_panel_width" => {
                 if let Ok(width) = value.trim().parse::<u16>() {
                     settings.workspace_panel_width =
@@ -165,6 +171,7 @@ mod tests {
             auto_fetch: true,
             fetch_interval_minutes: 17,
             worktree_width: 61,
+            workspace_panel_enabled: false,
             workspace_panel_width: 33,
             history_height: 9,
             editor_command: Some("code --wait".to_owned()),

@@ -1193,11 +1193,36 @@ fn renders_every_primary_surface() {
         .collect();
     assert!(settings_screen.contains("Auto-fetch remotes"));
     assert!(settings_screen.contains("Fetch interval"));
+    assert!(settings_screen.contains("Workspace pane"));
     assert!(settings_screen.contains("Editor command"));
-    assert!(app.regions.editor_setting.is_some());
     assert!(!settings_screen.contains('┌'));
-    assert!(app.regions.auto_fetch.is_some());
+    let auto_fetch = app.regions.auto_fetch.unwrap();
+    let auto_switch_x = auto_fetch.right().saturating_sub(6);
+    let buffer = terminal.backend().buffer();
+    assert_eq!(buffer[(auto_switch_x + 1, auto_fetch.y)].symbol(), "◼");
+    assert!(
+        (auto_switch_x..auto_switch_x + 5)
+            .all(|x| buffer[(x, auto_fetch.y)].bg == super::palette().faint)
+    );
     assert!(app.regions.fetch_interval_up.is_some());
+    let workspace_setting = app.regions.workspace_panel_setting.unwrap();
+    let editor_setting = app.regions.editor_setting.unwrap();
+    assert_eq!(editor_setting.y, workspace_setting.y + 2);
+    let switch_x = workspace_setting.right().saturating_sub(6);
+    assert_eq!(buffer[(switch_x + 3, workspace_setting.y)].symbol(), "◼");
+    assert!(
+        (switch_x..switch_x + 5)
+            .all(|x| buffer[(x, workspace_setting.y)].bg == super::palette().green)
+    );
+
+    app.settings.workspace_panel_enabled = false;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    assert_eq!(buffer[(switch_x + 1, workspace_setting.y)].symbol(), "◼");
+    assert!(
+        (switch_x..switch_x + 5)
+            .all(|x| buffer[(x, workspace_setting.y)].bg == super::palette().faint)
+    );
 
     app.mode = Mode::Editor;
     app.editor_input = "nvim".to_owned();
@@ -1592,6 +1617,17 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
         app.notice.as_deref(),
         Some("Workspaces need a wider terminal")
     );
+
+    app.settings.workspace_panel_enabled = false;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.workspace_panel.is_none());
+    let placement = app.workspace_panel.placement;
+    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+    assert_eq!(app.workspace_panel.placement, placement);
+
+    app.settings.workspace_panel_enabled = true;
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    assert!(app.regions.workspace_panel.is_some());
 }
 
 #[test]

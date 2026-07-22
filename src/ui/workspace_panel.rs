@@ -680,7 +680,7 @@ fn draw_entry(
 
 fn status_marker(status: AgentStatus, spinner_frame: usize) -> &'static str {
     match status {
-        AgentStatus::Idle => "I",
+        AgentStatus::Idle => "●",
         AgentStatus::Working => SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()],
         AgentStatus::Blocked => "B",
         AgentStatus::Done => "U",
@@ -690,7 +690,7 @@ fn status_marker(status: AgentStatus, spinner_frame: usize) -> &'static str {
 
 fn status_color(status: AgentStatus) -> ratatui::style::Color {
     match status {
-        AgentStatus::Idle => palette().muted,
+        AgentStatus::Idle => palette().cyan,
         AgentStatus::Working => palette().yellow,
         AgentStatus::Blocked => palette().red,
         AgentStatus::Done => palette().green,
@@ -725,8 +725,8 @@ mod tests {
 
     #[test]
     fn status_indicators_distinguish_attention_states() {
-        assert_eq!(status_marker(AgentStatus::Idle, 0), "I");
-        assert_eq!(status_color(AgentStatus::Idle), palette().muted);
+        assert_eq!(status_marker(AgentStatus::Idle, 0), "●");
+        assert_eq!(status_color(AgentStatus::Idle), palette().cyan);
         assert_eq!(status_marker(AgentStatus::Working, 0), "⠋");
         assert_eq!(status_color(AgentStatus::Working), palette().yellow);
         assert_eq!(status_marker(AgentStatus::Blocked, 0), "B");

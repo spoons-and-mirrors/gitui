@@ -59,7 +59,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     draw_header(frame, app, layout[0]);
     let content = layout[1];
     const MINIMUM_MAIN_WIDTH: u16 = 60;
-    let panel_available = app.workspace_panel.is_enabled()
+    let panel_available = app.workspace_panel_enabled()
         && content.width
             >= MINIMUM_WORKSPACE_PANEL_WIDTH
                 .saturating_add(1)
@@ -179,6 +179,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             app.regions.fetch_interval = Some(regions.fetch_interval);
             app.regions.fetch_interval_down = Some(regions.fetch_interval_down);
             app.regions.fetch_interval_up = Some(regions.fetch_interval_up);
+            app.regions.workspace_panel_setting = Some(regions.workspace_panel);
             app.regions.editor_setting = Some(regions.editor);
         }
         Mode::RepositoryBrowser => {
@@ -379,7 +380,7 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         "Changes"
     };
     let mut labels = vec![("Tab", "Git Graph"), ("f", left_pane_label)];
-    if app.workspace_panel.is_available() {
+    if app.workspace_panel_available() {
         labels.push(("w", "Workspaces"));
     }
     labels.extend([
@@ -453,8 +454,8 @@ fn draw_navigation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     app.regions.changes = None;
     app.regions.graph = rects.first().copied();
     app.regions.left_pane_toggle = rects.get(1).copied();
-    let offset = usize::from(app.workspace_panel.is_available());
-    if app.workspace_panel.is_available()
+    let offset = usize::from(app.workspace_panel_available());
+    if app.workspace_panel_available()
         && let Some(rect) = rects.get(2).copied()
     {
         app.regions.register_hit_target(
