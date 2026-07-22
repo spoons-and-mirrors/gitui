@@ -523,7 +523,7 @@ impl WorkspacePanel {
                             let previous = self.selection_key();
                             self.focus.apply_snapshot(&workspaces);
                             self.workspaces = workspaces;
-                            self.agents = agents;
+                            self.apply_agent_snapshot(agents);
                             self.error = None;
                             if self.reconcile_group_workspace_ids()
                                 && let Err(error) = self.persist_groups()
@@ -589,6 +589,29 @@ impl WorkspacePanel {
             reopen_path,
             workspace_focus_succeeded,
         )
+    }
+
+    fn apply_agent_snapshot(&mut self, agents: Vec<HerdrAgent>) {
+        let previous = &self.agents;
+        let mut ranked = agents.into_iter().enumerate().collect::<Vec<_>>();
+        ranked.sort_by_key(|(incoming_index, agent)| {
+            let previous_index = previous
+                .iter()
+                .position(|existing| existing.pane_id == agent.pane_id);
+            let became_working = agent.status == AgentStatus::Working
+                && previous_index
+                    .is_none_or(|index| previous[index].status != AgentStatus::Working);
+            if became_working {
+                (0, *incoming_index)
+            } else if agent.status == AgentStatus::Working {
+                (1, previous_index.unwrap_or(usize::MAX))
+            } else if let Some(previous_index) = previous_index {
+                (2, previous_index)
+            } else {
+                (3, *incoming_index)
+            }
+        });
+        self.agents = ranked.into_iter().map(|(_, agent)| agent).collect();
     }
 
     pub(crate) fn spinner_frame(&self) -> usize {
@@ -2345,6 +2368,83 @@ mod tests {
                 }
             }
         })
+    }
+
+    fn agent(name: &str, status: AgentStatus) -> HerdrAgent {
+        HerdrAgent {
+            name: name.to_owned(),
+            workspace_id: "workspace".to_owned(),
+            tab_id: format!("tab-{name}"),
+            pane_id: format!("pane-{name}"),
+            focused: false,
+            status,
+        }
+    }
+
+    #[test]
+    fn promotes_newly_working_agents_without_resorting_the_rest() {
+        let mut panel = WorkspacePanel::ready_for_test(&snapshot());
+        panel.agents = vec![
+            agent("alpha", AgentStatus::Idle),
+            agent("beta", AgentStatus::Idle),
+            agent("gamma", AgentStatus::Idle),
+        ];
+
+        panel.apply_agent_snapshot(vec![
+            agent("alpha", AgentStatus::Idle),
+            agent("beta", AgentStatus::Working),
+            agent("gamma", AgentStatus::Idle),
+        ]);
+        assert_eq!(
+            panel
+                .agents
+                .iter()
+                .map(|agent| agent.name.as_str())
+                .collect::<Vec<_>>(),
+            ["beta", "alpha", "gamma"]
+        );
+
+        panel.apply_agent_snapshot(vec![
+            agent("alpha", AgentStatus::Idle),
+            agent("beta", AgentStatus::Working),
+            agent("gamma", AgentStatus::Working),
+        ]);
+        assert_eq!(
+            panel
+                .agents
+                .iter()
+                .map(|agent| agent.name.as_str())
+                .collect::<Vec<_>>(),
+            ["gamma", "beta", "alpha"]
+        );
+
+        panel.apply_agent_snapshot(vec![
+            agent("alpha", AgentStatus::Idle),
+            agent("gamma", AgentStatus::Idle),
+            agent("beta", AgentStatus::Working),
+        ]);
+        assert_eq!(
+            panel
+                .agents
+                .iter()
+                .map(|agent| agent.name.as_str())
+                .collect::<Vec<_>>(),
+            ["beta", "gamma", "alpha"]
+        );
+
+        panel.apply_agent_snapshot(vec![
+            agent("alpha", AgentStatus::Idle),
+            agent("beta", AgentStatus::Idle),
+            agent("gamma", AgentStatus::Idle),
+        ]);
+        assert_eq!(
+            panel
+                .agents
+                .iter()
+                .map(|agent| agent.name.as_str())
+                .collect::<Vec<_>>(),
+            ["beta", "gamma", "alpha"]
+        );
     }
 
     #[test]

@@ -74,6 +74,8 @@ pub(super) fn names() -> impl Iterator<Item = &'static str> {
 
 fn expand(colors: [u32; COLOR_COUNT]) -> Palette {
     let colors = colors.map(decode);
+    let ink = colors[5];
+    let muted = colors[6];
     Palette {
         canvas: colors[0],
         panel: colors[1],
@@ -81,8 +83,9 @@ fn expand(colors: [u32; COLOR_COUNT]) -> Palette {
         raised: colors[3],
         selected: colors[4],
         inactive_selected: colors[3],
-        ink: colors[5],
-        muted: colors[6],
+        ink,
+        soft: super::soft_text(ink, muted),
+        muted,
         faint: colors[7],
         accent: colors[8],
         purple: colors[9],

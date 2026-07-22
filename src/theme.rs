@@ -42,6 +42,7 @@ pub struct Palette {
     pub selected: Color,
     pub inactive_selected: Color,
     pub ink: Color,
+    pub soft: Color,
     pub muted: Color,
     pub faint: Color,
     pub accent: Color,
@@ -272,6 +273,8 @@ struct Resolver<'a> {
 
 impl Resolver<'_> {
     fn palette(&self) -> Result<Palette, ()> {
+        let ink = self.key("text")?;
+        let muted = self.key("textMuted")?;
         Ok(Palette {
             canvas: self.key("background")?,
             panel: self.key("backgroundPanel")?,
@@ -279,8 +282,9 @@ impl Resolver<'_> {
             raised: self.key("border")?,
             selected: self.key("borderActive")?,
             inactive_selected: self.key("border")?,
-            ink: self.key("text")?,
-            muted: self.key("textMuted")?,
+            ink,
+            soft: soft_text(ink, muted),
+            muted,
             faint: self.key("borderSubtle")?,
             accent: self.key("primary")?,
             purple: self.key("secondary")?,
@@ -347,6 +351,17 @@ impl Resolver<'_> {
         let color = self.value(reference, resolving);
         resolving.remove(value);
         color
+    }
+}
+
+fn soft_text(ink: Color, muted: Color) -> Color {
+    match (ink, muted) {
+        (Color::Rgb(ink_r, ink_g, ink_b), Color::Rgb(muted_r, muted_g, muted_b)) => Color::Rgb(
+            ((u16::from(ink_r) + u16::from(muted_r)) / 2) as u8,
+            ((u16::from(ink_g) + u16::from(muted_g)) / 2) as u8,
+            ((u16::from(ink_b) + u16::from(muted_b)) / 2) as u8,
+        ),
+        _ => ink,
     }
 }
 

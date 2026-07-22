@@ -7,6 +7,7 @@ use ratatui::{
     layout::Position,
     style::{Color, Modifier},
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
     App, BrowserTab, CommitMessageGenerator, GraphHitTarget, HitTarget, LeftPane, Mode,
@@ -1564,6 +1565,136 @@ fn toggles_worktree_directories_with_the_mouse() {
 }
 
 #[test]
+fn renders_colored_file_type_icons_in_the_files_view() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    for path in [
+        "main.rs",
+        "app.ts",
+        "config.json",
+        "README.md",
+        "styles.css",
+        "run.sh",
+        "asset.png",
+        "notes.xyz",
+        "readme_parser.rs",
+    ] {
+        fs::write(root.join(path), "fixture\n").unwrap();
+    }
+
+    let mut app = App::new(root.to_path_buf());
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let list = app.regions.explorer_list.unwrap();
+    let rows = app.changes.explorer_rows();
+    let repo = app.repository().unwrap();
+    for (path, symbol, color) in [
+        ("main.rs", "R", super::palette().orange),
+        ("app.ts", "T", super::palette().cyan),
+        ("config.json", "{", super::palette().yellow),
+        ("README.md", "#", super::palette().cyan),
+        ("styles.css", "#", super::palette().purple),
+        ("run.sh", ">", super::palette().green),
+        ("asset.png", "@", super::palette().purple),
+        ("notes.xyz", "?", super::palette().faint),
+        ("readme_parser.rs", "R", super::palette().orange),
+    ] {
+        let row_index = rows
+            .iter()
+            .position(|row| {
+                row.file_index
+                    .and_then(|index| repo.files.get(index))
+                    .is_some_and(|file| file == path)
+            })
+            .unwrap();
+        let row = &rows[row_index];
+        let x = list.x + UnicodeWidthStr::width(row.prefix.as_str()) as u16;
+        let y = list.y + row_index.saturating_sub(app.changes.explorer_scroll) as u16;
+        let icon = &terminal.backend().buffer()[(x, y)];
+        assert_eq!(icon.symbol(), symbol, "{path}");
+        assert_eq!(icon.fg, color, "{path}");
+    }
+}
+
+#[test]
+fn keeps_file_tree_connectors_faint_and_folder_names_bright() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    fs::create_dir_all(root.join("src/nested")).unwrap();
+    fs::write(root.join("src/nested/main.rs"), "fn main() {}\n").unwrap();
+    fs::write(root.join("root.txt"), "root\n").unwrap();
+
+    let mut app = App::new(root.to_path_buf());
+    let src = app
+        .changes
+        .explorer_rows()
+        .iter()
+        .position(|row| row.directory_path.as_deref() == Some("src"))
+        .unwrap();
+    app.changes.explorer_state.select(Some(src));
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let nested = app
+        .changes
+        .explorer_rows()
+        .iter()
+        .position(|row| row.directory_path.as_deref() == Some("src/nested"))
+        .unwrap();
+    app.changes.explorer_state.select(Some(nested));
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    let list = app.regions.explorer_list.unwrap();
+    let rows = app.changes.explorer_rows();
+    let repo = app.repository().unwrap();
+
+    let src = rows
+        .iter()
+        .position(|row| row.directory_path.as_deref() == Some("src"))
+        .unwrap();
+    let src_y = list.y + src.saturating_sub(app.changes.explorer_scroll) as u16;
+    assert_eq!(
+        terminal.backend().buffer()[(list.x + 2, src_y)].fg,
+        super::palette().ink
+    );
+
+    for path in ["root.txt", "src/nested/main.rs"] {
+        let row_index = rows
+            .iter()
+            .position(|row| {
+                row.file_index
+                    .and_then(|index| repo.files.get(index))
+                    .is_some_and(|file| file == path)
+            })
+            .unwrap();
+        let row = &rows[row_index];
+        let x = list.x + UnicodeWidthStr::width(row.prefix.as_str()) as u16 + 2;
+        let y = list.y + row_index.saturating_sub(app.changes.explorer_scroll) as u16;
+        assert_eq!(
+            terminal.backend().buffer()[(x, y)].fg,
+            super::palette().soft,
+            "{path}"
+        );
+    }
+
+    let mut saw_connector = false;
+    for (row_index, row) in rows.iter().enumerate() {
+        let y = list.y + row_index.saturating_sub(app.changes.explorer_scroll) as u16;
+        for (offset, character) in row.prefix.chars().enumerate() {
+            if !character.is_whitespace() {
+                saw_connector = true;
+                assert_eq!(
+                    terminal.backend().buffer()[(list.x + offset as u16, y)].fg,
+                    super::palette().faint
+                );
+            }
+        }
+    }
+    assert!(saw_connector);
+}
+
+#[test]
 fn colors_changed_files_in_the_files_view() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
@@ -1605,7 +1736,7 @@ fn colors_changed_files_in_the_files_view() {
             })
             .unwrap();
         let row = &rows[row_index];
-        let x = list.x + row.prefix.chars().count() as u16;
+        let x = list.x + row.prefix.chars().count() as u16 + 2;
         let y = list.y + row_index.saturating_sub(app.changes.explorer_scroll) as u16;
         assert_eq!(terminal.backend().buffer()[(x, y)].fg, expected, "{path}");
     }

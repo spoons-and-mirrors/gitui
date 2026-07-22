@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::{Alignment, Margin, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, List, ListItem, Paragraph, Wrap},
 };
@@ -1433,25 +1433,116 @@ fn worktree_item<'a>(row: &'a WorktreeRow, changes: &'a [Change], width: usize) 
 fn explorer_item(row: &ExplorerRow, change_code: Option<char>, width: usize) -> ListItem<'static> {
     if row.file_index.is_none() {
         let marker = if row.directory_expanded == Some(false) {
-            "▢ "
+            "> "
         } else {
-            "▣ "
+            "v "
         };
-        return ListItem::new(Line::styled(
-            truncate_width(&format!("{}{}{}", row.prefix, marker, row.label), width),
-            explorer_folder_style(change_code),
-        ));
+        let prefix = truncate_width(&row.prefix, width.saturating_sub(2));
+        let label_width = width
+            .saturating_sub(UnicodeWidthStr::width(prefix.as_str()))
+            .saturating_sub(2);
+        let label = truncate_width(&row.label, label_width);
+        let folder_style = explorer_folder_style(change_code);
+        return ListItem::new(Line::from(vec![
+            Span::styled(prefix, Style::default().fg(palette().faint)),
+            Span::styled(marker, folder_style),
+            Span::styled(label, folder_style),
+        ]));
     }
-    let prefix = truncate_width(&row.prefix, width);
-    let label_width = width.saturating_sub(UnicodeWidthStr::width(prefix.as_str()));
+    let icon = file_icon(&row.label);
+    let prefix = truncate_width(&row.prefix, width.saturating_sub(2));
+    let label_width = width
+        .saturating_sub(UnicodeWidthStr::width(prefix.as_str()))
+        .saturating_sub(2);
     let label = truncate_width(&row.label, label_width);
     let color = change_code
         .map(explorer_file_color)
-        .unwrap_or(palette().ink);
+        .unwrap_or(palette().soft);
     ListItem::new(Line::from(vec![
-        Span::styled(prefix, Style::default().fg(palette().ink)),
+        Span::styled(prefix, Style::default().fg(palette().faint)),
+        Span::styled(format!("{} ", icon.0), Style::default().fg(icon.1)),
         Span::styled(label, Style::default().fg(color)),
     ]))
+}
+
+fn file_icon(label: &str) -> (&'static str, Color) {
+    let name = label.to_ascii_lowercase();
+    if matches!(name.as_str(), "cargo.toml" | "cargo.lock") {
+        return ("R", palette().orange);
+    }
+    if matches!(
+        name.as_str(),
+        "package.json"
+            | "package-lock.json"
+            | "pnpm-lock.yaml"
+            | "yarn.lock"
+            | "bun.lock"
+            | "bun.lockb"
+    ) {
+        return ("J", palette().yellow);
+    }
+    if name == "readme" || name.starts_with("readme.") {
+        return ("#", palette().cyan);
+    }
+    if name == "license"
+        || name.starts_with("license.")
+        || name == "copying"
+        || name.starts_with("copying.")
+    {
+        return ("L", palette().muted);
+    }
+    if matches!(
+        name.as_str(),
+        "dockerfile" | "compose.yml" | "compose.yaml" | "containerfile"
+    ) {
+        return ("D", palette().cyan);
+    }
+    if matches!(
+        name.as_str(),
+        "makefile" | "cmakelists.txt" | "justfile" | "taskfile.yml" | "taskfile.yaml"
+    ) {
+        return ("B", palette().orange);
+    }
+    if matches!(
+        name.as_str(),
+        ".gitignore" | ".gitattributes" | ".gitmodules" | ".ignore"
+    ) {
+        return ("G", palette().muted);
+    }
+
+    let extension = name.rsplit_once('.').map_or("", |(_, extension)| extension);
+    match extension {
+        "rs" => ("R", palette().orange),
+        "js" | "jsx" | "mjs" | "cjs" => ("J", palette().yellow),
+        "ts" | "tsx" | "mts" | "cts" => ("T", palette().cyan),
+        "py" | "pyi" => ("P", palette().yellow),
+        "rb" => ("R", palette().red),
+        "go" => ("G", palette().cyan),
+        "c" | "h" | "cc" | "cpp" | "cxx" | "hh" | "hpp" => ("C", palette().purple),
+        "java" | "kt" | "kts" | "scala" => ("J", palette().red),
+        "swift" => ("S", palette().orange),
+        "ex" | "exs" | "erl" | "hrl" => ("E", palette().purple),
+        "sh" | "bash" | "zsh" | "fish" | "nu" => (">", palette().green),
+        "html" | "htm" | "xml" | "svg" => ("<", palette().orange),
+        "css" | "scss" | "sass" | "less" => ("#", palette().purple),
+        "vue" => ("V", palette().green),
+        "svelte" => ("S", palette().orange),
+        "json" | "jsonc" | "json5" => ("{", palette().yellow),
+        "toml" | "ini" | "cfg" | "conf" | "properties" | "env" => ("=", palette().yellow),
+        "yaml" | "yml" => ("Y", palette().purple),
+        "md" | "mdx" | "rst" | "adoc" => ("#", palette().cyan),
+        "txt" | "log" => ("-", palette().muted),
+        "sql" | "db" | "sqlite" | "sqlite3" => ("Q", palette().cyan),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "ico" | "bmp" | "avif" => ("@", palette().purple),
+        "mp3" | "wav" | "flac" | "ogg" | "mp4" | "mov" | "mkv" | "webm" => (">", palette().cyan),
+        "zip" | "gz" | "tgz" | "bz2" | "xz" | "zst" | "tar" | "7z" | "rar" => {
+            ("%", palette().orange)
+        }
+        "pdf" | "doc" | "docx" | "odt" => ("P", palette().red),
+        "lock" => ("*", palette().muted),
+        "wasm" | "bin" | "exe" | "dll" | "so" | "dylib" => ("!", palette().red),
+        _ => ("?", palette().faint),
+    }
 }
 
 fn explorer_file_color(code: char) -> ratatui::style::Color {
@@ -1469,7 +1560,7 @@ fn explorer_file_color(code: char) -> ratatui::style::Color {
 fn explorer_folder_style(change_code: Option<char>) -> Style {
     Style::default().fg(change_code
         .map(explorer_file_color)
-        .unwrap_or(palette().muted))
+        .unwrap_or(palette().ink))
 }
 
 fn folder_style() -> Style {
