@@ -176,13 +176,18 @@ fn run(args: &[String]) -> Result<Value, String> {
     if output.stdout_truncated {
         return Err("Herdr returned more than 4 MiB".to_owned());
     }
-    let value: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let detail = stderr.lines().find(|line| !line.trim().is_empty());
-        detail.map_or_else(
-            || format!("Could not read Herdr response: {error}"),
-            |detail| detail.trim().to_owned(),
-        )
+    decode_response(&output.stdout, &output.stderr, output.status.success())
+}
+
+fn decode_response(stdout: &[u8], stderr: &[u8], success: bool) -> Result<Value, String> {
+    if stdout.iter().all(u8::is_ascii_whitespace) {
+        if success {
+            return Ok(Value::Null);
+        }
+        return Err(stderr_detail(stderr).unwrap_or_else(|| "Herdr command failed".to_owned()));
+    }
+    let value: Value = serde_json::from_slice(stdout).map_err(|error| {
+        stderr_detail(stderr).unwrap_or_else(|| format!("Could not read Herdr response: {error}"))
     })?;
     if let Some(error) = value.get("error") {
         return Err(error
@@ -191,10 +196,17 @@ fn run(args: &[String]) -> Result<Value, String> {
             .unwrap_or("Herdr command failed")
             .to_owned());
     }
-    if !output.status.success() {
+    if !success {
         return Err("Herdr command failed".to_owned());
     }
     Ok(value)
+}
+
+fn stderr_detail(stderr: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(|line| line.trim().to_owned())
 }
 
 pub(super) fn parse_snapshot(
@@ -473,7 +485,7 @@ mod tests {
                     "result": { "neighbor": { "neighbor_pane_id": "w1:p2" } }
                 })
             } else {
-                serde_json::json!({ "result": {} })
+                Value::Null
             })
         })
         .unwrap();
@@ -490,6 +502,11 @@ mod tests {
                     .to_vec(),
             ]
         );
+    }
+
+    #[test]
+    fn accepts_an_empty_success_response() {
+        assert_eq!(decode_response(b"", b"", true).unwrap(), Value::Null);
     }
 
     #[test]
