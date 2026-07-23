@@ -256,8 +256,8 @@ impl WorkspaceFocusState {
         self.pending
             .as_ref()
             .map(|pending| pending.workspace_id.as_str())
-            .or(self.host_workspace_id.as_deref())
             .or(self.observed_workspace_id.as_deref())
+            .or(self.host_workspace_id.as_deref())
     }
 }
 
@@ -301,6 +301,7 @@ pub(crate) struct WorkspacePanel {
 
 pub(crate) struct WorkspacePanelEntryState {
     pub(crate) active: bool,
+    pub(crate) loaded: bool,
     pub(crate) selected: bool,
 }
 
@@ -1449,10 +1450,18 @@ impl WorkspacePanel {
         &self,
         index: usize,
         panel_focused: bool,
+        loaded_workspace_path: Option<&Path>,
     ) -> WorkspacePanelEntryState {
         WorkspacePanelEntryState {
             active: self.workspaces.get(index).is_some_and(|workspace| {
                 self.focus.active_workspace_id() == Some(workspace.id.as_str())
+            }),
+            loaded: self.workspaces.get(index).is_some_and(|workspace| {
+                workspace
+                    .path
+                    .as_deref()
+                    .zip(loaded_workspace_path)
+                    .is_some_and(|(workspace, loaded)| presets::same_path(workspace, loaded))
             }),
             selected: panel_focused && self.selected == Some(index),
         }
@@ -1465,6 +1474,7 @@ impl WorkspacePanel {
     ) -> WorkspacePanelEntryState {
         WorkspacePanelEntryState {
             active: self.agents.get(index).is_some_and(|agent| agent.focused),
+            loaded: false,
             selected: panel_focused
                 && self.selected == Some(self.workspaces.len().saturating_add(index)),
         }
@@ -1472,7 +1482,7 @@ impl WorkspacePanel {
 
     #[cfg(test)]
     fn workspace_is_active(&self, index: usize) -> bool {
-        self.workspace_entry_state(index, false).active
+        self.workspace_entry_state(index, false, None).active
     }
 
     fn group_for_workspace_id(&self, id: &str) -> Option<usize> {
@@ -2220,19 +2230,19 @@ mod tests {
     }
 
     #[test]
-    fn prehighlights_the_workspace_that_hosts_this_hunkle_process() {
+    fn herdr_focus_overrides_the_workspace_that_hosts_hunkle() {
         let mut panel = WorkspacePanel::ready_for_test(&snapshot());
         panel.focus.set_host(Some("w2".to_owned()));
         panel.restore_selection(None);
 
-        assert!(!panel.workspace_is_active(0));
-        assert!(panel.workspace_is_active(1));
+        assert!(panel.workspace_is_active(0));
+        assert!(!panel.workspace_is_active(1));
         assert_eq!(panel.selected, Some(1));
 
         let stale = herdr::parse_snapshot(&snapshot()).unwrap();
         panel.workspaces = stale.0;
-        assert!(!panel.workspace_is_active(0));
-        assert!(panel.workspace_is_active(1));
+        assert!(panel.workspace_is_active(0));
+        assert!(!panel.workspace_is_active(1));
     }
 
     #[test]

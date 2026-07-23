@@ -5,6 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Paragraph},
 };
+use std::path::Path;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
@@ -21,6 +22,7 @@ pub(super) fn draw(
     focused: bool,
     hovered: Option<WorkspacePanelHitTarget>,
     show_agent_harness: bool,
+    loaded_workspace_path: Option<&Path>,
 ) -> Vec<(HitTarget, Rect)> {
     fill(frame, area, palette().surface_alt);
     let mut targets = Vec::new();
@@ -137,7 +139,7 @@ pub(super) fn draw(
                 ));
             }
             WorkspacePanelRow::Workspace(index) => {
-                let state = panel.workspace_entry_state(index, focused);
+                let state = panel.workspace_entry_state(index, focused, loaded_workspace_path);
                 let workspace = &panel.workspaces[index];
                 let indent = panel.workspace_indent(index);
                 let label = format!("{indent}{}", workspace.label);
@@ -151,7 +153,8 @@ pub(super) fn draw(
                     workspace.branch.as_deref(),
                     EntryPresentation {
                         status: workspace.status,
-                        active: state.active,
+                        marker_active: state.loaded,
+                        label_active: state.active,
                         selected: state.selected || ungrouped_drop,
                         active_marker: "• ",
                         active_marker_color: palette().yellow,
@@ -266,7 +269,8 @@ pub(super) fn draw(
                     None,
                     EntryPresentation {
                         status: agent.status,
-                        active: state.active,
+                        marker_active: state.active,
+                        label_active: state.active,
                         selected: state.selected,
                         active_marker: "› ",
                         active_marker_color: palette().accent,
@@ -611,7 +615,8 @@ fn draw_workspace_header(
 
 struct EntryPresentation {
     status: AgentStatus,
-    active: bool,
+    marker_active: bool,
+    label_active: bool,
     selected: bool,
     active_marker: &'static str,
     active_marker_color: Color,
@@ -628,14 +633,15 @@ fn draw_entry(
 ) {
     let EntryPresentation {
         status,
-        active,
+        marker_active,
+        label_active,
         selected,
         active_marker,
         active_marker_color,
         active_label_color,
         spinner_frame,
     } = presentation;
-    let marker = if active { active_marker } else { "  " };
+    let marker = if marker_active { active_marker } else { "  " };
     let status_marker = status_marker(status, spinner_frame);
     let available = usize::from(area.width).saturating_sub(4);
     let branch = branch
@@ -658,7 +664,7 @@ fn draw_entry(
         Paragraph::new(Line::from(vec![
             Span::styled(
                 marker,
-                base.fg(if active {
+                base.fg(if marker_active {
                     active_marker_color
                 } else {
                     palette().faint
@@ -666,7 +672,7 @@ fn draw_entry(
             ),
             Span::styled(
                 label,
-                if active {
+                if label_active {
                     base.fg(active_label_color).add_modifier(Modifier::BOLD)
                 } else {
                     base.fg(palette().muted)

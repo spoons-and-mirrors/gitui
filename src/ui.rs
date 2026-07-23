@@ -103,6 +103,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             _ => None,
         };
         let show_agent_harness = app.settings.show_agent_harness;
+        let loaded_workspace_path = app.repository().map(|repository| repository.root.clone());
         for (target, rect) in workspace_panel::draw(
             frame,
             &mut app.workspace_panel,
@@ -110,6 +111,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             app.mode == Mode::WorkspacePanel,
             workspace_panel_hover,
             show_agent_harness,
+            loaded_workspace_path.as_deref(),
         ) {
             app.regions.register_hit_target(target, rect);
         }

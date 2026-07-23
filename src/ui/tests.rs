@@ -1696,6 +1696,64 @@ fn renders_herdr_workspaces_and_agents_as_an_app_level_rail() {
 }
 
 #[test]
+fn distinguishes_the_active_herdr_workspace_from_the_loaded_workspace() {
+    let loaded = tempfile::tempdir().unwrap();
+    let active = tempfile::tempdir().unwrap();
+    let mut app = App::new(loaded.path().to_path_buf());
+    app.settings.workspace_panel_width = 26;
+    app.workspace_panel = WorkspacePanel::ready_for_test(&serde_json::json!({
+        "result": {
+            "snapshot": {
+                "workspaces": [
+                    {
+                        "workspace_id": "active",
+                        "label": "ACTIVE",
+                        "focused": true
+                    },
+                    {
+                        "workspace_id": "loaded",
+                        "label": "LOADED",
+                        "focused": false
+                    }
+                ],
+                "agents": []
+            }
+        }
+    }));
+    app.workspace_panel.workspaces[0].path = Some(active.path().to_path_buf());
+    app.workspace_panel.workspaces[1].path = Some(loaded.path().to_path_buf());
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+
+    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+    let active_row = app
+        .regions
+        .hit_target_rect(HitTarget::WorkspacePanel(
+            WorkspacePanelHitTarget::Workspace(0),
+        ))
+        .unwrap();
+    let loaded_row = app
+        .regions
+        .hit_target_rect(HitTarget::WorkspacePanel(
+            WorkspacePanelHitTarget::Workspace(1),
+        ))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let active_marker = &buffer[(active_row.x, active_row.y)];
+    let active_label = &buffer[(active_row.x + 2, active_row.y)];
+    let loaded_marker = &buffer[(loaded_row.x, loaded_row.y)];
+    let loaded_label = &buffer[(loaded_row.x + 2, loaded_row.y)];
+
+    assert_eq!(active_marker.symbol(), " ");
+    assert_eq!(active_label.fg, super::palette().yellow);
+    assert!(active_label.modifier.contains(Modifier::BOLD));
+    assert_eq!(loaded_marker.symbol(), "•");
+    assert_eq!(loaded_marker.fg, super::palette().yellow);
+    assert_eq!(loaded_label.fg, super::palette().muted);
+    assert!(!loaded_label.modifier.contains(Modifier::BOLD));
+}
+
+#[test]
 fn toggles_worktree_directories_with_the_mouse() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
