@@ -1738,6 +1738,12 @@ impl App {
                 self.workspace_panel
                     .delete_worktree(&workspace_id, reopen_path);
             }
+            WorkspacePanelEffect::FocusWorkspace(workspace_id) => {
+                diagnostics::event(format!(
+                    "Herdr workspace focus requested workspace={workspace_id}"
+                ));
+                self.workspace_panel.start_workspace_focus(workspace_id);
+            }
             WorkspacePanelEffect::OpenWorkspace(path) => {
                 if self.workspace_focus_restore_path.is_none() {
                     self.workspace_focus_restore_path =

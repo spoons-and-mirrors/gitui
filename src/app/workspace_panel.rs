@@ -1386,17 +1386,12 @@ impl WorkspacePanel {
         false
     }
 
-    pub(crate) fn click_agent(&mut self, index: usize) {
+    pub(crate) fn click_agent(&mut self, index: usize) -> WorkspacePanelEffect {
         if !self.select_agent(index) {
-            return;
+            return WorkspacePanelEffect::None;
         }
-        let key = SelectionKey::Agent(self.agents[index].pane_id.clone());
-        if self.is_double_click(&key) {
-            self.focus_selected();
-            self.last_click = None;
-            return;
-        }
-        self.last_click = Some((key, Instant::now()));
+        self.last_click = None;
+        WorkspacePanelEffect::FocusWorkspace(self.agents[index].workspace_id.clone())
     }
 
     fn is_double_click(&self, key: &SelectionKey) -> bool {
@@ -1608,7 +1603,7 @@ impl WorkspacePanel {
         });
     }
 
-    fn start_workspace_focus(&mut self, workspace_id: String) {
+    pub(crate) fn start_workspace_focus(&mut self, workspace_id: String) {
         let request_id = self.focus.begin(workspace_id.clone());
         let sender = self.sender.clone();
         thread::spawn(move || {
@@ -1890,6 +1885,7 @@ pub(crate) enum WorkspacePanelEffect {
         path: Option<PathBuf>,
         parent_path: Option<PathBuf>,
     },
+    FocusWorkspace(String),
     OpenWorkspace(PathBuf),
     Notice(String),
 }
@@ -2177,6 +2173,19 @@ mod tests {
 
         assert!(!panel.register_workspace_click(1));
         assert!(panel.register_workspace_click(1));
+    }
+
+    #[test]
+    fn every_agent_click_requests_its_workspace() {
+        let mut panel = WorkspacePanel::ready_for_test(&snapshot());
+
+        for _ in 0..2 {
+            assert_eq!(
+                panel.click_agent(0),
+                WorkspacePanelEffect::FocusWorkspace("w1".to_owned())
+            );
+            assert_eq!(panel.selected, Some(panel.workspaces.len()));
+        }
     }
 
     #[test]

@@ -102,12 +102,23 @@ impl App {
             return;
         }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
-            && let Some(HitTarget::WorkspacePanel(WorkspacePanelHitTarget::Workspace(index))) =
-                self.regions.hit_target_at(point)
-            && self.workspace_panel.begin_workspace_drag(index)
+            && let Some(HitTarget::WorkspacePanel(target)) = self.regions.hit_target_at(point)
         {
-            self.mode = Mode::WorkspacePanel;
-            return;
+            match target {
+                WorkspacePanelHitTarget::Workspace(index)
+                    if self.workspace_panel.begin_workspace_drag(index) =>
+                {
+                    self.mode = Mode::WorkspacePanel;
+                    return;
+                }
+                WorkspacePanelHitTarget::Agent(_) => {
+                    self.selection.clear();
+                    self.mode = Mode::WorkspacePanel;
+                    self.activate_workspace_panel_target(target);
+                    return;
+                }
+                _ => {}
+            }
         }
 
         if self.file_drag.is_some() {
@@ -614,7 +625,9 @@ impl App {
                 self.apply_workspace_panel_effect(effect);
             }
             WorkspacePanelHitTarget::Agent(index) => {
-                self.workspace_panel.click_agent(index);
+                self.mode = Mode::WorkspacePanel;
+                let effect = self.workspace_panel.click_agent(index);
+                self.apply_workspace_panel_effect(effect);
             }
         }
     }
