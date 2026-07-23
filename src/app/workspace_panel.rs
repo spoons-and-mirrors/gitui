@@ -15,6 +15,10 @@ use super::TextInput;
 mod herdr;
 mod presets;
 
+pub(super) fn send_command_below(command: String) -> Result<String, String> {
+    herdr::send_command_below(command)
+}
+
 pub(crate) const DEFAULT_WIDTH: u16 = 26;
 pub(crate) const MINIMUM_WIDTH: u16 = 18;
 

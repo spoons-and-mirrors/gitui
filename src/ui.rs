@@ -226,6 +226,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             app.regions.command_overlay = Some(regions.overlay);
             app.regions.command_output = Some(regions.output);
         }
+        Mode::HerdrPrompt => {
+            dim(frame);
+            app.regions.herdr_prompt_overlay =
+                Some(overlays::draw_herdr_prompt(frame, &app.herdr_prompt));
+        }
         Mode::Editor => {
             dim(frame);
             app.regions.editor_overlay = Some(overlays::draw_editor(

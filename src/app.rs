@@ -7,6 +7,7 @@ mod explorer;
 mod file_search;
 mod files;
 mod fuzzy;
+mod herdr_prompt;
 mod mouse;
 mod repository_browser;
 mod settings;
@@ -23,6 +24,7 @@ pub use explorer::{Explorer, PickerAction, PickerEntry};
 pub(crate) use explorer::{ExplorerHitTarget, SurroundingEntry};
 pub(crate) use file_search::FileSearch;
 pub(crate) use files::{FileDialog, FileDialogKind, FileDrag, FileNameAction};
+pub(crate) use herdr_prompt::HerdrPrompt;
 pub(crate) use repository_browser::{
     BranchDeleteDialog, BrowserTab, PullRequest, RemoteItems, RepositoryBrowser,
     RepositoryBrowserEffect,
@@ -82,6 +84,7 @@ pub enum Mode {
     AuthorFilter,
     ActionMenu,
     Command,
+    HerdrPrompt,
     Editor,
     Files,
     WorkspacePanel,
@@ -184,6 +187,7 @@ pub struct Regions {
     pub action_list: Option<Rect>,
     pub command_overlay: Option<Rect>,
     pub command_output: Option<Rect>,
+    pub herdr_prompt_overlay: Option<Rect>,
     pub editor_overlay: Option<Rect>,
     pub file_search_overlay: Option<Rect>,
     pub file_search_list: Option<Rect>,
@@ -252,6 +256,7 @@ pub struct App {
     pub workspace_explorer: Explorer,
     pub(crate) file_search: FileSearch,
     pub(crate) actions: ActionsState,
+    pub(crate) herdr_prompt: HerdrPrompt,
     pub(crate) repository_browser: RepositoryBrowser,
     pub(crate) workspace_panel: WorkspacePanel,
     pub(crate) hovered_hit_target: Option<HitTarget>,
@@ -361,6 +366,7 @@ impl App {
             workspace_explorer: Explorer::new(start),
             file_search,
             actions: ActionsState::default(),
+            herdr_prompt: HerdrPrompt::default(),
             repository_browser,
             workspace_panel: WorkspacePanel::detect(
                 workspace_groups_path,
@@ -533,6 +539,7 @@ impl App {
             Mode::AuthorFilter => self.handle_author_filter(key),
             Mode::ActionMenu => self.handle_action_menu(key),
             Mode::Command => self.handle_command(key),
+            Mode::HerdrPrompt => self.handle_herdr_prompt(key),
             Mode::Editor => self.handle_editor(key),
             Mode::Files => self.handle_file_dialog(key),
             Mode::WorkspacePanel => self.handle_workspace_panel(key),
@@ -562,6 +569,10 @@ impl App {
                 if self.actions.status == CommandStatus::Input {
                     self.actions.stderr.clear();
                 }
+            }
+            Mode::HerdrPrompt if !self.herdr_prompt.sending => {
+                self.herdr_prompt.input.insert(text);
+                self.herdr_prompt.error = None;
             }
             Mode::Editor => {
                 self.editor_input.push_str(text);
@@ -613,6 +624,25 @@ impl App {
         self.prefetch_commit_summaries();
         changed |= self.commit_summaries.poll();
         changed |= self.commit_input.poll_blink(self.mode == Mode::Commit);
+        changed |= self
+            .herdr_prompt
+            .input
+            .poll_blink(self.mode == Mode::HerdrPrompt && !self.herdr_prompt.sending);
+        if let Some(completion) = self.herdr_prompt.poll() {
+            changed = true;
+            match completion {
+                Ok(pane_id) => {
+                    if self.mode == Mode::HerdrPrompt {
+                        self.mode = Mode::Normal;
+                    }
+                    self.notice = Some(format!("Sent to Herdr pane {pane_id}"));
+                }
+                Err(error) if self.mode == Mode::HerdrPrompt => {
+                    self.herdr_prompt.error = Some(error);
+                }
+                Err(error) => self.notice = Some(error),
+            }
+        }
         changed |= self.workspace_panel.snapshot_input.poll_blink(
             self.mode == Mode::WorkspacePresets && self.workspace_panel.snapshot_editing,
         );
@@ -962,6 +992,7 @@ impl App {
             return;
         }
         match key.code {
+            KeyCode::F(1) => self.open_herdr_prompt(),
             KeyCode::F(3) => self.open_file_search(),
             KeyCode::Char('s')
                 if key.modifiers.contains(KeyModifiers::CONTROL)
@@ -1373,6 +1404,56 @@ impl App {
         }
     }
 
+    fn handle_herdr_prompt(&mut self, key: KeyEvent) {
+        if matches!(key.code, KeyCode::Esc | KeyCode::F(1)) {
+            self.mode = Mode::Normal;
+            return;
+        }
+        if self.herdr_prompt.sending {
+            return;
+        }
+
+        match key.code {
+            KeyCode::Enter => self.herdr_prompt.submit(),
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.herdr_prompt.input.select_all();
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.herdr_prompt.input.clear();
+                self.herdr_prompt.error = None;
+            }
+            KeyCode::Backspace
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.herdr_prompt.input.delete_word();
+                self.herdr_prompt.error = None;
+            }
+            KeyCode::Left => self.herdr_prompt.input.move_left(),
+            KeyCode::Right => self.herdr_prompt.input.move_right(),
+            KeyCode::Home => self.herdr_prompt.input.move_home(),
+            KeyCode::End => self.herdr_prompt.input.move_end(),
+            KeyCode::Delete => {
+                self.herdr_prompt.input.delete();
+                self.herdr_prompt.error = None;
+            }
+            KeyCode::Backspace => {
+                self.herdr_prompt.input.backspace();
+                self.herdr_prompt.error = None;
+            }
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.herdr_prompt.input.insert_char(character);
+                self.herdr_prompt.error = None;
+            }
+            _ => {}
+        }
+    }
+
     fn handle_editor(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
@@ -1598,6 +1679,15 @@ impl App {
         if self.require_git_repository() {
             self.mode = Mode::ActionMenu;
         }
+    }
+
+    fn open_herdr_prompt(&mut self) {
+        if !self.workspace_panel.is_enabled() {
+            self.notice = Some("Herdr command prompt is only available inside Herdr".to_owned());
+            return;
+        }
+        self.herdr_prompt.open();
+        self.mode = Mode::HerdrPrompt;
     }
 
     fn open_repository_browser(&mut self) {
@@ -2394,7 +2484,12 @@ fn is_markdown_path(path: &RepoPath) -> bool {
 
 fn is_workspace_passthrough_shortcut(key: KeyEvent) -> bool {
     match key.code {
-        KeyCode::F(2) | KeyCode::F(3) | KeyCode::Tab | KeyCode::PageUp | KeyCode::PageDown => true,
+        KeyCode::F(1)
+        | KeyCode::F(2)
+        | KeyCode::F(3)
+        | KeyCode::Tab
+        | KeyCode::PageUp
+        | KeyCode::PageDown => true,
         KeyCode::Delete => key.modifiers.contains(KeyModifiers::CONTROL),
         KeyCode::Char('w') => key.modifiers.contains(KeyModifiers::ALT),
         KeyCode::Char(

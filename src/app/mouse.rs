@@ -177,6 +177,9 @@ impl App {
             self.handle_command_mouse(mouse);
             return;
         }
+        if self.mode == Mode::HerdrPrompt {
+            return;
+        }
         if self.mode == Mode::Editor {
             return;
         }
@@ -316,6 +319,7 @@ impl App {
     fn selection_region(&self, point: Position) -> Rect {
         [
             self.regions.command_overlay,
+            self.regions.herdr_prompt_overlay,
             self.regions.editor_overlay,
             self.regions.file_search_overlay,
             self.regions.file_dialog_overlay,
@@ -351,6 +355,7 @@ impl App {
         match self.mode {
             Mode::ActionMenu => self.handle_action_mouse(mouse),
             Mode::Command => self.handle_command_mouse(mouse),
+            Mode::HerdrPrompt => {}
             Mode::Explorer => self.handle_explorer_mouse(mouse),
             Mode::FileSearch => self.handle_file_search_mouse(mouse),
             Mode::Settings => self.handle_settings_mouse(mouse),

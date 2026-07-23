@@ -34,8 +34,9 @@ hunkle opens exactly the current or requested directory. When that directory is 
 | `e`, `E` | Open the selected file in your editor, or configure the editor |
 | `f` | Switch the left pane between Changes and Files |
 | `m` | Toggle rendered Markdown and source for Markdown files in Files |
-| `F3` | Fuzzy-search repository files from anywhere |
+| `F1` | Send a command or prompt to the Herdr pane directly below Hunkle, creating it when needed |
 | `F2` | Rename the selected file or folder in Files |
+| `F3` | Fuzzy-search repository files from anywhere |
 | `Ctrl+Delete` | Permanently delete the selected file or folder from Files after confirmation |
 | `Ctrl+S` | Format the selected file using an available file-type formatter |
 | `h`, `l`, `Left`, `Right` | Navigate the tree; Right enters/stages in hunk mode and Left exits it |

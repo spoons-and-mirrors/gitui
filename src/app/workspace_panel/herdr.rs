@@ -51,6 +51,53 @@ pub(super) fn restore(request: RestoreRequest) -> Result<Option<String>, String>
     run(&restore_args(request)).map(|value| workspace_id_in(&value))
 }
 
+pub(super) fn send_command_below(command: String) -> Result<String, String> {
+    if std::env::var("HERDR_ENV").ok().as_deref() != Some("1") {
+        return Err("Herdr command prompt is only available inside Herdr".to_owned());
+    }
+    send_command_below_with(command, run)
+}
+
+fn send_command_below_with(
+    command: String,
+    mut runner: impl FnMut(&[String]) -> Result<Value, String>,
+) -> Result<String, String> {
+    let neighbor = runner(&[
+        "pane".to_owned(),
+        "neighbor".to_owned(),
+        "--direction".to_owned(),
+        "down".to_owned(),
+        "--current".to_owned(),
+    ])?;
+    let pane_id = if let Some(pane_id) = neighbor
+        .pointer("/result/neighbor/neighbor_pane_id")
+        .and_then(Value::as_str)
+    {
+        pane_id.to_owned()
+    } else {
+        let split = runner(&[
+            "pane".to_owned(),
+            "split".to_owned(),
+            "--current".to_owned(),
+            "--direction".to_owned(),
+            "down".to_owned(),
+            "--no-focus".to_owned(),
+        ])?;
+        split
+            .pointer("/result/pane/pane_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| "Herdr did not identify the new pane".to_owned())?
+    };
+    runner(&[
+        "pane".to_owned(),
+        "run".to_owned(),
+        pane_id.clone(),
+        command,
+    ])?;
+    Ok(pane_id)
+}
+
 fn environment_from(enabled: Option<&str>, workspace_id: Option<String>) -> Option<Environment> {
     (enabled == Some("1")).then_some(Environment { workspace_id })
 }
@@ -413,6 +460,72 @@ mod tests {
                 "--no-focus",
             ]
             .map(str::to_owned)
+        );
+    }
+
+    #[test]
+    fn sends_to_an_existing_pane_below() {
+        let mut calls = Vec::new();
+        let pane_id = send_command_below_with("cargo test --lib".to_owned(), |args| {
+            calls.push(args.to_vec());
+            Ok(if calls.len() == 1 {
+                serde_json::json!({
+                    "result": { "neighbor": { "neighbor_pane_id": "w1:p2" } }
+                })
+            } else {
+                serde_json::json!({ "result": {} })
+            })
+        })
+        .unwrap();
+
+        assert_eq!(pane_id, "w1:p2");
+        assert_eq!(
+            calls,
+            vec![
+                ["pane", "neighbor", "--direction", "down", "--current"]
+                    .map(str::to_owned)
+                    .to_vec(),
+                ["pane", "run", "w1:p2", "cargo test --lib"]
+                    .map(str::to_owned)
+                    .to_vec(),
+            ]
+        );
+    }
+
+    #[test]
+    fn creates_a_pane_below_before_sending() {
+        let mut calls = Vec::new();
+        let pane_id = send_command_below_with("review this".to_owned(), |args| {
+            calls.push(args.to_vec());
+            Ok(match calls.len() {
+                1 => serde_json::json!({ "result": { "neighbor": {} } }),
+                2 => serde_json::json!({ "result": { "pane": { "pane_id": "w1:p3" } } }),
+                _ => serde_json::json!({ "result": {} }),
+            })
+        })
+        .unwrap();
+
+        assert_eq!(pane_id, "w1:p3");
+        assert_eq!(
+            calls,
+            vec![
+                ["pane", "neighbor", "--direction", "down", "--current"]
+                    .map(str::to_owned)
+                    .to_vec(),
+                [
+                    "pane",
+                    "split",
+                    "--current",
+                    "--direction",
+                    "down",
+                    "--no-focus",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+                ["pane", "run", "w1:p3", "review this"]
+                    .map(str::to_owned)
+                    .to_vec(),
+            ]
         );
     }
 
