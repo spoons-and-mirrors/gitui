@@ -6,12 +6,17 @@ mod git;
 mod process;
 mod repo_path;
 mod repository_session;
+#[cfg(unix)]
+mod restart;
 mod selection;
 mod theme;
 mod tree;
 mod ui;
 
 use std::{io, path::PathBuf, process::Command, thread, time::Duration};
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 use anyhow::Result;
 use app::{App, EditorRequest};
@@ -44,16 +49,50 @@ fn main() -> Result<()> {
         ));
     }
     install_panic_hook();
+    #[cfg(unix)]
+    let mut restart_coordinator = match restart::RestartCoordinator::start() {
+        Ok(coordinator) => Some(coordinator),
+        Err(error) => {
+            diagnostics::event(format!("restart coordination unavailable error={error}"));
+            None
+        }
+    };
     let mut terminal = start_terminal()?;
     let _guard = TerminalGuard;
-    let mut app = App::opening(path);
+    let mut app = App::opening(path.clone());
     let mut dirty = true;
+    let mut restart_request: Option<PathBuf> = None;
+    let mut restarting = false;
 
     while !app.should_quit {
         dirty |= {
             let _activity = diagnostics::activity("poll-workers", app.diagnostic_context());
             app.poll_worker()
         };
+        #[cfg(unix)]
+        if restart_request.is_none()
+            && let Some(coordinator) = restart_coordinator.as_mut()
+        {
+            match coordinator.poll() {
+                Ok(Some(executable)) => restart_request = Some(executable),
+                Ok(None) => {}
+                Err(error) => {
+                    diagnostics::event(format!("restart coordination failed error={error}"));
+                    restart_coordinator = None;
+                }
+            }
+        }
+        if restart_request.is_some() {
+            if app.can_restart() {
+                restarting = true;
+                break;
+            }
+            let notice = "Update ready; restarting after the current operation…";
+            if app.notice.as_deref() != Some(notice) {
+                app.notice = Some(notice.to_owned());
+                dirty = true;
+            }
+        }
         if dirty {
             let _activity = diagnostics::activity("draw", app.diagnostic_context());
             terminal.draw(|frame| ui::draw(frame, &mut app))?;
@@ -136,6 +175,22 @@ fn main() -> Result<()> {
         thread::sleep(Duration::from_millis(100));
     }
     diagnostics::event("shutdown clean".to_owned());
+
+    #[cfg(unix)]
+    if restarting && let Some(executable) = restart_request {
+        let workspace = app
+            .repository()
+            .map(|repository| repository.root.clone())
+            .unwrap_or(path);
+        diagnostics::event(format!(
+            "restarting executable={} workspace={}",
+            executable.display(),
+            workspace.display()
+        ));
+        restore_terminal();
+        let error = Command::new(executable).arg(workspace).exec();
+        return Err(error.into());
+    }
 
     Ok(())
 }

@@ -503,6 +503,10 @@ impl App {
         self.session.format_running()
     }
 
+    pub(crate) fn can_restart(&self) -> bool {
+        self.session.can_restart() && !self.commit_message_running()
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) {
         self.session.note_activity();
         if self.selection.has_selection() {

@@ -385,6 +385,13 @@ impl RepositorySession {
         self.operations.can_start(Operation::Load(LoadKind::Open))
     }
 
+    pub(crate) fn can_restart(&self) -> bool {
+        self.operations.foreground.is_none()
+            && !self.operations.fetching
+            && !self.operations.checking_status
+            && self.operations.loading.is_none()
+    }
+
     pub(crate) fn start_open(&mut self, path: PathBuf, fetch_interval: Duration) -> bool {
         self.start_load(
             path,
